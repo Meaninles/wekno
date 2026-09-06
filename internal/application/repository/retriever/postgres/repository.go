@@ -333,6 +333,17 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		})
 	}
 
+	for _, exclusion := range []struct {
+		column string
+		ids    []string
+	}{
+		{"chunk_id", params.ExcludeChunkIDs}, {"knowledge_id", params.ExcludeKnowledgeIDs},
+	} {
+		if len(exclusion.ids) > 0 {
+			conds = append(conds, clause.Not(clause.IN{Column: exclusion.column, Values: common.ToInterfaceSlice(exclusion.ids)}))
+		}
+	}
+
 	// Use ParadeDB's ||| operator for matching any token
 	conds = append(conds, clause.Expr{
 		SQL:  "content ||| ?",
@@ -467,6 +478,23 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		}
 		whereParts = append(whereParts, fmt.Sprintf("tag_id IN (%s)",
 			strings.Join(placeholders, ", ")))
+	}
+
+	for _, exclusion := range []struct {
+		column string
+		ids    []string
+	}{
+		{"chunk_id", params.ExcludeChunkIDs}, {"knowledge_id", params.ExcludeKnowledgeIDs},
+	} {
+		if len(exclusion.ids) == 0 {
+			continue
+		}
+		placeholders := make([]string, len(exclusion.ids))
+		for i, id := range exclusion.ids {
+			placeholders[i] = fmt.Sprintf("$%d", len(allVars)+1)
+			allVars = append(allVars, id)
+		}
+		whereParts = append(whereParts, exclusion.column+" NOT IN ("+strings.Join(placeholders, ", ")+")")
 	}
 
 	// is_enabled filter
@@ -779,6 +807,7 @@ func (g *pgRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkS
 	if len(enabledChunkIDs) > 0 {
 		result := g.db.WithContext(ctx).Model(&pgVector{}).
 			Where("chunk_id IN ?", enabledChunkIDs).
+			Where("is_enabled IS DISTINCT FROM ?", true).
 			Update("is_enabled", true)
 		if result.Error != nil {
 			logger.GetLogger(ctx).Errorf("[Postgres] Failed to update enabled chunks: %v", result.Error)
@@ -792,6 +821,7 @@ func (g *pgRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkS
 	if len(disabledChunkIDs) > 0 {
 		result := g.db.WithContext(ctx).Model(&pgVector{}).
 			Where("chunk_id IN ?", disabledChunkIDs).
+			Where("is_enabled IS DISTINCT FROM ?", false).
 			Update("is_enabled", false)
 		if result.Error != nil {
 			logger.GetLogger(ctx).Errorf("[Postgres] Failed to update disabled chunks: %v", result.Error)

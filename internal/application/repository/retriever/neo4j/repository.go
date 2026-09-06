@@ -23,7 +23,7 @@ type Neo4jRepository struct {
 
 const (
 	graphEntityBaseLabel          = "ENTITY"
-	graphEntityIdentityConstraint = "weknora_graph_entity_identity"
+	graphEntityIdentityConstraint = "weknora_graph_generation_identity"
 )
 
 // NewNeo4jRepository creates a new Neo4j repository
@@ -68,6 +68,9 @@ func (n *Neo4jRepository) AddGraph(ctx context.Context, namespace types.NameSpac
 		logger.Warnf(ctx, "NOT SUPPORT RETRIEVE GRAPH")
 		return nil
 	}
+	if namespace.Generation == nil || *namespace.Generation == "" {
+		return fmt.Errorf("graph write requires processing generation")
+	}
 	if err := n.ensureGraphSchema(ctx); err != nil {
 		return err
 	}
@@ -95,8 +98,15 @@ func (n *Neo4jRepository) ensureGraphSchema(ctx context.Context) error {
 
 	session := n.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
+	removed, err := session.Run(ctx, "DROP CONSTRAINT weknora_graph_entity_identity IF EXISTS", nil)
+	if err != nil {
+		return err
+	}
+	if _, err = removed.Consume(ctx); err != nil {
+		return err
+	}
 	query := fmt.Sprintf(
-		"CREATE CONSTRAINT %s IF NOT EXISTS FOR (n:%s) REQUIRE (n.kg, n.name) IS UNIQUE",
+		"CREATE CONSTRAINT %s IF NOT EXISTS FOR (n:%s) REQUIRE (n.kg, n.generation, n.name) IS UNIQUE",
 		graphEntityIdentityConstraint,
 		graphEntityBaseLabel,
 	)
@@ -120,7 +130,7 @@ func (n *Neo4jRepository) addGraph(ctx context.Context, namespace types.NameSpac
 		// Node import query
 		node_import_query := `
 			UNWIND $data AS row
-			CALL apoc.merge.node(row.labels, {name: row.name, kg: row.knowledge_id}, row.props, {}) YIELD node
+			CALL apoc.merge.node(row.labels, {name: row.name, kg: row.knowledge_id, generation: row.generation}, row.props, {}) YIELD node
 			SET node.chunks = apoc.coll.union(node.chunks, row.chunks)
 			RETURN distinct 'done' AS result
 		`
@@ -132,6 +142,7 @@ func (n *Neo4jRepository) addGraph(ctx context.Context, namespace types.NameSpac
 			nodeData = append(nodeData, map[string]interface{}{
 				"name":         strings.TrimSpace(node.Name),
 				"knowledge_id": namespace.Knowledge,
+				"generation":   *namespace.Generation,
 				"props":        map[string][]string{"attributes": node.Attributes},
 				"chunks":       node.Chunks,
 				"labels":       n.Labels(namespace),
@@ -146,8 +157,8 @@ func (n *Neo4jRepository) addGraph(ctx context.Context, namespace types.NameSpac
 		// Relationship import query
 		rel_import_query := `
 			UNWIND $data AS row
-			CALL apoc.merge.node(row.source_labels, {name: row.source, kg: row.knowledge_id}, {}, {}) YIELD node as source
-			CALL apoc.merge.node(row.target_labels, {name: row.target, kg: row.knowledge_id}, {}, {}) YIELD node as target
+			CALL apoc.merge.node(row.source_labels, {name: row.source, kg: row.knowledge_id, generation: row.generation}, {}, {}) YIELD node as source
+			CALL apoc.merge.node(row.target_labels, {name: row.target, kg: row.knowledge_id, generation: row.generation}, {}, {}) YIELD node as target
 			CALL apoc.merge.relationship(source, row.type, {}, row.attributes, target) YIELD rel
 			RETURN distinct 'done'
 		`
@@ -163,6 +174,7 @@ func (n *Neo4jRepository) addGraph(ctx context.Context, namespace types.NameSpac
 				"source":        strings.TrimSpace(rel.Node1),
 				"target":        strings.TrimSpace(rel.Node2),
 				"knowledge_id":  namespace.Knowledge,
+				"generation":    *namespace.Generation,
 				"type":          strings.TrimSpace(rel.Type),
 				"source_labels": n.Labels(namespace),
 				"target_labels": n.Labels(namespace),
@@ -191,40 +203,45 @@ func (n *Neo4jRepository) DelGraph(ctx context.Context, namespaces []types.NameS
 	session := n.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		for _, namespace := range namespaces {
-			labelExpr := n.Label(namespace)
-
-			deleteRelsQuery := `
-				CALL apoc.periodic.iterate(
-					"MATCH (n:` + labelExpr + ` {kg: $knowledge_id})-[r]-(m:` + labelExpr + ` {kg: $knowledge_id}) RETURN r",
-					"DELETE r",
-					{batchSize: 1000, parallel: true, params: {knowledge_id: $knowledge_id}}
-				) YIELD batches, total
-				RETURN total
-        	`
-			if _, err := tx.Run(ctx, deleteRelsQuery, map[string]interface{}{"knowledge_id": namespace.Knowledge}); err != nil {
-				return nil, fmt.Errorf("failed to delete relationships: %v", err)
+	for _, namespace := range namespaces {
+		generation := ""
+		if namespace.Generation != nil {
+			generation = *namespace.Generation
+		}
+		params := map[string]interface{}{"knowledge_id": namespace.Knowledge, "generation": generation, "all_generations": namespace.Generation == nil}
+		// Each page is a real transaction whose failure propagates to the durable
+		// retirement receipt. APOC's failedBatches must not be mistaken for success.
+		query := `MATCH (n:` + n.Label(namespace) + ` {kg: $knowledge_id})
+			WHERE $all_generations OR coalesce(n.generation, '') = $generation
+			WITH n LIMIT 1000 DETACH DELETE n RETURN count(n) AS deleted`
+		for {
+			deleted, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+				result, err := tx.Run(ctx, query, params)
+				if err != nil {
+					return nil, err
+				}
+				record, err := result.Single(ctx)
+				if err != nil {
+					return nil, err
+				}
+				count, ok := record.Get("deleted")
+				if !ok {
+					return nil, fmt.Errorf("graph deletion returned no receipt")
+				}
+				return count, nil
+			})
+			if err != nil {
+				return fmt.Errorf("delete graph generation: %w", err)
 			}
-
-			deleteNodesQuery := `
-				CALL apoc.periodic.iterate(
-					"MATCH (n:` + labelExpr + ` {kg: $knowledge_id}) RETURN n",
-					"DELETE n",
-					{batchSize: 1000, parallel: true, params: {knowledge_id: $knowledge_id}}
-				) YIELD batches, total
-				RETURN total
-        	`
-			if _, err := tx.Run(ctx, deleteNodesQuery, map[string]interface{}{"knowledge_id": namespace.Knowledge}); err != nil {
-				return nil, fmt.Errorf("failed to delete nodes: %v", err)
+			count, ok := deleted.(int64)
+			if !ok {
+				return fmt.Errorf("graph deletion returned invalid count %T", deleted)
+			}
+			if count < 1000 {
+				break
 			}
 		}
-		return nil, nil
-	})
-	if err != nil {
-		return err
 	}
-	logger.Infof(ctx, "delete graph result: %v", result)
 	return nil
 }
 

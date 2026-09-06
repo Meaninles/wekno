@@ -57,6 +57,11 @@ func (e *AgentEngine) streamLLMToEventBus(
 	emitFunc func(chunk *types.StreamResponse, fullContent string),
 ) (*streamLLMResult, error) {
 	logger.Debugf(ctx, "[Agent][Stream] Starting LLM stream with %d messages", len(messages))
+	bounded, budgetErr := conversationmemory.BoundMessages(ctx, messages, opts.Tools, e.config.MaxContextTokens, opts.MaxCompletionTokens)
+	if budgetErr != nil {
+		return nil, budgetErr
+	}
+	messages = bounded
 
 	llmCtx, llmCancel := context.WithTimeout(ctx, e.getLLMCallTimeout())
 	defer llmCancel()
@@ -71,6 +76,7 @@ func (e *AgentEngine) streamLLMToEventBus(
 	chunkCount := 0
 	responseTypeCounts := make(map[string]int)
 	firstChunkTime := time.Time{}
+	completed := false
 
 	for chunk := range stream {
 		chunkCount++
@@ -92,7 +98,7 @@ func (e *AgentEngine) streamLLMToEventBus(
 			if !isExtracted {
 				if chunk.ResponseType == types.ResponseTypeThinking {
 					result.ReasoningContent += chunk.Content
-				} else {
+				} else if chunk.ResponseType == types.ResponseTypeAnswer {
 					result.Content += chunk.Content
 				}
 			}
@@ -109,6 +115,7 @@ func (e *AgentEngine) streamLLMToEventBus(
 		if chunk.FinishReason != "" {
 			result.FinishReason = chunk.FinishReason
 		}
+		completed = completed || (chunk.Done && chunk.ResponseType != types.ResponseTypeThinking)
 
 		if emitFunc != nil {
 			emitFunc(&chunk, result.Content)
@@ -125,10 +132,15 @@ func (e *AgentEngine) streamLLMToEventBus(
 		chunkCount, len(result.Content), len(result.ToolCalls),
 		streamDuration.Milliseconds(), responseTypeCounts)
 
-	// If the stream produced an error and no usable content/tool calls,
-	// surface it as a Go error so the caller can retry or degrade gracefully.
-	if result.StreamError != "" && result.Content == "" && len(result.ToolCalls) == 0 {
+	// Partial text or a partial tool call is never a completed protocol result.
+	if result.StreamError != "" {
 		return result, fmt.Errorf("LLM stream error: %s", result.StreamError)
+	}
+	if err := llmCtx.Err(); err != nil {
+		return result, err
+	}
+	if !completed {
+		return result, fmt.Errorf("LLM stream ended without a completion event")
 	}
 
 	return result, nil
@@ -171,8 +183,6 @@ func (e *AgentEngine) streamThinkingToEventBus(
 	//   - candidateAnswer buffers terminal text until the complete response can
 	//     pass a protocol-only integrity check. Tool progress and reasoning still
 	//     stream live; only the final answer waits for provider completion.
-	splitter := agenttools.NewThinkStreamSplitter()
-	projector := conversationmemory.NewTerminalAnswerProjector()
 	thinkingOpen := false
 	answerStreamed := false
 	var candidateAnswer strings.Builder
@@ -292,25 +302,10 @@ func (e *AgentEngine) streamThinkingToEventBus(
 				return
 			}
 
-			// Plain content channel. Buffer it until the completed response proves
-			// this is a terminal, protocol-valid answer. Tool-use preambles stay in
-			// AgentStep history and never enter the answer surface. Split inline
-			// <think> reasoning into the thought area while it is still live.
-			if chunk.Content != "" {
-				thinkPart, answerPart := splitter.Feed(chunk.Content)
-				if thinkPart != "" {
-					thinkingOpen = true
-					emitThought(thinkPart, false)
-				}
-				candidateAnswer.WriteString(projector.Feed(answerPart))
+			if chunk.ResponseType == types.ResponseTypeAnswer {
+				candidateAnswer.WriteString(chunk.Content)
 			}
 			if chunk.Done {
-				thinkPart, answerPart := splitter.Flush()
-				if thinkPart != "" {
-					thinkingOpen = true
-					emitThought(thinkPart, false)
-				}
-				candidateAnswer.WriteString(projector.Feed(answerPart))
 				closeThinking()
 			}
 		},
@@ -323,32 +318,15 @@ func (e *AgentEngine) streamThinkingToEventBus(
 	// Use the provider's actual finish reason. A few compatible providers omit
 	// it on an otherwise complete stream, so retain the historical stop fallback.
 	finishReason := llmResult.FinishReason
-	if finishReason == "" {
-		finishReason = "stop"
-	}
 
 	// Emit diagnostics: helps identify when answer content went to "thought" vs "final_answer" events
 	logger.Infof(ctx, "[Agent][Thinking] Iteration-%d completed: content=%d chars, tool_calls=%d, emitted_events=%v",
 		iteration+1, len(llmResult.Content), len(llmResult.ToolCalls), emittedEventTypes)
 
-	// A no-envelope response is buffered until we know whether this round calls
-	// a tool. That prevents a tool-use preamble from arriving in the answer area
-	// after the tool event that would normally retract it. Terminal rounds fail
-	// open to their complete plain text; operational rounds keep that text only
-	// in AgentStep history.
-	if len(llmResult.ToolCalls) == 0 {
-		candidateAnswer.WriteString(projector.Flush())
-	} else {
-		_ = projector.Flush()
-	}
 	closeThinking()
-	fullContent := agenttools.StripThinkBlocks(llmResult.Content)
-	if len(llmResult.ToolCalls) == 0 && candidateAnswer.Len() > 0 {
-		fullContent = candidateAnswer.String()
-	} else if len(llmResult.ToolCalls) == 0 {
-		fullContent = conversationmemory.ProjectTerminalAnswer(
-			fullContent,
-		)
+	fullContent := candidateAnswer.String()
+	if len(llmResult.ToolCalls) > 0 {
+		fullContent = llmResult.Content
 	}
 	if len(llmResult.ToolCalls) == 0 && isSuccessfulTerminalFinishReason(finishReason) {
 		// Natural-stop answers previously bypassed the citation finalization used
@@ -361,15 +339,8 @@ func (e *AgentEngine) streamThinkingToEventBus(
 			logger.Warnf(ctx, "[Agent][Citations] filtered invalid natural-stop citation protocol: forbidden=%d incomplete=%d unknown=%v",
 				citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
 		}
-		if reason := conversationmemory.TerminalAnswerIntegrityReason(fullContent); reason == "" {
+		if strings.TrimSpace(fullContent) != "" {
 			emitAnswer(fullContent)
-		} else {
-			logger.Warnf(ctx, "[Agent][Thinking] Iteration-%d withheld terminal answer: %s",
-				iteration+1, reason)
-			common.PipelineWarn(ctx, "Agent", "terminal_answer_integrity_failed", map[string]interface{}{
-				"iteration": iteration,
-				"reason":    reason,
-			})
 		}
 	} else if len(llmResult.ToolCalls) == 0 && strings.TrimSpace(fullContent) != "" {
 		logger.Warnf(ctx, "[Agent][Thinking] Iteration-%d withheld non-terminal answer: finish_reason=%s",
@@ -397,11 +368,11 @@ func (e *AgentEngine) streamThinkingToEventBus(
 // Returns nil response (with state.IsComplete=true) when graceful degradation succeeds.
 // Returns a non-nil error only when the call fails irrecoverably.
 func (e *AgentEngine) callLLMWithRetry(
-	ctx context.Context, messages []chat.Message, tools []chat.Tool,
+	ctx context.Context, messagesPtr *[]chat.Message, tools []chat.Tool,
 	state *types.AgentState, query string, iteration int, sessionID string,
 ) (*types.ChatResponse, error) {
 	round := iteration + 1
-	messages = e.prepareCitationAwareGenerationMessages(messages)
+	messages := *messagesPtr
 
 	// Log message summary; only detail the tail messages to avoid repeating what prior rounds already logged
 	const maxDetailMsgs = 4
@@ -469,77 +440,18 @@ func (e *AgentEngine) callLLMWithRetry(
 			}
 		}
 	}
-	if err == nil && response != nil && len(response.ToolCalls) == 0 &&
-		isOutputLimitFinishReason(response.FinishReason) {
-		state.TerminalRecoveryReason = "output_limit"
-		state.TerminalRecoveryAttempts++
-		logger.Warnf(ctx, "[Agent][Round-%d] Provider output limit reached; replacing partial draft once without tools", round)
-		common.PipelineWarn(ctx, "Agent", "terminal_output_limit_retry", map[string]interface{}{
-			"iteration":     iteration,
-			"finish_reason": response.FinishReason,
-			"attempt":       state.TerminalRecoveryAttempts,
-		})
-		retryMessages := append([]chat.Message(nil), messages...)
-		retryMessages = append(retryMessages, chat.Message{
-			Role:    "user",
-			Content: conversationmemory.TerminalOutputLimitRetryDirective(),
-		})
-		retryMessages = agenttools.SanitizeMessages(retryMessages)
-		response, err = e.streamThinkingToEventBus(ctx, retryMessages, nil, iteration, sessionID)
-		if err != nil || response == nil || len(response.ToolCalls) > 0 ||
-			!isSuccessfulTerminalFinishReason(response.FinishReason) {
-			state.TerminalRecoveryFailed = true
-			failureReason := "terminal_output_limit_retry_failed"
-			if err != nil {
-				failureReason = err.Error()
-			} else if response != nil {
-				failureReason = "terminal_output_limit_retry_finish_" + normalizedFinishReason(response.FinishReason)
-			}
-			logger.Errorf(ctx, "[Agent][Round-%d] Output-limit retry unusable: %s", round, failureReason)
-			response = &types.ChatResponse{
-				Content: conversationmemory.TerminalIntegrityFallback(
-					types.LanguageNameFromContext(ctx),
-				),
-				FinishReason: "stop",
-			}
-			err = nil
+	if err == nil && response != nil {
+		reason := conversationmemory.ResponseRecoveryReason(response.FinishReason, response.Content, len(response.ToolCalls) > 0)
+		if resumed, ok := conversationmemory.RecoverResponse(ctx, messages, reason); ok {
+			*messagesPtr = resumed
+			common.PipelineInfo(ctx, "Agent", "response_recovery", map[string]interface{}{"reason": reason, "round": round})
+			response, err = e.streamThinkingToEventBus(ctx, resumed, tools, iteration, sessionID)
 		}
-	}
-	if err == nil && response != nil && len(response.ToolCalls) == 0 &&
-		strings.TrimSpace(response.Content) != "" {
-		if reason := conversationmemory.TerminalAnswerIntegrityReason(response.Content); reason != "" {
-			logger.Warnf(ctx, "[Agent][Round-%d] Terminal answer integrity failure (%s), retrying once without tools",
-				round, reason)
-			common.PipelineWarn(ctx, "Agent", "terminal_answer_integrity_retry", map[string]interface{}{
-				"iteration": iteration,
-				"reason":    reason,
-				"attempt":   1,
-			})
-			retryMessages := append([]chat.Message(nil), messages...)
-			retryMessages = append(retryMessages, chat.Message{
-				Role:    "user",
-				Content: conversationmemory.TerminalIntegrityRetryDirective(),
-			})
-			retryMessages = agenttools.SanitizeMessages(retryMessages)
-			response, err = e.streamThinkingToEventBus(ctx, retryMessages, nil, iteration, sessionID)
-			if err != nil || response == nil || len(response.ToolCalls) > 0 ||
-				conversationmemory.TerminalAnswerIntegrityReason(response.Content) != "" {
-				failureReason := "terminal_integrity_retry_failed"
-				if err != nil {
-					failureReason = err.Error()
-				} else if response != nil && len(response.ToolCalls) > 0 {
-					failureReason = "terminal_integrity_retry_requested_tool"
-				} else if response != nil {
-					failureReason = conversationmemory.TerminalAnswerIntegrityReason(response.Content)
-				}
-				logger.Errorf(ctx, "[Agent][Round-%d] Terminal answer retry unusable: %s", round, failureReason)
-				response = &types.ChatResponse{
-					Content: conversationmemory.TerminalIntegrityFallback(
-						types.LanguageNameFromContext(ctx),
-					),
-					FinishReason: "stop",
-				}
-				err = nil
+		if err == nil && response != nil {
+			if len(response.ToolCalls) == 0 {
+				err = chat.ValidateTerminal(response.Content, response.FinishReason)
+			} else if isOutputLimitFinishReason(response.FinishReason) {
+				err = fmt.Errorf("incomplete tool response: %s", response.FinishReason)
 			}
 		}
 	}
@@ -549,24 +461,6 @@ func (e *AgentEngine) callLLMWithRetry(
 			"iteration": iteration,
 			"error":     err.Error(),
 		})
-
-		// Graceful degradation: if we have tool results from previous rounds,
-		// try to synthesize a final answer from them instead of losing everything.
-		if totalTC := countTotalToolCalls(state.RoundSteps); totalTC > 0 {
-			logger.Warnf(ctx, "[Agent] LLM failed but have %d steps with %d tool calls — "+
-				"attempting final answer synthesis from existing results",
-				len(state.RoundSteps), totalTC)
-			common.PipelineWarn(ctx, "Agent", "llm_failed_synthesizing", map[string]interface{}{
-				"steps":      len(state.RoundSteps),
-				"tool_calls": totalTC,
-			})
-			if synthErr := e.streamFinalAnswerToEventBus(ctx, query, state, sessionID, messages); synthErr != nil {
-				logger.Errorf(ctx, "[Agent] Final answer synthesis also failed: %v", synthErr)
-				return nil, fmt.Errorf("LLM call failed: %w (synthesis also failed: %v)", err, synthErr)
-			}
-			state.IsComplete = true
-			return nil, nil // graceful degradation succeeded
-		}
 
 		return nil, fmt.Errorf("LLM call failed: %w", err)
 	}

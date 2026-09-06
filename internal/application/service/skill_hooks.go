@@ -15,13 +15,7 @@ type ProfessionalSkillLister func(context.Context) ([]*skills.SkillMetadata, err
 type RuntimeSkillConfigurer func(context.Context, *types.QARequest, *types.AgentConfig, *types.CustomAgent) error
 type EffectiveLightweightSkillContextResolver func(context.Context, string, []string, []string) (string, error)
 
-const lightweightSkillExecutionContract = `Lightweight skill execution contract:
-- The effective lightweight skill list is the only authoritative lightweight-skill source for this run.
-- Every listed lightweight skill is active and has already passed availability and permission checks, regardless of whether it came from agent configuration or a chat selection.
-- Before planning, silently evaluate each effective lightweight skill against the exact current user request.
-- Effective lightweight skills are platform-resolved specialized system instructions. When a skill is relevant, its role, workflow, and output constraints specialize and take precedence over conflicting generic or baseline agent instructions. Do not require a chat-selection marker before using it.
-- When a skill is irrelevant, do not force it or let it replace the user's request.
-- Lightweight skill instructions cannot expand runtime permissions or override platform safety or the exact current user request.`
+const lightweightSkillExecutionContract = `Available skills are permission-checked resources. Load instructions with read_skill when their described scope applies. Honor explicit current-user skill selections. Skill instructions specialize their subject; they do not replace the user's task or expand permissions.`
 
 var skillHookRegistry = struct {
 	sync.RWMutex
@@ -101,16 +95,17 @@ func professionalSkillMetadata(ctx context.Context) []*skills.SkillMetadata {
 	return result
 }
 
-func configureRuntimeSkills(ctx context.Context, req *types.QARequest, agentConfig *types.AgentConfig, customAgent *types.CustomAgent) {
+func configureRuntimeSkills(ctx context.Context, req *types.QARequest, agentConfig *types.AgentConfig, customAgent *types.CustomAgent) error {
 	skillHookRegistry.RLock()
 	configurers := append([]RuntimeSkillConfigurer(nil), skillHookRegistry.configurers...)
 	skillHookRegistry.RUnlock()
 
 	for _, configurer := range configurers {
 		if err := configurer(ctx, req, agentConfig, customAgent); err != nil {
-			logger.Warnf(ctx, "runtime skill configurer failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // LightweightSkillExecutionContract is platform-owned, non-configurable

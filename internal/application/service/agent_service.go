@@ -262,9 +262,6 @@ func (s *agentService) createToolRegistry(
 		return nil, nil, fmt.Errorf("chat model is nil after initialization")
 	}
 	toolRegistry := tools.NewToolRegistry()
-	if config.MaxToolOutputChars > 0 {
-		toolRegistry.SetMaxToolOutputSize(config.MaxToolOutputChars)
-	}
 	if err := s.registerTools(ctx, toolRegistry, config, rerankModel, chatModel, sessionID); err != nil {
 		return nil, nil, fmt.Errorf("failed to register tools: %w", err)
 	}

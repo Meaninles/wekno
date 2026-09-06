@@ -2,15 +2,11 @@ package chatpipeline
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"math"
-	"regexp"
-	"sort"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/models/rerank"
-	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -112,7 +108,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 			"threshold":         chatManage.RerankThreshold,
 			"rerank_top_k":      chatManage.RerankTopK,
 			"faq_priority":      chatManage.FAQPriorityEnabled,
-			"faq_score_boost":   chatManage.FAQScoreBoost,
 			"passages_preview":  passagesPreview,
 		},
 		Metadata: map[string]interface{}{
@@ -134,7 +129,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 
 	var rerankResp []rerank.RankResult
 	var rawRerankResp []rerank.RankResult
-	thresholdDegraded := false
 
 	// Only call rerank model if there are candidates
 	if len(candidatesToRerank) > 0 {
@@ -158,12 +152,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 			return ErrRerank.WithError(rerankErr)
 		}
 		rawRerankResp = append([]rerank.RankResult(nil), rerankResp...)
-		rerankResp, thresholdDegraded = retainRerankRecallFloor(
-			rerankResp,
-			len(candidatesToRerank),
-			chatManage.RerankThreshold,
-			chatManage.RerankTopK,
-		)
 	}
 
 	pipelineInfo(ctx, "Rerank", "model_response", map[string]interface{}{
@@ -187,22 +175,7 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		sr.Metadata["base_score"] = fmt.Sprintf("%.4f", base)
 		modelScore := rr.RelevanceScore
 		sr.Metadata["model_score"] = fmt.Sprintf("%.4f", modelScore)
-		sr.Score = compositeScore(sr, modelScore, base)
-
-		// Apply FAQ score boost if enabled
-		if chatManage.FAQPriorityEnabled && chatManage.FAQScoreBoost > 1.0 &&
-			sr.ChunkType == string(types.ChunkTypeFAQ) {
-			originalScore := sr.Score
-			sr.Score = math.Min(sr.Score*chatManage.FAQScoreBoost, 1.0)
-			sr.Metadata["faq_boosted"] = "true"
-			sr.Metadata["faq_original_score"] = fmt.Sprintf("%.4f", originalScore)
-			pipelineInfo(ctx, "Rerank", "faq_boost", map[string]interface{}{
-				"chunk_id":       sr.ID,
-				"original_score": fmt.Sprintf("%.4f", originalScore),
-				"boosted_score":  fmt.Sprintf("%.4f", sr.Score),
-				"boost_factor":   chatManage.FAQScoreBoost,
-			})
-		}
+		sr.Score = modelScore
 
 		reranked = append(reranked, sr)
 	}
@@ -214,16 +187,17 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		modelScore := 1.0
 		sr.Metadata["model_score"] = fmt.Sprintf("%.4f", modelScore)
 		// Assign high model score for direct load items
-		sr.Score = compositeScore(sr, modelScore, base)
+		sr.Score = modelScore
 		reranked = append(reranked, sr)
 	}
-	final := applyMMR(ctx, reranked, chatManage, min(len(reranked), max(1, chatManage.RerankTopK)), 0.7)
+	budget := chatretrieval.ResolveBudget(chatManage.EmbeddingTopK, chatManage.RerankTopK, chatManage.RetrievalBudget)
+	final := chatretrieval.Select(reranked, budget.Fusion, 0)
 	chatManage.RerankResult = final
 
-	// Log composite top scores and MMR selection summary
+	// Log the model relevance used by the shared selector.
 	topN := min(3, len(reranked))
 	for i := 0; i < topN; i++ {
-		pipelineInfo(ctx, "Rerank", "composite_top", map[string]interface{}{
+		pipelineInfo(ctx, "Rerank", "relevance_top", map[string]interface{}{
 			"rank":        i + 1,
 			"chunk_id":    reranked[i].ID,
 			"base_score":  reranked[i].Metadata["base_score"],
@@ -243,7 +217,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 			reranked,
 			nil,
 			chatManage,
-			thresholdDegraded,
 		)
 		return ErrSearchNothing
 	}
@@ -256,7 +229,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		reranked,
 		chatManage.RerankResult,
 		chatManage,
-		thresholdDegraded,
 	)
 	pipelineInfo(ctx, "Rerank", "output", map[string]interface{}{
 		"filtered_cnt": len(chatManage.RerankResult),
@@ -272,7 +244,6 @@ func buildRerankSpanOutput(
 	composite []*types.SearchResult,
 	final []*types.SearchResult,
 	chatManage *types.ChatManage,
-	thresholdDegraded bool,
 ) map[string]interface{} {
 	modelRows := make([]map[string]interface{}, 0, len(modelScores))
 	for i, rr := range modelScores {
@@ -302,7 +273,6 @@ func buildRerankSpanOutput(
 		"final_count":        len(final),
 		"threshold":          chatManage.RerankThreshold,
 		"rerank_top_k":       chatManage.RerankTopK,
-		"threshold_degraded": thresholdDegraded,
 		"model_scores":       langfuse.SummarizeRankScores(modelRows, 50),
 		"composite_results":  langfuse.SummarizeSearchResults(composite, 25),
 		"final_results":      langfuse.SummarizeSearchResults(final, 25),
@@ -343,7 +313,32 @@ func (p *PluginRerank) rerank(ctx context.Context,
 	passages = cleanPassages
 	candidates = cleanCandidates
 
-	rerankResp, err := rerankModel.Rerank(ctx, query, passages)
+	budget := chatretrieval.ResolveBudget(chatManage.EmbeddingTopK, chatManage.RerankTopK, chatManage.RetrievalBudget)
+	budget.EvidenceCount = budget.Fusion
+	budget.EvidenceTokens = 0
+	queries := chatManage.RetrievalQueries()
+	if len(queries) == 0 {
+		queries = []string{query}
+	}
+	ranked, err := chatretrieval.Rank(ctx, queries, candidates, func(ctx context.Context, q string, docs []string) (map[int]float64, error) {
+		rows, err := rerankModel.Rerank(ctx, q, docs)
+		scores := map[int]float64{}
+		for _, row := range rows {
+			scores[row.Index] = row.RelevanceScore
+		}
+		return scores, err
+	}, chatManage.RerankThreshold, budget)
+	var rerankResp []rerank.RankResult
+	indexes := map[string]int{}
+	for i, c := range candidates {
+		indexes[chatretrieval.Identity(c)] = i
+	}
+	for _, c := range ranked {
+		index := indexes[chatretrieval.Identity(c)]
+		candidates[index].QueryScores = c.QueryScores
+		rerankResp = append(rerankResp, rerank.RankResult{Index: index, RelevanceScore: c.Score})
+	}
+
 	if err != nil {
 		pipelineError(ctx, "Rerank", "model_call", map[string]interface{}{
 			"query_variant": query,
@@ -380,63 +375,6 @@ func (p *PluginRerank) rerank(ctx context.Context,
 	return rerankResp, nil
 }
 
-// retainRerankRecallFloor combines the configured absolute score threshold with
-// a small, bounded rank-based recall floor. Reranker score calibration varies
-// across models, languages and document styles; treating one absolute value as
-// the only admission path can discard a model's second- or third-ranked passage
-// even though the passage is useful claim-bearing evidence. The rank floor uses
-// only the reranker's ordering, never query terms, document phrases, domains or
-// Eval data, and it adds no retrieval/model call. The downstream TopK and MMR
-// stages still bound context size and remove redundant candidates.
-func retainRerankRecallFloor(
-	results []rerank.RankResult,
-	candidateCount int,
-	threshold float64,
-	topK int,
-) ([]rerank.RankResult, bool) {
-	if candidateCount <= 0 || len(results) == 0 {
-		return nil, false
-	}
-	// Providers are expected to return ranked rows, but not every compatible
-	// endpoint guarantees response order. Normalize by score before applying a
-	// rank floor so provider serialization order cannot decide recall.
-	ordered := append([]rerank.RankResult(nil), results...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return ordered[i].RelevanceScore > ordered[j].RelevanceScore
-	})
-	recallFloor := 3
-	if topK > 0 && topK < recallFloor {
-		recallFloor = topK
-	}
-	if recallFloor > candidateCount {
-		recallFloor = candidateCount
-	}
-
-	retained := make([]rerank.RankResult, 0, min(len(ordered), max(recallFloor, topK)))
-	seenIndices := make(map[int]struct{}, len(ordered))
-	validRank := 0
-	floorApplied := false
-	for _, result := range ordered {
-		if result.Index < 0 || result.Index >= candidateCount {
-			continue
-		}
-		if _, exists := seenIndices[result.Index]; exists {
-			continue
-		}
-		seenIndices[result.Index] = struct{}{}
-		validRank++
-		withinFloor := validRank <= recallFloor
-		if result.RelevanceScore < threshold && !withinFloor {
-			continue
-		}
-		if result.RelevanceScore < threshold {
-			floorApplied = true
-		}
-		retained = append(retained, result)
-	}
-	return retained, floorApplied
-}
-
 // ensureMetadata ensures the metadata is not nil
 func ensureMetadata(m map[string]string) map[string]string {
 	if m == nil {
@@ -445,267 +383,9 @@ func ensureMetadata(m map[string]string) map[string]string {
 	return m
 }
 
-// compositeScore calculates the composite score for a search result
-func compositeScore(sr *types.SearchResult, modelScore, baseScore float64) float64 {
-	sourceWeight := 1.0
-	switch strings.ToLower(sr.KnowledgeSource) {
-	case "web_search":
-		sourceWeight = 0.95
-	default:
-		sourceWeight = 1.0
-	}
-	positionPrior := 1.0
-	if sr.StartAt >= 0 {
-		positionPrior += searchutil.ClampFloat(1.0-float64(sr.StartAt)/float64(sr.EndAt+1), -0.05, 0.05)
-	}
-	composite := 0.6*modelScore + 0.3*baseScore + 0.1*sourceWeight
-	composite *= positionPrior
-	if composite < 0 {
-		composite = 0
-	}
-	if composite > 1 {
-		composite = 1
-	}
-	return composite
-}
-
-// applyMMR applies the MMR algorithm to the search results with pre-computed token sets
-func applyMMR(
-	ctx context.Context,
-	results []*types.SearchResult,
-	chatManage *types.ChatManage,
-	k int,
-	lambda float64,
-) []*types.SearchResult {
-	if k <= 0 || len(results) == 0 {
-		return nil
-	}
-	pipelineInfo(ctx, "Rerank", "mmr_start", map[string]interface{}{
-		"lambda":     lambda,
-		"k":          k,
-		"candidates": len(results),
-	})
-
-	// Pre-compute all token sets concurrently (CPU-bound tokenization)
-	allTokenSets := ParallelMap(results, 0, func(i int, r *types.SearchResult) map[string]struct{} {
-		return searchutil.TokenizeSimple(getEnrichedPassage(ctx, r))
-	})
-
-	selected := make([]*types.SearchResult, 0, k)
-	selectedTokenSets := make([]map[string]struct{}, 0, k)
-	selectedIndices := make(map[int]struct{})
-
-	for len(selected) < k && len(selectedIndices) < len(results) {
-		bestIdx := -1
-		bestScore := -1.0
-
-		for i, r := range results {
-			if _, isSelected := selectedIndices[i]; isSelected {
-				continue
-			}
-
-			relevance := r.Score
-			redundancy := 0.0
-
-			// Use pre-computed token sets for redundancy calculation
-			for _, selTokens := range selectedTokenSets {
-				sim := searchutil.Jaccard(allTokenSets[i], selTokens)
-				if sim > redundancy {
-					redundancy = sim
-				}
-			}
-
-			mmr := lambda*relevance - (1.0-lambda)*redundancy
-			if mmr > bestScore {
-				bestScore = mmr
-				bestIdx = i
-			}
-		}
-
-		if bestIdx < 0 {
-			break
-		}
-
-		selected = append(selected, results[bestIdx])
-		selectedTokenSets = append(selectedTokenSets, allTokenSets[bestIdx])
-		selectedIndices[bestIdx] = struct{}{}
-	}
-
-	// Compute average redundancy among selected using pre-computed token sets
-	avgRed := 0.0
-	if len(selected) > 1 {
-		pairs := 0
-		for i := 0; i < len(selectedTokenSets); i++ {
-			for j := i + 1; j < len(selectedTokenSets); j++ {
-				avgRed += searchutil.Jaccard(selectedTokenSets[i], selectedTokenSets[j])
-				pairs++
-			}
-		}
-		if pairs > 0 {
-			avgRed /= float64(pairs)
-		}
-	}
-	pipelineInfo(ctx, "Rerank", "mmr_done", map[string]interface{}{
-		"selected":       len(selected),
-		"avg_redundancy": fmt.Sprintf("%.4f", avgRed),
-	})
-	return selected
-}
-
-// --- Passage cleaning for rerank ---
-//
-// Rerank models work on semantic text similarity. Markdown formatting, raw URLs,
-// image references, table separators, and other structural syntax are noise that
-// can dilute the semantic signal. The functions below strip this noise before
-// passages are sent to the rerank model.
-
-var (
-	// reMarkdownImage matches ![alt](url) — the entire construct is noise.
-	// URL group supports one level of balanced parentheses.
-	reMarkdownImage = regexp.MustCompile(`!\[[^\]]*\]\([^()\s]*(?:\([^)]*\)[^()\s]*)*\)`)
-	// reLinkedImage matches [![alt](img_url)](link_url) — unwrap to ![alt](img_url)
-	// so that the subsequent reMarkdownImage pass can remove the image.
-	reLinkedImage = regexp.MustCompile(
-		`\[!\[([^\]]*)\]\(([^()\s]*(?:\([^)]*\)[^()\s]*)*)\)\]` +
-			`\([^()\s]*(?:\([^)]*\)[^()\s]*)*\)`,
-	)
-	// reMarkdownLink matches [text](url) — we keep the text, drop the URL.
-	// URL group supports one level of balanced parentheses.
-	reMarkdownLink = regexp.MustCompile(`\[([^\]]+)\]\([^()\s]*(?:\([^)]*\)[^()\s]*)*\)`)
-	// reRawURL matches standalone http(s) URLs.
-	reRawURL = regexp.MustCompile(`https?://[^\s)\]>]+`)
-	// reCodeBlock matches fenced code blocks (```...```).
-	reCodeBlock = regexp.MustCompile("(?s)```(?:\\w*)\n?.*?```")
-	// reLatexBlock matches block-level LaTeX ($$...$$).
-	reLatexBlock = regexp.MustCompile(`(?s)\$\$.*?\$\$`)
-	// reTableSep matches table separator rows like |---|---|.
-	// Uses [ \t] instead of \s to avoid consuming newlines across rows.
-	reTableSep = regexp.MustCompile(`(?m)^[ \t]*\|[ \t:|-]+\|[ \t]*$`)
-	// reTableRow matches markdown table data rows like | col1 | col2 |.
-	// Uses [ \t] instead of \s to avoid consuming newlines across rows.
-	reTableRow = regexp.MustCompile(`(?m)^[ \t]*\|(.+?)\|[ \t]*$`)
-	// reHeadingPrefix matches leading # markers in headings.
-	reHeadingPrefix = regexp.MustCompile(`(?m)^#{1,6}\s+`)
-	// reBlockquote matches leading > markers.
-	reBlockquote = regexp.MustCompile(`(?m)^>\s?`)
-	// reBoldItalic3 matches ***text*** wrappers (must come before 2 and 1).
-	reBoldItalic3 = regexp.MustCompile(`\*{3}(.+?)\*{3}`)
-	// reBoldItalic2 matches **text** wrappers.
-	reBoldItalic2 = regexp.MustCompile(`\*{2}(.+?)\*{2}`)
-	// reBoldItalic1 matches *text* wrappers.
-	reBoldItalic1 = regexp.MustCompile(`\*(.+?)\*`)
-	// reExcessiveNewlines collapses 3+ consecutive newlines into 2.
-	reExcessiveNewlines = regexp.MustCompile(`\n{3,}`)
-	// reListMarker matches unordered (- , * ) and ordered (1. ) list prefixes.
-	reListMarker = regexp.MustCompile(`(?m)^[\t ]*(?:[-*+]|\d+\.)\s+`)
-	// reHTMLTag matches HTML tags like <br>, <div class="...">, etc.
-	reHTMLTag = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
-)
-
-// cleanPassageForRerank strips markdown/structural noise from text to produce
-// a clean semantic passage for the rerank model. The cleaning is designed to
-// preserve all meaningful natural-language content while removing formatting
-// that would confuse text-similarity scoring.
-func cleanPassageForRerank(text string) string {
-	// 1. Remove code blocks (before other patterns to avoid partial matches)
-	text = reCodeBlock.ReplaceAllString(text, "")
-	// 2. Remove LaTeX block math
-	text = reLatexBlock.ReplaceAllString(text, "")
-	// 3. Remove HTML tags
-	text = reHTMLTag.ReplaceAllString(text, "")
-	// 3.5. Unwrap nested [![alt](img_url)](link_url) → ![alt](img_url)
-	//      so that the next step removes the full construct cleanly.
-	text = reLinkedImage.ReplaceAllString(text, "![$1]($2)")
-	// 4. Remove markdown image references entirely
-	text = reMarkdownImage.ReplaceAllString(text, "")
-	// 5. Convert markdown links to just their display text
-	text = reMarkdownLink.ReplaceAllString(text, "$1")
-	// 6. Remove standalone raw URLs
-	text = reRawURL.ReplaceAllString(text, "")
-	// 7. Remove table separator rows
-	text = reTableSep.ReplaceAllString(text, "")
-	// 7.5. Convert table data rows to plain text (strip | delimiters)
-	text = reTableRow.ReplaceAllStringFunc(text, func(match string) string {
-		inner := reTableRow.FindStringSubmatch(match)
-		if len(inner) < 2 {
-			return match
-		}
-		cells := strings.Split(inner[1], "|")
-		var parts []string
-		for _, cell := range cells {
-			cell = strings.TrimSpace(cell)
-			if cell != "" {
-				parts = append(parts, cell)
-			}
-		}
-		return strings.Join(parts, ", ")
-	})
-	// 8. Strip heading markers but keep heading text
-	text = reHeadingPrefix.ReplaceAllString(text, "")
-	// 9. Strip blockquote markers
-	text = reBlockquote.ReplaceAllString(text, "")
-	// 10. Unwrap bold/italic markers, keeping inner text (order: *** before ** before *)
-	text = reBoldItalic3.ReplaceAllString(text, "$1")
-	text = reBoldItalic2.ReplaceAllString(text, "$1")
-	text = reBoldItalic1.ReplaceAllString(text, "$1")
-	// 11. Strip list markers
-	text = reListMarker.ReplaceAllString(text, "")
-	// 12. Collapse excessive newlines
-	text = reExcessiveNewlines.ReplaceAllString(text, "\n\n")
-
-	return strings.TrimSpace(text)
-}
-
 // getEnrichedPassage 合并Content、ImageInfo和GeneratedQuestions的文本内容
 func getEnrichedPassage(ctx context.Context, result *types.SearchResult) string {
-	combinedText := cleanPassageForRerank(result.Content)
-	var enrichments []string
-
-	// 解析ImageInfo
-	if result.ImageInfo != "" {
-		var imageInfos []types.ImageInfo
-		err := json.Unmarshal([]byte(result.ImageInfo), &imageInfos)
-		if err != nil {
-			pipelineWarn(ctx, "Rerank", "image_info_parse", map[string]interface{}{
-				"error": err.Error(),
-			})
-		} else {
-			// 提取所有图片的描述和OCR文本
-			for _, img := range imageInfos {
-				if img.Caption != "" {
-					enrichments = append(enrichments, img.Caption)
-				}
-				if img.OCRText != "" {
-					enrichments = append(enrichments, img.OCRText)
-				}
-			}
-		}
-	}
-
-	// 解析ChunkMetadata中的GeneratedQuestions
-	if len(result.ChunkMetadata) > 0 {
-		var docMeta types.DocumentChunkMetadata
-		err := json.Unmarshal(result.ChunkMetadata, &docMeta)
-		if err != nil {
-			pipelineWarn(ctx, "Rerank", "chunk_metadata_parse", map[string]interface{}{
-				"error": err.Error(),
-			})
-		} else if questionStrings := docMeta.GetQuestionStrings(); len(questionStrings) > 0 {
-			enrichments = append(enrichments, strings.Join(questionStrings, "; "))
-		}
-	}
-
-	if len(enrichments) == 0 {
-		return combinedText
-	}
-
-	// 组合内容和增强信息
-	if combinedText != "" {
-		combinedText += "\n\n"
-	}
-	combinedText += strings.Join(enrichments, "\n")
-
-	return combinedText
+	return chatretrieval.Passage(result)
 }
 
 func logRerankInputScoreSample(ctx context.Context, results []*types.SearchResult) {

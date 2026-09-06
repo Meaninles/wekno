@@ -130,7 +130,7 @@ const navigateToSession = async (sessionId: string, requestState: ReturnType<typ
     };
     usemenuStore.updataMenuChildren(obj);
     usemenuStore.changeIsFirstSession(true);
-    saveSessionDraftState(sessionId, requestState, attachmentFiles, imageFiles);
+    saveSessionDraftState(sessionId, requestState, attachmentFiles, imageFiles, value);
     usemenuStore.changeFirstQuery(value, mentionedItems, modelId, imageFiles, attachmentFiles);
     router.push(`/platform/chat/${sessionId}`);
 }

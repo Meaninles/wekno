@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -21,82 +20,9 @@ type PluginChatCompletionStream struct {
 	modelService interfaces.ModelService // Interface for model operations
 }
 
-// terminalStreamCollection is the buffered result of one provider stream.
-// Provider errors and premature channel closure are kept private until the
-// caller has had one chance to replace the entire candidate. This prevents a
-// partial answer or transient error event from becoming the persisted/UI
-// result while remaining independent of answer semantics.
-type terminalStreamCollection struct {
-	Answer         string
-	Completed      bool
-	FinishReason   string
-	TransportError string
-}
+type terminalStreamCollection = chat.TerminalStreamCollection
 
-func collectTerminalStream(
-	ctx context.Context,
-	stream <-chan types.StreamResponse,
-	onThinking func(string),
-	onThinkingDone func(),
-) terminalStreamCollection {
-	projector := conversationmemory.NewTerminalAnswerProjector()
-	var candidate strings.Builder
-	result := terminalStreamCollection{}
-	closeThinking := func() {
-		if onThinkingDone != nil {
-			onThinkingDone()
-		}
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			closeThinking()
-			result.TransportError = ctx.Err().Error()
-			return result
-		case response, ok := <-stream:
-			if !ok {
-				closeThinking()
-				candidate.WriteString(projector.Flush())
-				result.Answer = candidate.String()
-				if result.TransportError == "" {
-					result.TransportError = "stream closed before terminal completion"
-				}
-				return result
-			}
-			if response.FinishReason != "" {
-				result.FinishReason = strings.ToLower(strings.TrimSpace(response.FinishReason))
-			}
-			switch response.ResponseType {
-			case types.ResponseTypeError:
-				if result.TransportError == "" {
-					result.TransportError = strings.TrimSpace(response.Content)
-					if result.TransportError == "" {
-						result.TransportError = "provider stream error"
-					}
-				}
-			case types.ResponseTypeThinking:
-				if response.Content != "" && onThinking != nil {
-					onThinking(response.Content)
-				}
-				if response.Done {
-					closeThinking()
-				}
-			case types.ResponseTypeAnswer:
-				closeThinking()
-				candidate.WriteString(projector.Feed(response.Content))
-				if response.Done {
-					candidate.WriteString(projector.Flush())
-					if result.FinishReason == "" {
-						result.FinishReason = "stop"
-					}
-					result.Answer = candidate.String()
-					result.Completed = result.FinishReason == "stop" || result.FinishReason == "end_turn"
-					return result
-				}
-			}
-		}
-	}
-}
+var collectTerminalStream = chat.CollectTerminalStream
 
 // NewPluginChatCompletionStream creates a new PluginChatCompletionStream instance
 // and registers it with the EventManager
@@ -245,64 +171,20 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			})
 			return
 		}
-		recoveryReason := ""
-		recoveryDirective := ""
-		switch {
-		case result.TransportError != "":
-			recoveryReason = "transport_error"
-			recoveryDirective = conversationmemory.TerminalIntegrityRetryDirective()
-			pipelineError(ctx, "Stream", "stream_error_buffered", map[string]interface{}{
-				"session_id": chatManage.SessionID,
-				"error":      result.TransportError,
-			})
-		case finishReason == "length" || finishReason == "max_tokens" || finishReason == "max_output_tokens":
-			recoveryReason = "output_limit"
-			recoveryDirective = conversationmemory.TerminalOutputLimitRetryDirective()
-		case !completed:
-			recoveryReason = "incomplete_stream"
-			recoveryDirective = conversationmemory.TerminalIntegrityRetryDirective()
-		default:
-			if reason := conversationmemory.TerminalAnswerIntegrityReason(answer); reason != "" {
-				recoveryReason = reason
-				recoveryDirective = conversationmemory.TerminalIntegrityRetryDirective()
+		if result.TransportError != "" || !completed {
+			failure := result.TransportError
+			if failure == "" {
+				failure = chat.ValidateTerminal(answer, finishReason).Error()
 			}
-		}
-		if recoveryReason != "" {
-			pipelineInfo(ctx, "Stream", "terminal_candidate_retry", map[string]interface{}{
-				"session_id":    chatManage.SessionID,
-				"reason":        recoveryReason,
-				"finish_reason": finishReason,
-				"attempt":       1,
-			})
-			retryMessages := append([]chat.Message(nil), chatMessages...)
-			last := len(retryMessages) - 1
-			retryMessages[last].Content += "\n\n" + recoveryDirective
-			retryOpt := *opt
-			thinking := false
-			retryOpt.Thinking = &thinking
-			retryStream, retryErr := chatModel.ChatStream(ctx, retryMessages, &retryOpt)
-			if retryErr == nil && retryStream != nil {
-				replacement := collect(retryStream)
-				if replacement.TransportError == "" && replacement.Completed &&
-					conversationmemory.TerminalAnswerIntegrityReason(replacement.Answer) == "" {
-					answer = replacement.Answer
-					completed = true
-					finishReason = replacement.FinishReason
-				} else {
-					answer = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
-					completed = false
-				}
-			} else {
-				answer = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
-				completed = false
-			}
+			eventBus.Emit(ctx, types.Event{Type: types.EventType(event.EventError), SessionID: chatManage.SessionID,
+				Data: event.ErrorData{Error: failure, Stage: "model_completion", SessionID: chatManage.SessionID}})
+			return
 		}
 		// Citation markup is a transport protocol, not answer semantics. Validate
 		// it before the single production candidate is emitted so SSE, database
 		// persistence, and history replay receive identical bytes. Unsupported or
 		// prior-turn handles are removed; no claim text is rewritten and no model
 		// call is added.
-		answer = sourcerefs.RepairAnswerCitations(answer, chatManage.CitationResult)
 		answer, _, citationReport := sourcerefs.FilterAnswerCitations(answer, chatManage.CitationResult)
 		answer = strings.TrimSpace(answer)
 		if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {

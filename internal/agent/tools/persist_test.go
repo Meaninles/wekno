@@ -9,41 +9,13 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestShouldOmitRawToolOutput(t *testing.T) {
-	if !ShouldOmitRawToolOutput(ToolListKnowledgeChunks, map[string]interface{}{"display_type": "knowledge_chunks_list"}) {
-		t.Fatal("structured list_knowledge_chunks output should be omitted")
-	}
-	if !ShouldOmitRawToolOutput(ToolGrepChunks, map[string]interface{}{"display_type": "grep_results"}) {
-		t.Fatal("structured grep output should be omitted")
-	}
-	if ShouldOmitRawToolOutput("custom_tool", nil) {
-		t.Fatal("unknown tools should keep raw output by default")
-	}
-}
-
-func TestSanitizeToolDataForPersist_knowledgeChunksList(t *testing.T) {
-	data := map[string]interface{}{
-		"display_type":    "knowledge_chunks_list",
-		"knowledge_title": "sample.pdf",
-		"fetched_chunks":  50,
-		"total_chunks":    282,
-		"chunks":          []map[string]interface{}{{"content": "secret"}},
-	}
-	out := SanitizeToolDataForPersist(data)
-	if _, ok := out["chunks"]; ok {
-		t.Fatal("chunk bodies should be stripped from persisted tool data")
-	}
-	if out["fetched_chunks"] != 50 {
-		t.Fatalf("summary fields should be kept, got %#v", out["fetched_chunks"])
-	}
-}
-
-func TestSanitizeAgentStepsForStorage_stripsLargeOutput(t *testing.T) {
+func TestRepairStoredToolEvidenceSurvivesClientProjection(t *testing.T) {
 	steps := []types.AgentStep{{
 		Iteration: 1,
 		ToolCalls: []types.ToolCall{{
 			ID:   "call-1",
 			Name: ToolListKnowledgeChunks,
+			Args: map[string]interface{}{"knowledge_id": "document", "offset": 120},
 			Result: &types.ToolResult{
 				Success: true,
 				Output:  strings.Repeat("x", 10000),
@@ -60,14 +32,12 @@ func TestSanitizeAgentStepsForStorage_stripsLargeOutput(t *testing.T) {
 
 	sanitized := SanitizeAgentStepsForStorage(steps)
 	result := sanitized[0].ToolCalls[0].Result
-	if len(result.Output) >= 10000 {
-		t.Fatal("persisted output should be compacted")
+	client := SanitizeAgentStepsForClient(sanitized)
+	if client[0].ToolCalls[0].Args != nil || len(client[0].ToolCalls[0].Result.Output) >= 10000 {
+		t.Fatal("browser display must remain bounded")
 	}
-	if !strings.Contains(result.Output, "content omitted from history") {
-		t.Fatalf("unexpected compact output: %q", result.Output)
-	}
-	if _, ok := result.Data["chunks"]; ok {
-		t.Fatal("chunk bodies should be removed from persisted data")
+	if result.Output != steps[0].ToolCalls[0].Result.Output || result.Data["chunks"] == nil || sanitized[0].ToolCalls[0].Args["offset"] != 120 {
+		t.Fatal("stored arguments and actual evidence must remain available for paged history reads and diagnosis")
 	}
 }
 

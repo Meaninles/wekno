@@ -21,9 +21,9 @@ type AgentStreamEvent struct {
 
 // AgentEngine defines the interface for agent execution engine
 type AgentEngine interface {
-	// SetCurrentUserRequest separates the exact current chat task from
-	// attachment/runtime augmentation used in the same turn.
-	SetCurrentUserRequest(request string)
+	// SetCurrentTurnContext supplies attachments and request-local metadata;
+	// Execute receives the exact user-authored query separately.
+	SetCurrentTurnContext(content string)
 	// Execute executes the agent with conversation history and returns a stream of events
 	// imageURLs is optional - when provided, images are passed to the LLM as multimodal content
 	Execute(

@@ -114,7 +114,6 @@ func TestParseThinkingOverride(t *testing.T) {
 		"enable_thinking":      enableThinking{},
 		"thinking_type":        thinkingTypeField{},
 		"chat_template_kwargs": chatTemplateKwargs{},
-		"something-unknown":    chatTemplateKwargs{}, // legacy default-mode fallback
 	}
 	for value, want := range cases {
 		got := parseThinkingOverride(map[string]string{ExtraConfigThinkingControl: value})
@@ -122,6 +121,8 @@ func TestParseThinkingOverride(t *testing.T) {
 	}
 
 	assert.Nil(t, parseThinkingOverride(nil))
+	_, err := NewRemoteAPIChat(&ChatConfig{ExtraConfig: map[string]string{ExtraConfigThinkingControl: "something-unknown"}})
+	assert.ErrorContains(t, err, "thinking_control")
 	assert.Nil(t, parseThinkingOverride(map[string]string{}))
 	assert.Nil(t, parseThinkingOverride(map[string]string{ExtraConfigThinkingControl: ""}))
 }

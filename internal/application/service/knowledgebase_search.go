@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
-	"github.com/Tencent/WeKnora/internal/custom/modules/retrievalfence"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -149,7 +148,11 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 
 	// Over-retrieval (existing rule, preserved): 5x per-KB matchCount,
 	// floor of 50, capped at 500 across the whole search.
-	matchCount := max(params.MatchCount*5, 50) * len(searchKBIDs)
+	matchCount := params.CandidateCount
+	if matchCount <= 0 {
+		matchCount = max(params.MatchCount*5, 50)
+	}
+	matchCount *= len(searchKBIDs)
 	if matchCount > 500 {
 		matchCount = 500
 	}
@@ -211,21 +214,6 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		},
 	})
 	retrieveResults, err := s.retrieveFromStores(retrieveCtx, groups, retriever.EngineAwareNormalizer{})
-	if err == nil {
-		scopes := make([]retrievalfence.Scope, 0, len(kbs))
-		for _, candidate := range kbs {
-			scopes = append(scopes, retrievalfence.Scope{
-				TenantID: candidate.TenantID, KnowledgeBaseID: candidate.ID,
-			})
-		}
-		retrieveResults, err = retrievalfence.Filter(
-			retrieveCtx,
-			retrieveResults,
-			scopes,
-			s.chunkRepo.ListChunksByIDOnly,
-			s.kgRepo.GetKnowledgeBatch,
-		)
-	}
 	retrieveSpan.Finish(langfuse.SummarizeRetrieveOutput(retrieveResults), nil, err)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
@@ -263,8 +251,12 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		return nil, err
 	}
 
-	if len(deduplicatedChunks) > params.MatchCount {
-		deduplicatedChunks = deduplicatedChunks[:params.MatchCount]
+	outputLimit := params.MatchCount
+	if params.CandidateCount > 0 {
+		outputLimit = params.CandidateCount
+	}
+	if outputLimit > 0 && len(deduplicatedChunks) > outputLimit {
+		deduplicatedChunks = deduplicatedChunks[:outputLimit]
 	}
 
 	return s.processSearchResults(ctx, deduplicatedChunks, params.SkipContextEnrichment)

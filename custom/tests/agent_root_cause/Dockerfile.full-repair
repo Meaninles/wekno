@@ -1,0 +1,22 @@
+FROM weknora-dev-app:local AS checks
+WORKDIR /workspace
+COPY . .
+ARG TEST_PACKAGES="./internal/infrastructure/chunker ./internal/custom/modules/wikicontract ./internal/custom/modules/kbmanager ./internal/agent/tools ./internal/application/service ./internal/application/repository"
+ARG TEST_PATTERN="TestRepair|TestProtectedRow|TestTokenLimit"
+ARG TEST_BINARY_PACKAGE=""
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/.cache/go-mod \
+    mkdir -p /out && GOMODCACHE=/root/.cache/go-mod /usr/local/go/bin/go test -p 2 \
+    -ldflags="-X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn" \
+    -run "$TEST_PATTERN" -count=1 -v $TEST_PACKAGES \
+    > /out/components.log 2>&1 || (cat /out/components.log && exit 1)
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/.cache/go-mod \
+    if [ -n "$TEST_BINARY_PACKAGE" ]; then \
+      GOMODCACHE=/root/.cache/go-mod /usr/local/go/bin/go test -c \
+      -ldflags="-X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn" \
+      -o /out/integration.test "$TEST_BINARY_PACKAGE" && \
+      cp -R /root/.cache/go-mod/github.com/yanyiwu/gojieba@*/deps/cppjieba/dict /out/jieba-dict; fi
+ENV JIEBA_DICT_DIR=/out/jieba-dict
+FROM scratch AS results
+COPY --from=checks /out/ /

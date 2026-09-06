@@ -1,0 +1,36 @@
+package tools
+
+import (
+ "context"
+ "encoding/json"
+ "fmt"
+ "testing"
+ "github.com/Tencent/WeKnora/internal/types"
+ "github.com/Tencent/WeKnora/internal/types/interfaces"
+)
+
+type planValidationWikiStore struct {
+ interfaces.WikiPageService
+ pages map[string]*types.WikiPage
+ reads []string
+ writes []string
+}
+func (s *planValidationWikiStore) GetPageBySlug(_ context.Context,kb,slug string)(*types.WikiPage,error){
+ s.reads=append(s.reads,kb+"/"+slug)
+ p:=s.pages[kb+"/"+slug];if p==nil{return nil,fmt.Errorf("page not found")};c:=*p;return &c,nil
+}
+func (s *planValidationWikiStore) UpdatePage(_ context.Context,p *types.WikiPage)(*types.WikiPage,error){
+ s.writes=append(s.writes,p.KnowledgeBaseID+"/"+p.Slug);s.pages[p.KnowledgeBaseID+"/"+p.Slug]=p;return p,nil
+}
+func TestPlanValidationWikiTargetIdentity(t *testing.T){
+ for _,duplicate:=range []bool{false,true}{
+  s:=&planValidationWikiStore{pages:map[string]*types.WikiPage{"kb-b/shared":{ID:"page-b",KnowledgeBaseID:"kb-b",Slug:"shared",Title:"B",Content:"The release date is October 3."}}}
+  if duplicate{s.pages["kb-a/shared"]=&types.WikiPage{ID:"page-a",KnowledgeBaseID:"kb-a",Slug:"shared",Title:"A",Content:"The release date is October 3."}}
+  // Read identifies page B. The actual write tool has no KB/page-ID selector.
+  selected,err:=s.GetPageBySlug(context.Background(),"kb-b","shared");if err!=nil{t.Fatal(err)}
+  tool:=NewWikiReplaceTextTool(s,[]string{"kb-a","kb-b"},nil)
+  result,err:=tool.Execute(context.Background(),json.RawMessage(`{"slug":"shared","old_text":"October 3","new_text":"October 4"}`));if err!=nil{t.Fatal(err)}
+  out,_:=json.Marshal(map[string]any{"duplicate_slug":duplicate,"intended_page":selected.ID,"tool_success":result.Success,"tool_error":result.Error,"writes":s.writes,"page_b_content":s.pages["kb-b/shared"].Content})
+  t.Log(string(out))
+ }
+}

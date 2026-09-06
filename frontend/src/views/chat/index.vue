@@ -70,7 +70,8 @@
                 :rejection="queueRejectionNotice"
                 @close="queueRejectionNotice = null"
             />
-            <InputField ref="inputFieldRef"
+            <ChatUploadProgress :rows="uploadRows" :preparing="uploadsPreparing" @retry="retryUpload" @cancel="cancelUploads" />
+            <InputField ref="inputFieldRef" :inert="uploadsPreparing || undefined"
                 @send-msg="(query, modelId, mentionedItems, imageFiles, attachmentFiles) => sendMsg(query, modelId, mentionedItems, imageFiles, attachmentFiles)"
                 @stop-generation="handleStopGeneration" :isReplying="isReplying" :sessionId="session_id"
                 :assistantMessageId="currentAssistantMessageId" :embeddedMode="embeddedMode"></InputField>
@@ -81,6 +82,10 @@
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
 </template>
 <script setup>
+import { useChatUploads, chatImagePlaceholder, CHAT_UPLOAD_MAX_BYTES, CHAT_UPLOAD_MAX_MB } from '@/custom/modules/chatuploads/uploads'
+import ChatUploadProgress from '@/custom/modules/chatuploads/ChatUploadProgress.vue'
+const { rows: uploadRows, preparing: uploadsPreparing, prepare: prepareUploads, retry: retryUpload, cancel: cancelUploads, detach: detachUploads } = useChatUploads()
+
 import { storeToRefs } from 'pinia';
 import { ref, onMounted, onBeforeMount, onUnmounted, nextTick, watch, reactive, computed } from 'vue';
 import { useRoute, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router';
@@ -103,6 +108,7 @@ import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize';
 import { clearCitationChunkCache } from '@/utils/citationChunkCache';
 import { isAgentStreamAgentId } from '@/utils/agent-mode';
 import { getSessionDraftState, saveSessionDraftState } from '@/custom/modules/sessionState/draftState';
+import { synchronizeSessionTitle } from '@/custom/modules/sessiontitle/client';
 import ChatQueueRejectionBanner from '@/custom/modules/chatqueue/ChatQueueRejectionBanner.vue';
 import ChatQueueStatusCard from '@/custom/modules/chatqueue/ChatQueueStatusCard.vue';
 import { useChatQueueAdmittedNotice } from '@/custom/modules/chatqueue/useChatQueueAdmittedNotice';
@@ -191,6 +197,7 @@ const saveCurrentConversationDraft = () => {
         useSettingsStoreInstance.captureConversationScopedState(),
         getInputAttachments(),
         getInputImages(),
+        uploadsPreparing.value ? undefined : inputFieldRef.value?.getQuery?.(),
     );
 };
 
@@ -234,13 +241,15 @@ const hydrateConversationScopedState = async (sid, syncAttachments = true) => {
     useSettingsStoreInstance.resetConversationScopedState();
     await loadSessionResourceState(sid);
 
-    const draft = getSessionDraftState(sid);
+    const draft = await getSessionDraftState(sid);
+    if (String(sid) !== String(session_id.value)) return null;
     if (draft?.settings) {
         useSettingsStoreInstance.applyConversationResourceState(draft.settings);
     }
     if (syncAttachments) {
         inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
         inputFieldRef.value?.setUploadedImages?.(draft?.images || []);
+        inputFieldRef.value?.restoreQuery?.(draft?.query || "");
     }
     return draft;
 };
@@ -281,15 +290,6 @@ const handleKBEditorSuccess = (kbId) => {
     navigateToKnowledgeBaseList(kbId)
 }
 
-function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-    });
-}
-
 const getUserQuery = (index) => {
     if (index <= 0) {
         return '';
@@ -307,6 +307,7 @@ watch([() => route.params], async (newvalue) => {
         const nextSessionId = newvalue[0].chatid;
         if (String(session_id.value || '') !== String(nextSessionId || '')) {
             saveCurrentConversationDraft();
+            detachUploads();
         }
         if (!firstQuery.value) {
             scrollLock.value = false;
@@ -498,6 +499,7 @@ const getmsgList = (data, isScrollType = false, scrollHeight) => {
             return;
         }
         const nextCursor = batch[0].created_at;
+		if (!isScrollType && !props.embeddedMode && batch.at(-1)?.is_completed) void synchronizeSessionTitle(data.session_id);
         if (isScrollType && created_at.value && nextCursor === created_at.value) {
             hasMoreHistory.value = false;
             return;
@@ -521,6 +523,7 @@ const getmsgList = (data, isScrollType = false, scrollHeight) => {
 // 发送消息
 // 处理停止生成事件 - 立即清除 loading 状态
 const handleStopGeneration = () => {
+    void cancelUploads();
     stopStream();
     loading.value = false;
     isReplying.value = false;
@@ -545,6 +548,7 @@ const handleQueueCancel = async (messageId) => {
 };
 
 const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = [], attachmentFiles = []) => {
+    if (uploadsPreparing.value) return;
     stopStream();
     prepareForNewOutgoingMessage();
     isReplying.value = true;
@@ -552,54 +556,10 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     markCurrentSessionRead();
     queueRejectionNotice.value = null;
 
-    // Convert images to base64 data URIs for backend processing and local display
-    let imageAttachments = [];
-    let userImages = [];
-    if (imageFiles && imageFiles.length > 0) {
-        try {
-            for (const file of imageFiles) {
-                const dataURI = await fileToBase64(file);
-                imageAttachments.push({ data: dataURI });
-                userImages.push({ url: dataURI });
-            }
-        } catch (e) {
-            console.error('[Image] Failed to read images:', e);
-            loading.value = false;
-            isReplying.value = false;
-            return;
-        }
-    }
-
-    // Convert attachment files to base64 for backend processing
-    let attachmentUploads = [];
-    if (attachmentFiles && attachmentFiles.length > 0) {
-        try {
-            for (const attachment of attachmentFiles) {
-                const reader = new FileReader();
-                const base64Promise = new Promise((resolve, reject) => {
-                    reader.onload = () => {
-                        const result = reader.result;
-                        // Extract base64 content (remove data:...;base64, prefix)
-                        const base64 = result.split(',')[1];
-                        resolve(base64);
-                    };
-                    reader.onerror = reject;
-                    reader.readAsDataURL(attachment.file);
-                });
-                const base64Data = await base64Promise;
-                attachmentUploads.push({
-                    data: base64Data,
-                    file_name: attachment.name,
-                    file_size: attachment.size
-                });
-            }
-        } catch (e) {
-            console.error('[Attachment] Failed to read attachments:', e);
-            loading.value = false;
-            isReplying.value = false;
-            return;
-        }
-    }
+    const requestSessionId = String(session_id.value);
+    const requestSettings = useSettingsStoreInstance.captureConversationScopedState();
+    const selectedAgentId = props.embeddedMode ? props.agentId : (useSettingsStoreInstance.selectedAgentId || '');
+    const userImages = imageFiles.map(file => ({ url: chatImagePlaceholder(), name: file.name }));
 
     // Get agent mode status from settings store (prefer selectedAgentId for builtins)
     const agentEnabled = props.embeddedMode
@@ -617,18 +577,6 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         ? `使用${normalizedProfessionalSkillNames.map((name) => `${name}技能`).join('、')}完成以下工作`
         : '';
     const requestQuery = professionalSkillPrefix ? `${professionalSkillPrefix}\n${value}` : value;
-
-    // 将@提及的知识库和文件信息存入用户消息
-    const optimisticUserMessage = { content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' };
-    messagesList.push(optimisticUserMessage);
-    pendingQueueDraft = {
-        message: optimisticUserMessage,
-        query: value,
-        images: [...imageFiles],
-        attachments: attachmentFiles.map((attachment) => ({ ...attachment })),
-    };
-    userHasScrolledUp.value = false;
-    scrollToBottom(true);
 
     // Get web search status from settings store
     const webSearchEnabled = props.embeddedMode ? false : useSettingsStoreInstance.isWebSearchEnabled;
@@ -670,16 +618,41 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     const mcpServiceIds = props.embeddedMode ? [] : (useSettingsStoreInstance.settings.selectedMCPServices || []);
     const skillNames = props.embeddedMode ? [] : (useSettingsStoreInstance.settings.selectedSkillNames || []);
 
-    // Get selected agent ID (backend resolves shared agent and its tenant from share relation)
-    const selectedAgentId = props.embeddedMode ? props.agentId : (useSettingsStoreInstance.selectedAgentId || '');
 
     const endpoint = agentEnabled ? '/api/v1/agent-chat' : '/api/v1/knowledge-chat';
 
     const requestMcpServiceIds = agentEnabled ? mcpServiceIds : [];
     const requestSkillNames = agentEnabled ? skillNames : [];
 
+    saveSessionDraftState(requestSessionId, requestSettings, attachmentFiles, imageFiles, value);
+    let uploadIds = [];
+    try {
+        uploadIds = await prepareUploads([...imageFiles, ...attachmentFiles.map(a => a.file)], { sessionId: requestSessionId, agentId: selectedAgentId });
+    } catch (error) {
+        if (requestSessionId !== String(session_id.value)) return;
+        inputFieldRef.value?.restoreQuery(value);
+        inputFieldRef.value?.setUploadedImages(imageFiles);
+        inputFieldRef.value?.setUploadedAttachments(attachmentFiles);
+        loading.value = false;
+        isReplying.value = false;
+        if (error?.name !== 'AbortError') MessagePlugin.error(error?.message || '文件处理失败');
+        return;
+    }
+    if (requestSessionId !== String(session_id.value)) return;
+    // 将@提及的知识库和文件信息存入用户消息
+    const optimisticUserMessage = { content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' };
+    messagesList.push(optimisticUserMessage);
+    pendingQueueDraft = {
+        message: optimisticUserMessage,
+        query: value,
+        images: [...imageFiles],
+        attachments: attachmentFiles.map((attachment) => ({ ...attachment })),
+    };
+    userHasScrolledUp.value = false;
+    scrollToBottom(true);
+
     await startStream({
-        session_id: session_id.value,
+        session_id: requestSessionId,
         knowledge_base_ids: kbIds,
         knowledge_ids: knowledgeIds,
         agent_enabled: agentEnabled,
@@ -692,18 +665,18 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         professional_skill_names: normalizedProfessionalSkillNames,
         tag_ids: tagIds,
         mentioned_items: mentionedItems,
-        images: imageAttachments.length > 0 ? imageAttachments : undefined,
-        attachment_uploads: attachmentUploads.length > 0 ? attachmentUploads : undefined,
+        upload_ids: uploadIds,
         query: requestQuery,
         method: 'POST',
         url: endpoint,
     });
     if (!props.embeddedMode) {
         saveSessionDraftState(
-            session_id.value,
-            useSettingsStoreInstance.captureConversationScopedState(),
+            requestSessionId,
+            requestSettings,
             attachmentFiles,
             imageFiles,
+            "",
         );
     }
     markCurrentSessionRead();
@@ -850,7 +823,7 @@ onMounted(async () => {
         }
         const initialAttachmentFiles = [...(firstAttachmentFiles.value || [])];
         const initialImageFiles = [...(firstImageFiles.value || [])];
-        const initialDraft = getSessionDraftState(session_id.value);
+        const initialDraft = await getSessionDraftState(session_id.value);
         if (initialDraft?.settings) {
             useSettingsStoreInstance.applyConversationResourceState(initialDraft.settings);
         }
@@ -860,9 +833,12 @@ onMounted(async () => {
         saveSessionDraftState(session_id.value, useSettingsStoreInstance.captureConversationScopedState(), initialAttachmentFiles, initialImageFiles);
         usemenuStore.changeFirstQuery('', [], '', [], []);
     } else {
-        const draft = getSessionDraftState(session_id.value);
+        const restoreSessionId = String(session_id.value);
+        const draft = await getSessionDraftState(restoreSessionId);
+        if (restoreSessionId !== String(session_id.value)) return;
         inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
         inputFieldRef.value?.setUploadedImages?.(draft?.images || []);
+        inputFieldRef.value?.restoreQuery?.(draft?.query || '');
         scrollLock.value = false;
         hasMoreHistory.value = true;
         historyLoadingMore.value = false;

@@ -1,5 +1,6 @@
 // src/utils/request.js
 import axios from "axios";
+import { CHAT_UPLOAD_MAX_MB } from '@/custom/modules/chatuploads/limits';
 import type { AxiosRequestConfig } from "axios";
 import {
   generateRandomString,
@@ -91,6 +92,7 @@ function isPublicAuthRequest(url?: string): boolean {
 }
 
 function uploadLimitForRequest(url?: string): number {
+  if (url?.includes("/chat-uploads/sessions/")) return CHAT_UPLOAD_MAX_MB;
   if (
     url
     && (

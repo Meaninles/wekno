@@ -55,3 +55,46 @@ func TestImageInspectionUsesConfiguredVisionAndRedactsTransport(t *testing.T) {
 		}
 	}
 }
+
+func TestImageInspectionRetainsAndValidatesSourceRegion(t *testing.T) {
+	models := &inspectionModels{vision: &inspectionVLM{}}
+	registry := &visionRegistry{models: models, modelID: "configured-vision"}
+	view := imageView{SourceWidth: 6688, SourceHeight: 6688, ViewWidth: 1, ViewHeight: 1,
+		Region: []int{6000, 6001, 6001, 6002}, FrameCount: 1}
+	args := map[string]any{
+		"image_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6V8AAAAASUVORK5CYII=",
+		"prompt":       "Read the visible text", "image_view": &view,
+	}
+	raw, _ := json.Marshal(args)
+	result, err := registry.ExecuteTool(context.Background(), "inspect_image", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output struct {
+		View        imageView `json:"image_view"`
+		Observation string    `json:"observation"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.View.Region[0] != 6000 || output.View.Resized || output.Observation != "Visible labels and layout" {
+		t.Fatalf("lost the actual source region: %+v", output)
+	}
+	if _, duplicate := result.Data["observation"]; duplicate {
+		t.Fatal("duplicated image observation in history")
+	}
+	for _, change := range []func(*imageView){
+		func(v *imageView) { v.ViewWidth = 2 },
+		func(v *imageView) { v.SourceWidth = 5000 },
+		func(v *imageView) { v.Resized = true },
+		func(v *imageView) { v.Frame = 1 },
+	} {
+		bad := view
+		change(&bad)
+		args["image_view"] = bad
+		raw, _ := json.Marshal(args)
+		if _, err := registry.ExecuteTool(context.Background(), "inspect_image", raw); err == nil {
+			t.Fatalf("accepted inconsistent image view: %+v", bad)
+		}
+	}
+}

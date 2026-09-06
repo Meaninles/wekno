@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +21,32 @@ type mockTool struct {
 	description string
 	parameters  json.RawMessage
 	result      *types.ToolResult
+}
+
+func TestRegistryPreservesExactResultThroughConversationArchival(t *testing.T) {
+	for _, original := range []string{
+		`{"rows":["` + strings.Repeat("large row;", 3000) + `"],"constraint":"applies only after approval"}`,
+		"[EXACT_FRAGMENT]\n" + strings.Repeat("source content\n", 2000) + "required condition\n[/EXACT_FRAGMENT]",
+	} {
+		registry := NewToolRegistry()
+		registry.RegisterTool(&mockTool{name: "source_read", parameters: json.RawMessage(`{"type":"object"}`), result: &types.ToolResult{Success: true, Output: original}})
+		ctx := conversationmemory.WithLiveTools(context.Background())
+		result, err := registry.ExecuteTool(ctx, "source_read", json.RawMessage(`{}`))
+		require.NoError(t, err)
+		require.Equal(t, original, result.Output)
+		messages := []chat.Message{
+			{Role: "user", Content: "Explain the source conditions"},
+			{Role: "assistant", ToolCalls: []chat.ToolCall{{ID: "source-call", Function: chat.FunctionCall{Name: "source_read", Arguments: `{}`}}}},
+			{Role: "tool", ToolCallID: "source-call", Content: result.Output},
+		}
+		bounded, err := conversationmemory.BoundMessages(ctx, messages, []chat.Tool{{Function: chat.FunctionDef{Name: "read_conversation"}}}, 800, 100)
+		require.NoError(t, err)
+		require.Equal(t, messages[:2], bounded[:2])
+		require.Contains(t, bounded[2].Content, "read_conversation")
+		exact, ok := conversationmemory.LiveToolsFromContext(ctx).Read("source-call")
+		require.True(t, ok)
+		require.Equal(t, original, exact)
+	}
 }
 
 func (m *mockTool) Name() string                { return m.name }
@@ -159,7 +188,7 @@ func TestRegisterTool_DuplicateRejected(t *testing.T) {
 	assert.Equal(t, "original", defs[0].Description, "first registration must win")
 }
 
-func TestExecuteTool_NonDocumentToolErrorKeepsRetryHint(t *testing.T) {
+func TestExecuteToolPreservesOriginalFailureWithoutAddingRetryInstructions(t *testing.T) {
 	r := NewToolRegistry()
 	r.RegisterTool(&mockTool{
 		name:       "search",
@@ -174,6 +203,5 @@ func TestExecuteTool_NonDocumentToolErrorKeepsRetryHint(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "temporary search failure")
-	assert.Contains(t, result.Error, "try a different approach")
+	assert.Equal(t, "temporary search failure", result.Error)
 }

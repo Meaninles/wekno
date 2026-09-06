@@ -331,6 +331,9 @@ func resolveKBAccessOnce(
 	if kb == nil {
 		return nil, errKBAccessNotFound
 	}
+	if !kb.AllowsPrivateAccess(ctx) {
+		return nil, errKBAccessNotFound
+	}
 
 	// 1. Own KB.
 	if kb.TenantID == tenantID {

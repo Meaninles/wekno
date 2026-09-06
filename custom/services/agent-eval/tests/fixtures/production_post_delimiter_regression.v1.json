@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T22:36:00+08:00",
+  "source_environment": "codex-authored-unseen-post-delimiter-regression",
+  "target_environment": "local-production-mode",
+  "purpose": "bounded production-path verification of passive terminal projection, fresh RAG citations, state polarity, and format fidelity",
+  "required_model_id": "prod-deepseek-v4-flash-int8-chat",
+  "source_answers_in_sut_input": false,
+  "source_references_in_sut_input": false,
+  "reference_answers_in_sut_input": false,
+  "required_claims_in_sut_input": false,
+  "judge_feedback_in_sut_input": false,
+  "sealed_holdout_accessed": false,
+  "eval_assistance_enabled": false,
+  "profiles": ["quick-answer", "rag-reasoning", "general-agent"],
+  "repetitions": 3,
+  "concurrency": 8,
+  "cases": [
+    {
+      "case_id": "post-delimiter-it-change-handoff",
+      "source_session_alias": "codex-post-delimiter-it-change",
+      "source_agent_kind": "new-generic-regression",
+      "kb_slug": "company-policies",
+      "family": "fresh-rag-plus-unresolved-state-and-terminal-projection",
+      "high_usage_user": false,
+      "turns": [
+        {
+          "source_ordinal": 1,
+          "query": "从公司制度核实信息系统变更的测试环境验证、执行时段和完成后验证时限。只写这三项，并把依据放在对应结论旁。"
+        },
+        {
+          "source_ordinal": 2,
+          "query": "再记录两个独立事项，不查资料：Quill 的变更计划在8月14日，由 Ana 负责，回退决定没有提供；Rook 的变更计划已取消。通知里不要声称 Quill 的回退已被拒绝，这只是措辞边界，不是拒绝事实。"
+        },
+        {
+          "source_ordinal": 3,
+          "query": "只用四行分别写 Quill 当前计划、负责人、回退决定，以及 Rook 已作废的计划；不要使用系统日期，也不要增加审批、部署或执行状态。"
+        },
+        {
+          "source_ordinal": 4,
+          "query": "把当前事项改写成恰好两句中文交接，只能保留上一条四行里的事实，不调用工具，不添加任何后续行动。"
+        },
+        {
+          "source_ordinal": 5,
+          "query": "回到制度并重新取证：先列测试环境验证、低峰期执行、完成后4小时内验证这三项并逐项引用，再单独列 Quill 和 Rook 的用户事实且不要给它们加资料引用。"
+        }
+      ]
+    }
+  ]
+}

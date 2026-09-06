@@ -513,7 +513,6 @@ func RegisterSessionRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbac
 		sessions.PUT("/:id", handler.UpdateSession)
 		sessions.DELETE("/:id", handler.DeleteSession)
 		sessions.DELETE("/:id/messages", handler.ClearSessionMessages)
-		sessions.POST("/:session_id/generate_title", handler.GenerateTitle)
 		sessions.POST("/:session_id/stop", handler.StopSession)
 		// POST and DELETE share this path but gin maintains a separate radix tree
 		// per HTTP verb, and the existing trees use different wildcard names
@@ -1226,7 +1225,7 @@ func RegisterEmbedPublicRoutes(
 		// injects the channel's tenant, and the handler enforces that the
 		// requested path belongs to that tenant.
 		embed.GET("/files", newFileServeHandler(fileService))
-		custombootstrap.RegisterEmbedRoutes(embed, customHandlers)
+		custombootstrap.RegisterEmbedRoutes(embed, customHandlers, embedHandler.RequireEmbedUploadSession, embedHandler.RequireEmbedSession)
 	}
 }
 

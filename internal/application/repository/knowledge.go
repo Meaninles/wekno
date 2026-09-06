@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeworkflowfilter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
@@ -53,6 +54,7 @@ func escapeLikeKeyword(keyword string) string {
 // counter jump back up and never reach zero. Omitting
 // the column here means Save can never touch it.
 var genericOmitFieldsOnUpdate = []string{
+	"PublicationState", "PublishedGeneration", "PublishedEmbeddingModelID",
 	"DeletedAt",
 	"ParseStatus",
 	"ProcessingGeneration",
@@ -74,6 +76,7 @@ var genericOmitFieldsOnUpdate = []string{
 // transaction owns lifecycle fields, but the enrichment counter remains owned
 // by its own atomic helpers.
 var atomicFinalizeOmitFields = []string{
+	"PublicationState", "PublishedGeneration", "PublishedEmbeddingModelID",
 	"DeletedAt",
 	"PendingSubtasksCount",
 	"ProcessingWorkflowID",
@@ -867,6 +870,32 @@ func (r *knowledgeRepository) CompareAndSwapKnowledgeProcessingGeneration(
 		}
 	}
 	normalizeKnowledgeLifecycleValues(values)
+	if values["core_status"] == types.CoreStatusReady {
+		var updated bool
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var before types.Knowledge
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ?",
+				tenantID, id, expectedKnowledgeBaseID, expectedGeneration, expectedStatuses).Take(&before).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if err := tx.Model(&types.Knowledge{}).Where("tenant_id = ? AND id = ?", tenantID, id).Updates(values).Error; err != nil {
+				return err
+			}
+			if before.PublishedGeneration != expectedGeneration {
+				if err := knowledgeaux.PublishChunksTx(tx, &before, &before); err != nil {
+					return err
+				}
+			}
+			updated = true
+			return nil
+		})
+		return updated, err
+	}
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where(
@@ -1339,6 +1368,10 @@ func (r *knowledgeRepository) FinalizeKnowledgeWithStorageOwned(
 
 	var finalized bool
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before types.Knowledge
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ?", knowledge.TenantID, knowledge.ID).Take(&before).Error; err != nil {
+			return err
+		}
 		result := tx.Model(&types.Knowledge{}).
 			Where(
 				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND processing_generation = ? AND processing_owner = ?",
@@ -1358,7 +1391,13 @@ func (r *knowledgeRepository) FinalizeKnowledgeWithStorageOwned(
 		if result.RowsAffected != 1 {
 			return nil
 		}
-		if storageDelta > 0 {
+		if knowledge.CoreStatus == types.CoreStatusReady {
+			if err := knowledgeaux.PublishChunksTx(tx, &before, knowledge); err != nil {
+				return err
+			}
+		}
+		storageDelta -= before.StorageSize
+		if storageDelta != 0 {
 			result = tx.Model(&types.Tenant{}).
 				Where("id = ?", knowledge.TenantID).
 				UpdateColumn("storage_used", gorm.Expr("storage_used + ?", storageDelta))

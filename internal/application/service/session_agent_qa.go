@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"github.com/Tencent/WeKnora/internal/custom/modules/agentconfig"
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -37,12 +36,6 @@ func (s *sessionService) AgentQA(
 	agentConfig, err := s.BuildAgentRuntimeConfig(ctx, req)
 	if err != nil {
 		return err
-	}
-	lightMode, lightNames := lightweightSkillSelection(req.CustomAgent)
-	agentConfig.LightweightSkillContext = LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames)
-	if agentConfig.LightweightSkillContext != "" {
-		logger.Infof(ctx, "Added lightweight Skill system context (mode=%s, configured=%d, chat=%d)",
-			lightMode, len(lightNames), len(req.SkillNames))
 	}
 	effectiveModelID := agentConfig.RuntimeModelID
 	if effectiveModelID == "" {
@@ -84,10 +77,8 @@ func (s *sessionService) AgentQA(
 	}
 
 	// Load multi-turn history directly from DB (the single source of truth).
-	// AgentSteps on each historical assistant message are expanded into proper
-	// assistant_with_tool_calls + tool messages so the model can see what was
-	// tried last turn — except final_answer, which is replayed as the trailing
-	// canonical assistant message.
+	// The shared history projection includes bounded dialogue and read handles;
+	// old tool transcripts stay archived, with exact evidence validated on read.
 	var llmContext []chat.Message
 	var durableUserContext string
 	if agentConfig.MultiTurnEnabled {
@@ -148,33 +139,29 @@ func (s *sessionService) AgentQA(
 		}
 	}
 
-	agentQuery := req.Query
+	var agentContext string
 	var agentImageURLs []string
 	if agentModelSupportsVision && len(req.ImageURLs) > 0 {
 		agentImageURLs = req.ImageURLs
 		logger.Infof(ctx, "Agent model supports vision, passing %d image(s) directly", len(agentImageURLs))
 	} else if req.ImageDescription != "" {
-		agentQuery = req.Query + "\n\n[用户上传图片内容]\n" + req.ImageDescription
+		agentContext = "[用户上传图片内容]\n" + req.ImageDescription
 		logger.Infof(ctx, "Agent model does not support vision, appending image description (%d chars)", len(req.ImageDescription))
 	}
 	if req.QuotedContext != "" {
-		agentQuery += "\n\n" + req.QuotedContext
+		agentContext += "\n\n" + req.QuotedContext
 	}
 	// Inject attachment content (documents, audio transcripts, etc.) so the agent
 	// can see uploaded files. Mirrors the behavior of the KnowledgeQA pipeline
 	// (see chat_pipeline/into_chat_message.go).
 	if len(req.Attachments) > 0 {
-		agentQuery += req.Attachments.BuildPrompt()
+		agentContext += req.Attachments.BuildPrompt()
 		logger.Infof(ctx, "Appended %d attachment(s) to agent query", len(req.Attachments))
 	}
 	if agentConfig.AgentType == types.AgentTypeTableAnalysis && agentConfig.TableAnalysisDisplayIntent != nil {
-		agentQuery = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentQuery
+		agentContext = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentContext
 	}
-	agentQuery = conversationmemory.AppendCurrentTurnDirective(
-		agentQuery,
-		req.Query,
-	)
-	engine.SetCurrentUserRequest(req.Query)
+	engine.SetCurrentTurnContext(agentContext)
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
 	// the agent engine only; we intentionally do not persist them on user messages
@@ -187,7 +174,7 @@ func (s *sessionService) AgentQA(
 		ctx,
 		sessionID,
 		req.AssistantMessageID,
-		agentQuery,
+		req.Query,
 		llmContext,
 		agentImageURLs,
 	); err != nil {
@@ -270,7 +257,15 @@ func (s *sessionService) buildAgentConfig(
 	agentTenantID uint64,
 ) (*types.AgentConfig, error) {
 	customAgent := req.CustomAgent
+	resolved, resolveErr := agentconfig.ResolvePrompts(customAgent.Config, s.cfg.PromptTemplates)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	agentCopy := *customAgent
+	agentCopy.Config = resolved
+	customAgent = &agentCopy
 	agentConfig := &types.AgentConfig{
+		RetrievalBudget:             customAgent.Config.RetrievalBudget,
 		AgentID:                     customAgent.ID,
 		AgentTenantID:               agentTenantID,
 		MaxIterations:               customAgent.Config.MaxIterations,
@@ -302,7 +297,6 @@ func (s *sessionService) buildAgentConfig(
 		RerankThreshold:             customAgent.Config.RerankThreshold,
 		FAQPriorityEnabled:          customAgent.Config.FAQPriorityEnabled,
 		FAQDirectAnswerThreshold:    customAgent.Config.FAQDirectAnswerThreshold,
-		FAQScoreBoost:               customAgent.Config.FAQScoreBoost,
 		EnableArtifacts:             customAgent.Config.EnableArtifacts,
 	}
 	proMode, proNames := professionalSkillSelection(customAgent)
@@ -315,8 +309,9 @@ func (s *sessionService) buildAgentConfig(
 	}
 
 	// Configure skills based on CustomAgentConfig
-	s.configureSkillsFromAgent(ctx, agentConfig, customAgent)
-	configureRuntimeSkills(ctx, req, agentConfig, customAgent)
+	if err := configureRuntimeSkills(ctx, req, agentConfig, customAgent); err != nil {
+		return nil, err
+	}
 
 	// Resolve knowledge bases using shared helper
 	agentConfig.KnowledgeBases, agentConfig.KnowledgeIDs = s.resolveKnowledgeBases(ctx, req)
@@ -334,7 +329,6 @@ func (s *sessionService) buildAgentConfig(
 	// whitelist to the mentioned items and records the pinned set used for the
 	// <must_use> hint, keeping all scope logic in one place per resource type.
 	isSharedAgent := req.Session != nil && req.Session.TenantID != customAgent.TenantID
-	applyPerRequestSkillScope(ctx, agentConfig, customAgent.Config.SkillsSelectionMode, req.SkillNames)
 	applyPerRequestMCPScope(ctx, agentConfig, customAgent.Config.MCPServices, isSharedAgent, req.MCPServiceIDs)
 
 	// Use custom agent's system prompt if specified
@@ -547,58 +541,4 @@ func professionalSkillSelection(customAgent *types.CustomAgent) (string, []strin
 		mode = "none"
 	}
 	return mode, append([]string(nil), customAgent.Config.SelectedProfessionalSkills...)
-}
-
-// configureSkillsFromAgent configures skills settings in AgentConfig based on CustomAgentConfig
-// Returns the skill directories and allowed skills based on the selection mode:
-//   - "all": uses all preloaded skills
-//   - "selected": uses the explicitly selected skills
-//   - "none" or "": skills are disabled
-func (s *sessionService) configureSkillsFromAgent(
-	ctx context.Context,
-	agentConfig *types.AgentConfig,
-	customAgent *types.CustomAgent,
-) {
-	if customAgent == nil {
-		return
-	}
-	// When sandbox is disabled, skills cannot be enabled (no script execution environment)
-	sandboxMode := os.Getenv("WEKNORA_SANDBOX_MODE")
-	if sandboxMode == "" || sandboxMode == "disabled" {
-		agentConfig.SkillsEnabled = false
-		agentConfig.SkillDirs = nil
-		agentConfig.AllowedSkills = nil
-		logger.Infof(ctx, "Sandbox is disabled: skills are not available")
-		return
-	}
-	dir := getPreloadedSkillsDir()
-	switch customAgent.Config.SkillsSelectionMode {
-	case "all":
-		// Enable all preloaded skills
-		agentConfig.SkillsEnabled = true
-		agentConfig.SkillDirs = []string{dir}
-		agentConfig.AllowedSkills = nil // Empty means all skills allowed
-		logger.Infof(ctx, "SkillsSelectionMode=all: enabled all preloaded skills")
-	case "selected":
-		// Enable only selected skills
-		if len(customAgent.Config.SelectedSkills) > 0 {
-			agentConfig.SkillsEnabled = true
-			agentConfig.SkillDirs = []string{dir}
-			agentConfig.AllowedSkills = customAgent.Config.SelectedSkills
-			logger.Infof(ctx, "SkillsSelectionMode=selected: enabled %d selected skills: %v",
-				len(customAgent.Config.SelectedSkills), customAgent.Config.SelectedSkills)
-		} else {
-			agentConfig.SkillsEnabled = false
-			logger.Infof(ctx, "SkillsSelectionMode=selected but no skills selected: skills disabled")
-		}
-	case "none", "":
-		// Skills disabled
-		agentConfig.SkillsEnabled = false
-		logger.Infof(ctx, "SkillsSelectionMode=%s: skills disabled", customAgent.Config.SkillsSelectionMode)
-	default:
-		// Unknown mode, disable skills
-		agentConfig.SkillsEnabled = false
-		logger.Warnf(ctx, "Unknown SkillsSelectionMode=%s: skills disabled", customAgent.Config.SkillsSelectionMode)
-	}
-
 }

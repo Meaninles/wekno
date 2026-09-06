@@ -44,6 +44,7 @@ func (p *PluginMerge) ActivationEvents() []types.EventType {
 func (p *PluginMerge) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
+	ctx = types.WithPublishedChunks(ctx)
 	if !chatManage.NeedsRetrieval() {
 		return next()
 	}

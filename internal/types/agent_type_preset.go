@@ -53,6 +53,7 @@ type AgentTypePresetEntry struct {
 // We mirror json tags (not yaml tags) directly from CustomAgentConfig so the
 // frontend can apply them via simple Object.assign.
 type AgentTypePresetConfig struct {
+	SystemPrompt                    string                     `yaml:"-" json:"system_prompt,omitempty"`
 	SystemPromptID                  string                     `yaml:"system_prompt_id"       json:"system_prompt_id,omitempty"`
 	Thinking                        *bool                      `yaml:"thinking"               json:"thinking,omitempty"`
 	Temperature                     float64                    `yaml:"temperature"            json:"temperature,omitempty"`
@@ -64,7 +65,6 @@ type AgentTypePresetConfig struct {
 	RetainRetrievalHistory          bool                       `yaml:"retain_retrieval_history" json:"retain_retrieval_history,omitempty"`
 	FAQPriorityEnabled              bool                       `yaml:"faq_priority_enabled"   json:"faq_priority_enabled,omitempty"`
 	FAQDirectAnswerThreshold        float64                    `yaml:"faq_direct_answer_threshold" json:"faq_direct_answer_threshold,omitempty"`
-	FAQScoreBoost                   float64                    `yaml:"faq_score_boost"       json:"faq_score_boost,omitempty"`
 	WebSearchEnabled                bool                       `yaml:"web_search_enabled"     json:"web_search_enabled,omitempty"`
 	ClaudeSDKWebSearchEnabled       bool                       `yaml:"claude_sdk_web_search_enabled" json:"claude_sdk_web_search_enabled,omitempty"`
 	WebFetchEnabled                 bool                       `yaml:"web_fetch_enabled"      json:"web_fetch_enabled,omitempty"`
@@ -196,7 +196,8 @@ func ResolveAgentTypePresetPromptRefs(resolver func(id string) string) {
 		if entry == nil || entry.Config == nil || entry.Config.SystemPromptID == "" {
 			continue
 		}
-		if content := resolver(entry.Config.SystemPromptID); content == "" {
+		entry.Config.SystemPrompt = resolver(entry.Config.SystemPromptID)
+		if entry.Config.SystemPrompt == "" {
 			fmt.Printf(
 				"Warning: agent type preset %q references system_prompt_id %q but template not found\n",
 				entry.ID, entry.Config.SystemPromptID,

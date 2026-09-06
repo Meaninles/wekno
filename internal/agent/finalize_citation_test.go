@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -8,7 +9,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestPrepareFinalAnswerCitationContextUsesDocumentFragments(t *testing.T) {
+func TestCitationRegistrationUsesDocumentFragments(t *testing.T) {
 	state := &types.AgentState{
 		RoundSteps: []types.AgentStep{
 			{
@@ -45,7 +46,12 @@ func TestPrepareFinalAnswerCitationContextUsesDocumentFragments(t *testing.T) {
 		},
 	}
 
-	context, refs := prepareFinalAnswerCitationContext(state)
+	engine := newTestEngine(t, &mockChat{})
+	engine.citationState.reset()
+	result := state.RoundSteps[0].ToolCalls[0].Result
+	engine.exposeToolResultReferences(context.Background(), "session", "knowledge_search", result)
+	refs := engine.syncCitationReferences(state)
+	context := result.Output
 
 	if len(refs) != 2 {
 		t.Fatalf("refs len = %d, want 2", len(refs))

@@ -67,7 +67,8 @@
     </transition>
 
     <div class="embed-chat__input">
-      <EmbedInputField
+      <ChatUploadProgress :rows="uploadRows" :preparing="uploadsPreparing" @retry="retryUpload" @cancel="cancelUploads" />
+      <EmbedInputField ref="inputRef" :inert="uploadsPreparing || undefined"
         :isReplying="isReplying"
         :show-web-search-toggle="showWebSearchToggle"
         v-model:web-search-enabled="webSearchEnabled"
@@ -80,12 +81,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { onEmbedHostOpenWithQuery } from '@/api/embed'
 import EmbedInputField from '@/components/EmbedInputField.vue'
+import ChatUploadProgress from '@/custom/modules/chatuploads/ChatUploadProgress.vue'
+const inputRef = ref<InstanceType<typeof EmbedInputField> | null>(null)
 import EmbedBotMessage from '@/views/embed/EmbedBotMessage.vue'
 import EmbedUserMessage from '@/views/embed/EmbedUserMessage.vue'
 import { useEmbedChatSession } from '@/composables/useEmbedChatSession'
+import { getSessionDraftState } from '@/custom/modules/sessionState/draftState'
+import { embedDraftScope } from '@/custom/modules/sessionState/storage'
 
 type EmbedImage = { url?: string; data?: string }
 type EmbedAttachment = { file_name: string; file_size?: number }
@@ -163,6 +168,7 @@ watch(() => props.hostContext, (ctx) => {
 }, { deep: true })
 
 const {
+  uploadRows, uploadsPreparing, retryUpload, cancelUploads,
   messagesList,
   loading,
   isReplying,
@@ -210,19 +216,31 @@ const showGlobalTypingIndicator = computed(() =>
 const showWelcome = computed(() => hasWelcomeText.value && !hasUserMessage.value)
 
 const onSendMsg = (query: string, imageFiles: File[] = [], attachmentFiles: File[] = []) => {
+  const requestSession = props.sessionId
   void sendMsg(query, {
     webSearchEnabled: webSearchEnabled.value,
     imageFiles,
     attachmentFiles,
+  }).catch(() => {
+    if (props.sessionId === requestSession) inputRef.value?.restoreDraft(query, imageFiles, attachmentFiles)
   })
 }
+
+watch(() => [props.sessionId, props.visitorId], async ([sessionId, visitorId]) => {
+  if (!sessionId || !visitorId) return
+  const draft = await getSessionDraftState(sessionId, embedDraftScope(props.channelId, visitorId))
+  await nextTick()
+  if (sessionId === props.sessionId && visitorId === props.visitorId) {
+    inputRef.value?.restoreDraft(draft?.query || '', draft?.images || [], draft?.attachments.map(a => a.file) || [])
+  }
+}, { immediate: true })
 
 let removeOpenQueryListener: (() => void) | null = null
 
 onMounted(() => {
   removeOpenQueryListener = onEmbedHostOpenWithQuery((query) => {
     if (isReplying.value) return
-    void sendMsg(query, { webSearchEnabled: webSearchEnabled.value })
+    void sendMsg(query, { webSearchEnabled: webSearchEnabled.value }).catch(() => inputRef.value?.restoreDraft(query, [], []))
   })
 })
 

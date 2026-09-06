@@ -19,40 +19,6 @@ const (
 	clientFilenameTextLimit = 240
 )
 
-// persistStripFields lists bulky Data keys to drop before SSE replay / DB storage.
-var persistStripFields = map[string][]string{
-	"knowledge_chunks_list": {"chunks"},
-	"grep_results":          {"chunk_results"},
-	"db_schema":             {"semantic_context"},
-}
-
-// ShouldOmitRawToolOutput reports whether the raw XML/text Output should be
-// excluded from SSE replay and persisted agent_steps. The full Output remains
-// available in-memory for the current agent turn.
-func ShouldOmitRawToolOutput(_ string, data map[string]interface{}) bool {
-	if data == nil {
-		return false
-	}
-	displayType, ok := data["display_type"].(string)
-	return ok && displayType != ""
-}
-
-// SanitizeToolDataForPersist returns a copy of tool Data safe for DB / SSE replay.
-func SanitizeToolDataForPersist(data map[string]interface{}) map[string]interface{} {
-	if data == nil {
-		return nil
-	}
-	out := make(map[string]interface{}, len(data))
-	for k, v := range data {
-		out[k] = v
-	}
-	displayType := stringField(data, "display_type")
-	for _, key := range persistStripFields[displayType] {
-		delete(out, key)
-	}
-	return out
-}
-
 // SanitizeToolDataForClient returns the small, display-only subset that may be
 // sent to browsers through SSE or history APIs. It intentionally keeps only
 // fields currently needed by frontend renderers and caps user/content payloads.
@@ -182,7 +148,9 @@ func SanitizeMessagesForClient(messages []*types.Message) []*types.Message {
 	return out
 }
 
-// SanitizeAgentStepsForStorage strips LLM-only payloads from persisted steps.
+// SanitizeAgentStepsForStorage isolates stored results from display projection.
+// The durable record retains the actual tool arguments and evidence returned to
+// the model. Conversation history uses explicit paged reads, not automatic replay.
 func SanitizeAgentStepsForStorage(steps []types.AgentStep) []types.AgentStep {
 	if len(steps) == 0 {
 		return steps
@@ -200,32 +168,11 @@ func SanitizeAgentStepsForStorage(steps []types.AgentStep) []types.AgentStep {
 				continue
 			}
 			result := *tc.Result
-			if ShouldOmitRawToolOutput(tc.Name, result.Data) {
-				result.Output = compactToolSummary(result.Success, result.Error, result.Data)
-				result.Data = SanitizeToolDataForPersist(result.Data)
-			}
 			toolCalls[j].Result = &result
 		}
 		out[i].ToolCalls = toolCalls
 	}
 	return out
-}
-
-// CompactToolOutputForHistory rebuilds a short tool message when replaying history.
-func CompactToolOutputForHistory(toolName string, result *types.ToolResult) string {
-	if result == nil {
-		return ""
-	}
-	if !result.Success {
-		if result.Error != "" {
-			return "Error: " + result.Error
-		}
-		return "Error: tool call failed"
-	}
-	if result.Output != "" && !ShouldOmitRawToolOutput(toolName, result.Data) {
-		return result.Output
-	}
-	return compactToolSummary(result.Success, result.Error, result.Data)
 }
 
 func compactToolSummary(success bool, errMsg string, data map[string]interface{}) string {

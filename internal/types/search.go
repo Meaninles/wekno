@@ -88,6 +88,8 @@ func (st SearchTargets) ContainsKB(kbID string) bool {
 
 // SearchResult represents the search result
 type SearchResult struct {
+	QueryScores    map[string]float64 `json:"query_scores,omitempty"`
+	MatchedQueries []string           `json:"matched_queries,omitempty"`
 	// ID
 	ID string `gorm:"column:id"              json:"id"`
 	// Content
@@ -176,6 +178,9 @@ type SearchResult struct {
 
 // SearchParams represents the search parameters
 type SearchParams struct {
+	// CandidateCount belongs to retrieval, MatchCount to direct result APIs.
+	// Reranking callers explicitly request the larger candidate pool.
+	CandidateCount       int       `json:"candidate_count,omitempty"`
 	QueryText            string    `json:"query_text"`
 	QueryEmbedding       []float32 `json:"query_embedding,omitempty"`
 	VectorThreshold      float64   `json:"vector_threshold"`
@@ -215,6 +220,8 @@ func (c *SearchResult) Scan(value interface{}) error {
 
 // Pagination represents the pagination parameters
 type Pagination struct {
+	// StartOffset preserves exact offsets for internal cursor-less tool requests.
+	StartOffset *int `json:"-" form:"-"`
 	// Page
 	Page int `form:"page"      json:"page"      binding:"omitempty,min=1"`
 	// Page size
@@ -242,6 +249,9 @@ func (p *Pagination) GetPageSize() int {
 
 // Offset gets the offset for database query
 func (p *Pagination) Offset() int {
+	if p.StartOffset != nil {
+		return max(0, *p.StartOffset)
+	}
 	return (p.GetPage() - 1) * p.GetPageSize()
 }
 

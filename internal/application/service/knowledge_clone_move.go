@@ -243,7 +243,7 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 	urlCache := map[string]string{}
 
 	for {
-		sourceChunks, _, err := s.chunkRepo.ListPagedChunksByKnowledgeID(ctx,
+		sourceChunks, _, err := s.chunkRepo.ListPagedChunksByKnowledgeID(types.WithPublishedChunks(ctx),
 			src.TenantID,
 			src.ID,
 			&types.Pagination{
@@ -286,27 +286,29 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 				return err
 			}
 			targetChunk := &types.Chunk{
-				ID:              uuid.New().String(),
-				TenantID:        dst.TenantID,
-				KnowledgeID:     dst.ID,
-				KnowledgeBaseID: dst.KnowledgeBaseID,
-				TagID:           targetTagID,
-				Content:         sourceChunk.Content,
-				ChunkIndex:      sourceChunk.ChunkIndex,
-				IsEnabled:       sourceChunk.IsEnabled,
-				Flags:           sourceChunk.Flags,
-				Status:          sourceChunk.Status,
-				StartAt:         sourceChunk.StartAt,
-				EndAt:           sourceChunk.EndAt,
-				PreChunkID:      sourceChunk.PreChunkID,
-				NextChunkID:     sourceChunk.NextChunkID,
-				ChunkType:       sourceChunk.ChunkType,
-				ParentChunkID:   sourceChunk.ParentChunkID,
-				Metadata:        sourceChunk.Metadata,
-				ContentHash:     sourceChunk.ContentHash,
-				ImageInfo:       newImageInfo,
-				CreatedAt:       now,
-				UpdatedAt:       now,
+				ID:                   uuid.New().String(),
+				TenantID:             dst.TenantID,
+				KnowledgeID:          dst.ID,
+				KnowledgeBaseID:      dst.KnowledgeBaseID,
+				TagID:                targetTagID,
+				Content:              sourceChunk.Content,
+				ChunkIndex:           sourceChunk.ChunkIndex,
+				IsEnabled:            false,
+				ProcessingGeneration: dst.ProcessingGeneration,
+				SourceLocator:        append(types.JSON(nil), sourceChunk.SourceLocator...),
+				Flags:                sourceChunk.Flags,
+				Status:               sourceChunk.Status,
+				StartAt:              sourceChunk.StartAt,
+				EndAt:                sourceChunk.EndAt,
+				PreChunkID:           sourceChunk.PreChunkID,
+				NextChunkID:          sourceChunk.NextChunkID,
+				ChunkType:            sourceChunk.ChunkType,
+				ParentChunkID:        sourceChunk.ParentChunkID,
+				Metadata:             sourceChunk.Metadata,
+				ContentHash:          sourceChunk.ContentHash,
+				ImageInfo:            newImageInfo,
+				CreatedAt:            now,
+				UpdatedAt:            now,
 			}
 			targetChunks = append(targetChunks, targetChunk)
 			srcTodst[sourceChunk.ID] = targetChunk.ID

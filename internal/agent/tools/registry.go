@@ -11,17 +11,9 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// toolErrorHint is appended to tool error messages to guide the LLM to retry with a different approach.
-const toolErrorHint = "\n\n[Analyze the error above and try a different approach.]"
-
-func toolErrorMessage(toolName, errMsg string) string {
-	return errMsg + toolErrorHint
-}
-
 // ToolRegistry manages the registration and retrieval of tools
 type ToolRegistry struct {
-	tools             map[string]types.Tool
-	maxToolOutputSize int // maximum chars for tool output (0 = use DefaultMaxToolOutput)
+	tools map[string]types.Tool
 }
 
 // NewToolRegistry creates a new tool registry
@@ -29,20 +21,6 @@ func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
 		tools: make(map[string]types.Tool),
 	}
-}
-
-// SetMaxToolOutputSize sets the maximum character length for tool output.
-// Values <= 0 will use DefaultMaxToolOutput.
-func (r *ToolRegistry) SetMaxToolOutputSize(maxChars int) {
-	r.maxToolOutputSize = maxChars
-}
-
-// getMaxToolOutput returns the effective max tool output size.
-func (r *ToolRegistry) getMaxToolOutput() int {
-	if r.maxToolOutputSize > 0 {
-		return r.maxToolOutputSize
-	}
-	return DefaultMaxToolOutput
 }
 
 // RegisterTool adds a tool to the registry.
@@ -122,7 +100,7 @@ func (r *ToolRegistry) ExecuteTool(
 		})
 		return &types.ToolResult{
 			Success: false,
-			Error:   toolErrorMessage(name, err.Error()),
+			Error:   err.Error(),
 		}, err
 	}
 
@@ -133,7 +111,7 @@ func (r *ToolRegistry) ExecuteTool(
 	// Validate parameters against the tool's JSON Schema before execution.
 	// This catches invalid arguments early, avoiding a wasted tool execution + LLM round.
 	if validationErrs := ValidateParams(args, tool.Parameters()); len(validationErrs) > 0 {
-		errMsg := toolErrorMessage(name, FormatValidationErrors(validationErrs))
+		errMsg := FormatValidationErrors(validationErrs)
 		common.PipelineWarn(ctx, "AgentTool", "validation_failed", map[string]interface{}{
 			"tool":   name,
 			"errors": errMsg,
@@ -146,11 +124,10 @@ func (r *ToolRegistry) ExecuteTool(
 
 	result, execErr := tool.Execute(ctx, args)
 
-	// Truncate large tool outputs to prevent context window poisoning.
-	maxOutput := r.getMaxToolOutput()
-	if result != nil && len(result.Output) > maxOutput {
-		result.Output = TruncateToolOutput(result.Output, maxOutput)
-	}
+	// Preserve the execution result. Retrieval tools select whole evidence
+	// within their budget; the shared conversation budget archives exact tool
+	// messages behind readable handles when needed. A second head/tail cut here
+	// corrupted structured results before either persistence or archival.
 
 	fields := map[string]interface{}{
 		"tool": name,
@@ -166,12 +143,6 @@ func (r *ToolRegistry) ExecuteTool(
 		fields["error"] = execErr.Error()
 		common.PipelineError(ctx, "AgentTool", "execute_done", fields)
 	} else if result != nil && !result.Success {
-		// Append error hint to guide LLM to retry with a different approach,
-		// except for one-shot tools where retrying or simulating the result
-		// makes the user-facing failure worse.
-		if result.Error != "" {
-			result.Error = toolErrorMessage(name, result.Error)
-		}
 		common.PipelineWarn(ctx, "AgentTool", "execute_done", fields)
 	} else {
 		common.PipelineInfo(ctx, "AgentTool", "execute_done", fields)

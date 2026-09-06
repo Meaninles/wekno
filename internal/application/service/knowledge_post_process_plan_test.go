@@ -329,9 +329,10 @@ func TestKnowledgePostProcessWikiPersistFailureStopsBeforeStateAndFanout(t *test
 			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
 		}},
 		chunkService: &postProcessWikiGateChunkServiceStub{chunks: []*types.Chunk{{
-			ID:        "chunk-1",
-			ChunkType: types.ChunkTypeText,
-			Content:   "document text",
+			ID:                   "chunk-1",
+			ChunkType:            types.ChunkTypeText,
+			Content:              "document text",
+			ProcessingGeneration: postProcessTestGeneration,
 		}}},
 		taskEnqueuer: taskEnqueuer,
 		pendingRepo:  pendingRepo,
@@ -494,6 +495,7 @@ func TestKnowledgePostProcessSetFinalizingFailureIsRetriedBeforeFanout(t *testin
 		}},
 		chunkService: &postProcessWikiGateChunkServiceStub{chunks: []*types.Chunk{{
 			ID: "chunk-1", ChunkType: types.ChunkTypeText, Content: "text",
+			ProcessingGeneration: postProcessTestGeneration,
 		}}},
 		taskEnqueuer: taskEnqueuer,
 		pendingRepo:  &wikiQueuePendingRepoStub{},
@@ -536,6 +538,7 @@ func TestKnowledgePostProcessPersistedWikiRowContinuesWhenTriggerFails(t *testin
 		}},
 		chunkService: &postProcessWikiGateChunkServiceStub{chunks: []*types.Chunk{{
 			ID: "chunk-1", ChunkType: types.ChunkTypeText, Content: "text",
+			ProcessingGeneration: postProcessTestGeneration,
 		}}},
 		taskEnqueuer: taskEnqueuer,
 		pendingRepo:  pendingRepo,

@@ -128,15 +128,9 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 	kb.UpdatedAt = time.Now()
 	// Record the creator so RBAC's RequireOwnershipOrRole can let
 	// Contributors edit their own KBs without granting them tenant-wide
-	// edit rights. The X-API-Key auth path attaches a synthetic
-	// `system-<tenantID>` user; we deliberately skip those so the KB
-	// stays tenant-owned (CreatorID == ""), which matches the original
-	// API-key semantics (any human Admin can manage it) and prevents a
-	// later "list KBs by creator" feature from surfacing rows nobody can
-	// re-attribute.
-	if uid, ok := types.UserIDFromContext(ctx); ok && !types.IsSyntheticUserID(uid) {
-		kb.CreatorID = uid
-	}
+	// edit rights. API and embed principals are session identities, not
+	// accounts; private attachment ownership is stored separately.
+	kb.CreatorID, _ = types.AccountUserIDFromContext(ctx)
 	kb.EnsureDefaults()
 	applyTenantDefaultStorageProvider(ctx, kb)
 
@@ -1441,11 +1435,8 @@ func (s *knowledgeBaseService) CopyKnowledgeBase(ctx context.Context,
 		}
 		// The clone is owned by the caller, not the original creator —
 		// otherwise a Contributor copying someone else's KB would still
-		// not be able to edit the result. Skip synthetic API-key users
-		// (see CreateKnowledgeBase for the same reasoning).
-		if uid, ok := types.UserIDFromContext(ctx); ok && !types.IsSyntheticUserID(uid) {
-			targetKB.CreatorID = uid
-		}
+		// not be able to edit the result. Terminal identities are not accounts.
+		targetKB.CreatorID, _ = types.AccountUserIDFromContext(ctx)
 		targetKB.EnsureDefaults()
 		if err := s.repo.CreateKnowledgeBase(ctx, targetKB); err != nil {
 			return nil, nil, err

@@ -10,6 +10,7 @@ from docreader.parser.chain_parser import PipelineParser
 from docreader.parser.concurrency import parser_worker_limit
 from docreader.parser.markdown_parser import MarkdownParser
 from docreader.parser.ppt_convert import normalize_ppt_bytes
+from custom.services.weknora_docreader_runtime.structure import expand_merged_docx_cells
 from docreader.parser.pptx_media import (
     attach_pptx_media_to_markdown,
     markdown_needs_pptx_media_attach,
@@ -38,6 +39,8 @@ class StdMarkitdownParser(BaseParser):
         """
         ext = self.file_type
         ft = (ext or "").lstrip(".").lower()
+        if ft == "docx":
+            content = expand_merged_docx_cells(content)
         pptx_bytes: bytes | None = None
         if ft in ("ppt", "pptx"):
             content, ext = normalize_ppt_bytes(content, ft)

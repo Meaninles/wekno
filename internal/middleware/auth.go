@@ -62,6 +62,7 @@ var noAuthAPI = map[string][]string{
 	// must not intercept this exact callback path, otherwise the sidecar cannot
 	// call back into WeKnora tools such as KB/Web/MCP/Skills/DB.
 	"/api/v1/custom/general-agent/internal/tools/call": {"POST"},
+	"/api/v1/custom/general-agent/internal/model/call": {"POST"},
 	// Agent artifact delivery uses the same dedicated internal API key. Keep
 	// the bypass exact: no sibling path or other method becomes public.
 	"/api/v1/custom/general-agent/internal/artifacts/upload": {"POST"},

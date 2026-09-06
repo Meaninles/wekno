@@ -79,13 +79,14 @@ func (d *DocumentInfo) UnmarshalJSON(data []byte) error {
 }
 
 type RerankerConfig struct {
-	APIKey      string
-	BaseURL     string
-	ModelName   string
-	Source      types.ModelSource
-	ModelID     string
-	Provider    string // Provider identifier: openai, aliyun, zhipu, siliconflow, jina, generic
-	ExtraConfig map[string]string
+	MaxInputTokens int
+	APIKey         string
+	BaseURL        string
+	ModelName      string
+	Source         types.ModelSource
+	ModelID        string
+	Provider       string // Provider identifier: openai, aliyun, zhipu, siliconflow, jina, generic
+	ExtraConfig    map[string]string
 	// CustomHeaders 允许在调用远程 API 时附加自定义 HTTP 请求头（类似 OpenAI Python SDK 的 extra_headers）。
 	CustomHeaders map[string]string
 	AppID         string
@@ -100,25 +101,30 @@ func ConfigFromModel(m *types.Model, appID, appSecret string) *RerankerConfig {
 		return nil
 	}
 	return &RerankerConfig{
-		ModelID:       m.ID,
-		APIKey:        m.Parameters.APIKey,
-		BaseURL:       m.Parameters.BaseURL,
-		ModelName:     m.Name,
-		Source:        m.Source,
-		Provider:      m.Parameters.Provider,
-		ExtraConfig:   m.Parameters.ExtraConfig,
-		CustomHeaders: m.Parameters.CustomHeaders,
-		AppID:         appID,
-		AppSecret:     appSecret,
+		MaxInputTokens: m.Parameters.RerankParameters.MaxInputTokens,
+		ModelID:        m.ID,
+		APIKey:         m.Parameters.APIKey,
+		BaseURL:        m.Parameters.BaseURL,
+		ModelName:      m.Name,
+		Source:         m.Source,
+		Provider:       m.Parameters.Provider,
+		ExtraConfig:    m.Parameters.ExtraConfig,
+		CustomHeaders:  m.Parameters.CustomHeaders,
+		AppID:          appID,
+		AppSecret:      appSecret,
 	}
 }
 
 // NewReranker creates a reranker based on the configuration
 func NewReranker(config *RerankerConfig) (Reranker, error) {
+	if config == nil || config.MaxInputTokens <= 64 {
+		return nil, fmt.Errorf("rerank model requires its supported max_input_tokens (>64); configure the provider's actual input limit")
+	}
 	r, err := newReranker(config)
 	if err != nil {
 		return r, err
 	}
+	r = &windowedReranker{Reranker: r, maxTokens: config.MaxInputTokens}
 	if logger.LLMDebugEnabled() {
 		r = &debugReranker{inner: r}
 	}

@@ -2,6 +2,8 @@ package kbmanager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"sync"
@@ -16,6 +18,7 @@ import (
 )
 
 type kbManagerWorkflowKnowledgeService struct {
+	db *gorm.DB
 	interfaces.KnowledgeService
 	mu              sync.Mutex
 	documents       map[string]*types.Knowledge
@@ -26,10 +29,10 @@ type kbManagerWorkflowKnowledgeService struct {
 }
 
 func (s *kbManagerWorkflowKnowledgeService) CreateKnowledgeFromFile(
-	_ context.Context,
+	ctx context.Context,
 	kbID string,
 	file *multipart.FileHeader,
-	_ map[string]string,
+	metadata map[string]string,
 	_ *bool,
 	customFileName string,
 	_ []string,
@@ -47,6 +50,7 @@ func (s *kbManagerWorkflowKnowledgeService) CreateKnowledgeFromFile(
 		status = types.ParseStatusProcessing
 	}
 	created := &types.Knowledge{
+		PublicationState: types.KnowledgePublicationFromContext(ctx), ProcessingGeneration: "generation-new",
 		ID:              s.createdID,
 		TenantID:        1,
 		KnowledgeBaseID: kbID,
@@ -54,6 +58,13 @@ func (s *kbManagerWorkflowKnowledgeService) CreateKnowledgeFromFile(
 		FileName:        name,
 		FileHash:        "new-hash",
 		ParseStatus:     status,
+	}
+	created.Metadata, _ = json.Marshal(metadata)
+	if status == types.ParseStatusCompleted {
+		created.CoreStatus = types.CoreStatusReady
+	}
+	if err := s.db.Create(created).Error; err != nil {
+		return nil, err
 	}
 	s.documents[created.ID] = created
 	if s.createStartedCh != nil {
@@ -74,6 +85,9 @@ func (s *kbManagerWorkflowKnowledgeService) GetKnowledgeByIDOnly(_ context.Conte
 	if doc == nil {
 		return nil, nil
 	}
+	if err := s.db.Model(&types.Knowledge{}).Where("id = ?", id).Updates(map[string]any{"core_status": doc.CoreStatus, "enrichment_status": doc.EnrichmentStatus, "file_hash": doc.FileHash, "processing_generation": doc.ProcessingGeneration}).Error; err != nil {
+		return nil, err
+	}
 	clone := *doc
 	return &clone, nil
 }
@@ -83,6 +97,9 @@ func (s *kbManagerWorkflowKnowledgeService) DeleteKnowledge(_ context.Context, i
 	defer s.mu.Unlock()
 	if s.documents[id] == nil {
 		return fmt.Errorf("document %s not found", id)
+	}
+	if err := s.db.Unscoped().Where("id = ?", id).Delete(&types.Knowledge{}).Error; err != nil {
+		return err
 	}
 	delete(s.documents, id)
 	s.deletedIDs = append(s.deletedIDs, id)
@@ -98,6 +115,9 @@ func (s *kbManagerWorkflowKnowledgeService) setStatus(id, status string) {
 	defer s.mu.Unlock()
 	if s.documents[id] != nil {
 		s.documents[id].ParseStatus = status
+		if status == types.ParseStatusCompleted {
+			s.documents[id].CoreStatus = types.CoreStatusReady
+		}
 	}
 }
 
@@ -132,7 +152,8 @@ func (kbManagerWorkflowFileResolver) ResolveRunFile(_ context.Context, runID, so
 	if runID == "" || sourceType != "artifact" || sourceID != "artifact-1" {
 		return nil, "", "", fmt.Errorf("unexpected source")
 	}
-	return []byte("replacement content"), "replacement.md", "source-sha", nil
+	data := []byte("replacement content")
+	return data, "replacement.md", fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
 func newKBManagerWorkflowService(t *testing.T, nextStatus string) (*Service, *kbManagerWorkflowKnowledgeService, ToolScope, context.Context) {
@@ -142,13 +163,14 @@ func newKBManagerWorkflowService(t *testing.T, nextStatus string) (*Service, *kb
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&Operation{}, &types.CustomAgent{}); err != nil {
+	if err := db.AutoMigrate(&Operation{}, &OperationInput{}, &types.WikiPage{}, &types.TaskPendingOp{}, &types.CustomAgent{}, &types.Knowledge{}, &types.KnowledgeBase{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	kbService := &kbManagerTestKBService{kbs: map[string]*types.KnowledgeBase{
 		"kb-a": {ID: "kb-a", Name: "A", Type: types.KnowledgeBaseTypeDocument, TenantID: 1},
 	}}
 	knowledgeService := &kbManagerWorkflowKnowledgeService{
+		db: db,
 		documents: map[string]*types.Knowledge{
 			"old-doc": {
 				ID:              "old-doc",
@@ -163,6 +185,12 @@ func newKBManagerWorkflowService(t *testing.T, nextStatus string) (*Service, *kb
 		nextStatus:      nextStatus,
 		createdID:       "new-doc",
 		createStartedCh: make(chan struct{}),
+	}
+	if err := db.Create(kbService.kbs["kb-a"]).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(knowledgeService.documents["old-doc"]).Error; err != nil {
+		t.Fatal(err)
 	}
 	service := NewService(
 		db,
@@ -199,6 +227,7 @@ func newKBManagerWorkflowService(t *testing.T, nextStatus string) (*Service, *kb
 	ctx := kbManagerTestContext(1)
 	ctx = context.WithValue(ctx, types.UserIDContextKey, "system-1")
 	ctx = agenttools.WithToolExecContext(ctx, &agenttools.ToolExecContext{RunID: "run-1", SessionID: "session-1"})
+	t.Cleanup(service.Stop)
 	return service, knowledgeService, scope, ctx
 }
 
@@ -219,7 +248,7 @@ func waitForKBManagerOperation(t *testing.T, service *Service, ctx context.Conte
 	return nil
 }
 
-func TestReplaceWritesNewDocumentButNeverDeletesOldInBackend(t *testing.T) {
+func TestRepairReplaceRetainsOldUntilRequiredIndexesReady(t *testing.T) {
 	service, knowledgeService, scope, ctx := newKBManagerWorkflowService(t, types.ParseStatusProcessing)
 	operation, err := service.ReplaceDocument(ctx, scope, ReplaceDocumentRequest{
 		KnowledgeID:         "old-doc",
@@ -242,15 +271,15 @@ func TestReplaceWritesNewDocumentButNeverDeletesOldInBackend(t *testing.T) {
 	if terminal.State != OperationStateCompleted {
 		t.Fatalf("terminal state = %s, want completed; error=%s", terminal.State, terminal.ErrorMessage)
 	}
-	if !knowledgeService.exists("old-doc") || knowledgeService.wasDeleted("old-doc") {
-		t.Fatal("backend deleted the old document after parsing completed")
+	if knowledgeService.exists("old-doc") || !knowledgeService.wasDeleted("old-doc") {
+		t.Fatal("old document was not cleaned after new required indexes completed")
 	}
 	if !knowledgeService.exists("new-doc") {
 		t.Fatal("new replacement document is missing")
 	}
 }
 
-func TestAgentCanDeleteOldImmediatelyAfterReplacementWrite(t *testing.T) {
+func TestRepairReplacementOwnsDeletion(t *testing.T) {
 	service, knowledgeService, scope, ctx := newKBManagerWorkflowService(t, types.ParseStatusProcessing)
 	_, err := service.ReplaceDocument(ctx, scope, ReplaceDocumentRequest{
 		KnowledgeID:         "old-doc",
@@ -260,22 +289,14 @@ func TestAgentCanDeleteOldImmediatelyAfterReplacementWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReplaceDocument() error = %v", err)
 	}
-	deleteOperation, err := service.DeleteDocument(ctx, scope, DeleteDocumentRequest{
-		KnowledgeID:      "old-doc",
-		ExpectedFileHash: "old-hash",
-	})
-	if err != nil {
-		t.Fatalf("DeleteDocument() error = %v", err)
+	_, err = service.DeleteDocument(ctx, scope, DeleteDocumentRequest{KnowledgeID: "old-doc", ExpectedFileHash: "old-hash"})
+	if err == nil {
+		t.Fatal("independent delete bypassed active replacement")
 	}
-	if deleteOperation.State != OperationStateCompleted {
-		t.Fatalf("delete state = %s, want completed", deleteOperation.State)
+	if !knowledgeService.exists("old-doc") {
+		t.Fatal("old document disappeared before replacement was ready")
 	}
-	if knowledgeService.exists("old-doc") || !knowledgeService.wasDeleted("old-doc") {
-		t.Fatal("agent-initiated delete did not remove the old document immediately")
-	}
-	if !knowledgeService.exists("new-doc") {
-		t.Fatal("replacement document disappeared")
-	}
+
 }
 
 func TestDocumentSelectionDoesNotGrantStandaloneAdd(t *testing.T) {

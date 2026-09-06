@@ -133,7 +133,7 @@ func TestBuildSystemPromptAppendsDurableUserContextWithoutReplacingBaseline(t *t
 	prompt := engine.buildSystemPrompt(context.Background())
 	require.Contains(t, prompt, "Full native RAG baseline.")
 	require.Contains(t, prompt, "project foundation")
-	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V15")
+	require.Contains(t, prompt, "DIALOGUE_CONTEXT")
 	require.Less(t, strings.Index(prompt, "Full native RAG baseline."), strings.Index(prompt, "project foundation"))
 }
 
@@ -162,11 +162,10 @@ func TestExecuteLoop_EmptyContentWithStop_ShouldNotCompleteWithEmpty(t *testing.
 
 	_, err := engine.executeLoop(ctx, state, "test query", emptyMessages(), emptyTools(), "sess-1", "msg-1")
 
-	assert.NoError(t, err)
-	assert.True(t, state.IsComplete)
-	assert.NotEmpty(t, state.FinalAnswer,
-		"BUG: FinalAnswer is empty when LLM returns empty content with stop. "+
-			"analyzeResponse() should not allow empty content to be accepted as final answer.")
+	assert.Error(t, err)
+	assert.False(t, state.IsComplete)
+	assert.Empty(t, state.FinalAnswer)
+	assert.Equal(t, 1, mock.callCount)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +176,7 @@ func TestExecuteLoop_NonEmptyContentWithStop_ShouldComplete(t *testing.T) {
 	mock := &mockChat{
 		responses: []mockResponse{
 			{chunks: []types.StreamResponse{
-				{Content: "Here is my answer", Done: true},
+				{ResponseType: types.ResponseTypeAnswer, Content: "Here is my answer", Done: true, FinishReason: "stop"},
 			}},
 		},
 	}
@@ -197,33 +196,6 @@ func TestExecuteLoop_NonEmptyContentWithStop_ShouldComplete(t *testing.T) {
 // TC4: Empty → retry with nudge → non-empty → success
 // ---------------------------------------------------------------------------
 
-func TestExecuteLoop_EmptyThenNonEmpty_ShouldRetryAndComplete(t *testing.T) {
-	mock := &mockChat{
-		responses: []mockResponse{
-			// Round 1: empty content → triggers retry + nudge
-			{chunks: []types.StreamResponse{{Done: true}}},
-			// Round 2: after nudge, LLM produces answer
-			{chunks: []types.StreamResponse{
-				{Content: "Here is the answer.", Done: true},
-			}},
-		},
-	}
-
-	engine := newTestEngine(t, mock)
-	state := &types.AgentState{}
-	ctx := context.Background()
-
-	_, err := engine.executeLoop(ctx, state, "test query", emptyMessages(), emptyTools(), "sess-1", "msg-1")
-
-	assert.NoError(t, err)
-	assert.True(t, state.IsComplete)
-	assert.Equal(t, "Here is the answer.", state.FinalAnswer)
-}
-
-// ---------------------------------------------------------------------------
-// TC5: FinishReason propagation through streamThinkingToEventBus
-// ---------------------------------------------------------------------------
-
 func TestStreamThinkingToEventBus_PropagatesFinishReason(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -233,7 +205,7 @@ func TestStreamThinkingToEventBus_PropagatesFinishReason(t *testing.T) {
 		{"stop", "stop", "stop"},
 		{"tool_calls", "tool_calls", "tool_calls"},
 		{"length", "length", "length"},
-		{"empty_fallback", "", "stop"}, // empty FinishReason → fallback to "stop"
+		{"missing_finish_reason", "", ""}, // preserve missing protocol metadata
 	}
 
 	for _, tt := range tests {
@@ -241,7 +213,7 @@ func TestStreamThinkingToEventBus_PropagatesFinishReason(t *testing.T) {
 			mock := &mockChat{
 				responses: []mockResponse{
 					{chunks: []types.StreamResponse{
-						{Content: "test content", Done: true, FinishReason: tt.finishReason},
+						{ResponseType: types.ResponseTypeAnswer, Content: "test content", Done: true, FinishReason: tt.finishReason},
 					}},
 				},
 			}
@@ -286,62 +258,6 @@ func TestStreamThinkingToEventBus_WithholdsOutputLimitedDraft(t *testing.T) {
 	assert.Empty(t, streamed, "a provider-truncated draft must never reach the answer stream")
 }
 
-func TestExecuteLoop_OutputLimitRetriesOnceWithoutTools(t *testing.T) {
-	mock := &mockChat{responses: []mockResponse{
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "Partial answer that ends",
-			Done:         true,
-			FinishReason: "length",
-		}}},
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "<weknora_final_response>Complete concise answer.</weknora_final_response>",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-	}}
-	engine := newTestEngine(t, mock)
-	var streamed string
-	var completion event.AgentCompleteData
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			streamed += data.Content
-		}
-		return nil
-	})
-	engine.eventBus.On(event.EventAgentComplete, func(_ context.Context, evt event.Event) error {
-		completion, _ = evt.Data.(event.AgentCompleteData)
-		return nil
-	})
-	tools := []chat.Tool{{Type: "function", Function: chat.FunctionDef{Name: "lookup"}}}
-	state := &types.AgentState{}
-
-	_, err := engine.executeLoop(
-		context.Background(), state, "test query", emptyMessages(), tools, "sess-length", "msg-length",
-	)
-
-	require.NoError(t, err)
-	require.Len(t, mock.options, 2)
-	assert.Len(t, mock.options[0].Tools, 1)
-	assert.Empty(t, mock.options[1].Tools)
-	assert.Contains(t, mock.messages[1][len(mock.messages[1])-1].Content, "provider output limit")
-	assert.Equal(t, "Complete concise answer.", state.FinalAnswer)
-	assert.Equal(t, state.FinalAnswer, streamed)
-	assert.NotContains(t, streamed, "Partial answer")
-	assert.Equal(t, "output_limit", state.TerminalRecoveryReason)
-	assert.Equal(t, 1, state.TerminalRecoveryAttempts)
-	assert.Equal(t, "stop", state.TerminalFinishReason)
-	require.NotNil(t, completion.Extra)
-	assert.Equal(t, "output_limit", completion.Extra["terminal_recovery_reason"])
-}
-
-// TestStreamThinkingToEventBus_RoutesReasoningAndAnswerSeparately is the
-// regression guard for the "answer first shows under Thinking, then jumps to
-// the answer area" UX bug. A natural-stop response that carries reasoning in
-// the dedicated reasoning channel (ResponseTypeThinking) plus plain answer
-// content (ResponseTypeAnswer) must route the reasoning to thought events and
-// the answer live to final-answer events — never the reverse.
 func TestStreamThinkingToEventBus_RoutesReasoningAndAnswerSeparately(t *testing.T) {
 	mock := &mockChat{
 		responses: []mockResponse{
@@ -377,34 +293,6 @@ func TestStreamThinkingToEventBus_RoutesReasoningAndAnswerSeparately(t *testing.
 	assert.Equal(t, "The answer is 42.", answers, "plain answer content must stream live to final-answer events")
 	assert.True(t, resp.AnswerStreamed, "AnswerStreamed must be set when answer text was streamed live")
 	assert.NotEmpty(t, resp.AnswerEventID, "AnswerEventID must identify the live answer stream")
-}
-
-func TestStreamThinkingToEventBus_ProjectsOnlyEnvelopedTerminalAnswer(t *testing.T) {
-	mock := &mockChat{
-		responses: []mockResponse{{chunks: []types.StreamResponse{
-			{ResponseType: types.ResponseTypeAnswer, Content: "I should inspect the user sources first.\n<weknora_"},
-			{ResponseType: types.ResponseTypeAnswer, Content: "final_response>Direct answer"},
-			{ResponseType: types.ResponseTypeAnswer, Content: " only.</weknora_final_response>private post-check", Done: true, FinishReason: "stop"},
-		}}},
-	}
-
-	engine := newTestEngine(t, mock)
-	var answers string
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			answers += data.Content
-		}
-		return nil
-	})
-
-	resp, err := engine.streamThinkingToEventBus(
-		context.Background(), emptyMessages(), emptyTools(), 0, "sess-1",
-	)
-	require.NoError(t, err)
-	assert.Equal(t, "Direct answer only.", answers)
-	assert.Equal(t, answers, resp.Content)
-	assert.NotContains(t, answers, "inspect")
-	assert.NotContains(t, answers, "post-check")
 }
 
 func TestStreamThinkingToEventBus_DoesNotFlushToolPreambleAfterToolEvent(t *testing.T) {
@@ -445,43 +333,6 @@ func TestStreamThinkingToEventBus_DoesNotFlushToolPreambleAfterToolEvent(t *test
 // embed reasoning inline as <think>…</think> in the content channel still have
 // their reasoning routed to thought events and only the real answer streamed to
 // the final-answer area.
-func TestStreamThinkingToEventBus_SplitsInlineThinkBlock(t *testing.T) {
-	mock := &mockChat{
-		responses: []mockResponse{
-			{chunks: []types.StreamResponse{
-				{ResponseType: types.ResponseTypeAnswer, Content: "<think>hidden reasoning</think>Visible answer.",
-					Done: true, FinishReason: "stop"},
-			}},
-		},
-	}
-
-	engine := newTestEngine(t, mock)
-	var thoughts, answers string
-	engine.eventBus.On(event.EventAgentThought, func(_ context.Context, evt event.Event) error {
-		if d, ok := evt.Data.(event.AgentThoughtData); ok {
-			thoughts += d.Content
-		}
-		return nil
-	})
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if d, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			answers += d.Content
-		}
-		return nil
-	})
-
-	_, err := engine.streamThinkingToEventBus(context.Background(),
-		emptyMessages(), emptyTools(), 0, "sess-1")
-	require.NoError(t, err)
-
-	assert.Equal(t, "hidden reasoning", thoughts, "inline <think> content must route to thought events")
-	assert.Equal(t, "Visible answer.", answers, "answer outside <think> must stream to final-answer events")
-}
-
-// TestExecuteLoop_NaturalStop_DoesNotDuplicateAnswer ensures the natural-stop
-// branch does not re-emit the full answer (it was already streamed live), so
-// the final-answer content appears exactly once instead of streaming under
-// Thinking and then "jumping" to a duplicate answer block.
 func TestExecuteLoop_NaturalStop_DoesNotDuplicateAnswer(t *testing.T) {
 	mock := &mockChat{
 		responses: []mockResponse{
@@ -517,224 +368,37 @@ func TestExecuteLoop_NaturalStop_DoesNotDuplicateAnswer(t *testing.T) {
 	assert.GreaterOrEqual(t, doneCount, 1, "a Done marker must close the answer stream")
 }
 
-func TestExecuteLoop_CorruptTerminalRetriesOnceWithoutTools(t *testing.T) {
-	mock := &mockChat{responses: []mockResponse{
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "Useful prefix <weknora_final_placeholder>",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "<weknora_final_response>Recovered answer.</weknora_final_response>",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-	}}
-	engine := newTestEngine(t, mock)
-	var answerContent string
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			answerContent += data.Content
-		}
-		return nil
-	})
-	tools := []chat.Tool{{
-		Type: "function",
-		Function: chat.FunctionDef{
-			Name:       "lookup",
-			Parameters: []byte(`{"type":"object"}`),
-		},
-	}}
-	state := &types.AgentState{}
-
-	_, err := engine.executeLoop(
-		context.Background(), state, "test query", emptyMessages(), tools, "sess-1", "msg-1",
-	)
-
-	require.NoError(t, err)
-	require.Len(t, mock.options, 2)
-	assert.Len(t, mock.options[0].Tools, 1)
-	assert.Empty(t, mock.options[1].Tools, "integrity retry must not expose tools")
-	require.Len(t, mock.messages, 2)
-	assert.Contains(t, mock.messages[1][len(mock.messages[1])-1].Content, "transport-level output-integrity")
-	assert.True(t, state.IsComplete)
-	assert.Equal(t, "Recovered answer.", state.FinalAnswer)
-	assert.Equal(t, state.FinalAnswer, answerContent)
-	assert.NotContains(t, answerContent, "placeholder")
-}
-
-func TestExecuteLoop_CorruptIntegrityRetryFallsBackWithoutProtocolLeak(t *testing.T) {
-	mock := &mockChat{responses: []mockResponse{
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      strings.Repeat("的。", 80),
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "<src id 'S1' />",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-	}}
-	engine := newTestEngine(t, mock)
-	var answerContent string
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			answerContent += data.Content
-		}
-		return nil
-	})
-	state := &types.AgentState{}
-
-	_, err := engine.executeLoop(
-		context.Background(), state, "test query", emptyMessages(), emptyTools(), "sess-1", "msg-1",
-	)
-
-	require.NoError(t, err)
-	assert.Equal(t, 2, mock.callCount)
-	assert.True(t, state.IsComplete)
-	assert.Contains(t, []string{
-		"The response could not be generated reliably. Please try again.",
-		"本次回答未能可靠生成，请重试。",
-	}, state.FinalAnswer)
-	assert.Equal(t, state.FinalAnswer, answerContent)
-	assert.NotContains(t, answerContent, "<src")
-	assert.NotContains(t, answerContent, "weknora")
-}
-
-func TestStreamFinalAnswerToEventBus_EmitsDoneWhenProviderEndsWithEmptyChunk(t *testing.T) {
-	mock := &mockChat{
-		responses: []mockResponse{
-			{chunks: []types.StreamResponse{
-				{ResponseType: types.ResponseTypeAnswer, Content: "final answer", Done: false},
-				{ResponseType: types.ResponseTypeAnswer, Done: true, FinishReason: "stop"},
-			}},
-		},
+func TestRepairTerminalFailureIsNotSyntheticSuccess(t *testing.T) {
+	for _, reason := range []string{"length", "", "stop"} {
+		model := &mockChat{responses: []mockResponse{{chunks: []types.StreamResponse{{ResponseType: types.ResponseTypeAnswer, Done: true, FinishReason: reason}}}}}
+		engine := newTestEngine(t, model)
+		state := &types.AgentState{}
+		messages := emptyMessages()
+		_, err := engine.callLLMWithRetry(context.Background(), &messages, nil, state, "task", 0, "session")
+		require.Error(t, err)
+		require.Equal(t, 1, model.callCount)
+		require.False(t, state.IsComplete)
 	}
-
-	engine := newTestEngine(t, mock)
-	var finalAnswerEvents []event.AgentFinalAnswerData
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		data, ok := evt.Data.(event.AgentFinalAnswerData)
-		require.True(t, ok)
-		finalAnswerEvents = append(finalAnswerEvents, data)
-		return nil
-	})
-
-	state := &types.AgentState{}
-	err := engine.streamFinalAnswerToEventBus(context.Background(), "test query", state, "sess-1")
-
-	require.NoError(t, err)
-	require.Len(t, mock.options, 1)
-	require.NotNil(t, mock.options[0])
-	require.NotNil(t, mock.options[0].Thinking)
-	assert.False(t, *mock.options[0].Thinking, "final answer synthesis must explicitly disable thinking")
-	require.Len(t, finalAnswerEvents, 2)
-	assert.Equal(t, "final answer", finalAnswerEvents[0].Content)
-	assert.False(t, finalAnswerEvents[0].Done)
-	assert.Empty(t, finalAnswerEvents[1].Content)
-	assert.True(t, finalAnswerEvents[1].Done)
-	assert.Equal(t, "final answer", state.FinalAnswer)
+}
+func TestModelFailureAfterToolEvidenceDoesNotInvokeAnotherGenerator(t *testing.T) {
+	model := &mockChat{responses: []mockResponse{{chunks: []types.StreamResponse{{ResponseType: types.ResponseTypeAnswer, Done: true, FinishReason: "length"}}}}}
+	engine := newTestEngine(t, model)
+	state := &types.AgentState{RoundSteps: []types.AgentStep{{ToolCalls: []types.ToolCall{{ID: "source-call", Name: "knowledge_search", Result: &types.ToolResult{Success: true, Output: "actual source"}}}}}}
+	messages := emptyMessages()
+	_, err := engine.callLLMWithRetry(context.Background(), &messages, nil, state, "task", 1, "session")
+	require.Error(t, err)
+	require.Equal(t, 1, model.callCount)
+	require.False(t, state.IsComplete)
+	require.Equal(t, "actual source", state.RoundSteps[0].ToolCalls[0].Result.Output)
 }
 
-func TestStreamFinalAnswerToEventBus_PreservesConversationContext(t *testing.T) {
-	mock := &mockChat{responses: []mockResponse{{chunks: []types.StreamResponse{
-		{ResponseType: types.ResponseTypeAnswer, Content: "current state", Done: true, FinishReason: "stop"},
-	}}}}
-	engine := newTestEngine(t, mock)
-	state := &types.AgentState{}
-	contextMessages := []chat.Message{
-		{Role: "system", Content: "system contract"},
-		{Role: "user", Content: "owner is Lin"},
-		{Role: "assistant", Content: "historical response"},
-		{Role: "user", Content: "what is the owner now?"},
-	}
-
-	err := engine.streamFinalAnswerToEventBus(
-		context.Background(), "what is the owner now?", state, "sess-1", contextMessages,
-	)
-
-	require.NoError(t, err)
-	require.Len(t, mock.messages, 1)
-	require.GreaterOrEqual(t, len(mock.messages[0]), len(contextMessages)+1)
-	assert.Equal(t, contextMessages, mock.messages[0][:len(contextMessages)])
-	assert.Contains(t, mock.messages[0][len(mock.messages[0])-1].Content, "conversation context")
-}
-
-func TestStreamFinalAnswerToEventBus_RetriesCorruptSynthesisBeforeEmission(t *testing.T) {
-	mock := &mockChat{responses: []mockResponse{
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "</weknora_final_placeholder>",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "<weknora_final_response>Stable synthesis.</weknora_final_response>",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-	}}
-	engine := newTestEngine(t, mock)
-	state := &types.AgentState{}
-	var answerContent string
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			answerContent += data.Content
-		}
-		return nil
-	})
-
-	err := engine.streamFinalAnswerToEventBus(
-		context.Background(), "test query", state, "sess-1", emptyMessages(),
-	)
-
-	require.NoError(t, err)
-	assert.Equal(t, 2, mock.callCount)
-	assert.Equal(t, "Stable synthesis.", state.FinalAnswer)
-	assert.Equal(t, state.FinalAnswer, answerContent)
-	assert.NotContains(t, answerContent, "placeholder")
-}
-
-func TestStreamFinalAnswerToEventBus_ReplacesOutputLimitedSynthesisBeforeEmission(t *testing.T) {
-	mock := &mockChat{responses: []mockResponse{
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "A synthesis that stops in the middle of",
-			Done:         true,
-			FinishReason: "max_tokens",
-		}}},
-		{chunks: []types.StreamResponse{{
-			ResponseType: types.ResponseTypeAnswer,
-			Content:      "<weknora_final_response>Bounded complete synthesis.</weknora_final_response>",
-			Done:         true,
-			FinishReason: "stop",
-		}}},
-	}}
-	engine := newTestEngine(t, mock)
-	state := &types.AgentState{}
-	var streamed string
-	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
-			streamed += data.Content
-		}
-		return nil
-	})
-
-	err := engine.streamFinalAnswerToEventBus(
-		context.Background(), "test query", state, "sess-length", emptyMessages(),
-	)
-
-	require.NoError(t, err)
-	assert.Equal(t, 2, mock.callCount)
-	assert.Equal(t, "Bounded complete synthesis.", state.FinalAnswer)
-	assert.Equal(t, state.FinalAnswer, streamed)
-	assert.NotContains(t, streamed, "stops in the middle")
-	assert.Equal(t, "output_limit", state.TerminalRecoveryReason)
-	assert.Equal(t, 1, state.TerminalRecoveryAttempts)
+func TestExhaustedLoopDoesNotGenerateWithoutTools(t *testing.T) {
+	model := &mockChat{}
+	engine := newTestEngine(t, model, withMaxIterations(1))
+	state := &types.AgentState{CurrentRound: 1, RoundSteps: []types.AgentStep{{ToolCalls: []types.ToolCall{{ID: "call", Name: "knowledge_search", Result: &types.ToolResult{Success: true, Output: "source"}}}}}}
+	_, err := engine.executeLoop(context.Background(), state, "task", emptyMessages(), emptyTools(), "session", "message")
+	require.ErrorContains(t, err, "configured limit")
+	require.Zero(t, model.callCount)
+	require.False(t, state.IsComplete)
+	require.Empty(t, state.FinalAnswer)
 }

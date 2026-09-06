@@ -1,11 +1,47 @@
 package sourcerefs
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestModelSourceLocatorPreservesCoordinatesWithoutDuplicatingTableBodies(t *testing.T) {
+	locator, err := json.Marshal(map[string]any{
+		"kind": "sheet_range", "sheet": "资产台账", "row_start": 180001, "row_end": 202500,
+		"physical_part_index": 10,
+		"parsed_structure": map[string]any{"kind": "parsed_text", "heading_path": []string{"设备清单"},
+			"table_rows": []map[string]any{{"row_key": strings.Repeat("原始表格正文", 300), "header": "原始表头", "parsed_row_start": 80}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(locator)
+	projected := ModelSourceLocator(types.JSON(locator))
+	var result map[string]any
+	if err := json.Unmarshal([]byte(projected), &result); err != nil {
+		t.Fatalf("invalid location JSON: %v", err)
+	}
+	if result["row_start"] != float64(180001) || result["row_end"] != float64(202500) || result["sheet"] != "资产台账" {
+		t.Fatalf("original coordinates were changed: %s", projected)
+	}
+	if strings.Contains(projected, "原始表格正文") || strings.Contains(projected, "physical_part_index") {
+		t.Fatalf("repeated parser payload leaked to the model: %s", projected)
+	}
+	if string(locator) != original {
+		t.Fatal("mutated full source locator")
+	}
+	longPath := strings.Repeat("原始节点/", 300)
+	raw, _ := json.Marshal(map[string]any{"kind": "json_path", "path": longPath})
+	if err := json.Unmarshal([]byte(ModelSourceLocator(types.JSON(raw))), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["path"] != longPath {
+		t.Fatal("cut a source coordinate in the middle")
+	}
+}
 
 func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	refs := []*types.SearchResult{
@@ -102,7 +138,7 @@ func TestPlaceTerminalCitationInstructionIsEvidenceAwareIdempotentAndLast(t *tes
 	if twice := PlaceTerminalCitationInstruction(got, refs); twice != got {
 		t.Fatalf("terminal instruction placement is not idempotent:\nfirst=%s\nsecond=%s", got, twice)
 	}
-	if !strings.Contains(got, "The handle must appear in the final user-visible answer") {
+	if !strings.Contains(got, "[CITATION_USE]") {
 		t.Fatalf("terminal instruction does not require a visible final citation: %s", got)
 	}
 
@@ -164,14 +200,8 @@ func TestAssignCitationIDsUsesDistinctWikiSlug(t *testing.T) {
 
 func TestEnsureGenerationContractIsSharedAndIdempotent(t *testing.T) {
 	got := EnsureGenerationContract("You are an assistant.")
-	if !strings.Contains(got, generationContractMarker) ||
-		!strings.Contains(got, `Copy the matching cite_exactly value verbatim`) ||
-		!strings.Contains(got, `Treat each S-number as an opaque evidence handle`) ||
-		!strings.Contains(got, `A prior turn's output format, ending, or citation constraint is inactive`) ||
-		!strings.Contains(got, `when the current turn contains no AVAILABLE_CITATIONS or source_references, emit no <src> tag`) ||
-		!strings.Contains(got, `Never invent, guess, or reuse a handle from conversation history`) ||
-		!strings.Contains(got, `each paragraph containing substantive evidence-derived facts`) {
-		t.Fatalf("generation contract missing canonical positive instruction: %s", got)
+	if strings.Count(got, generationContractMarker) != 1 || !strings.Contains(got, `<src id="S1" />`) {
+		t.Fatal(got)
 	}
 	if twice := EnsureGenerationContract(got); twice != got {
 		t.Fatalf("generation contract should only be appended once: %s", twice)

@@ -16,6 +16,7 @@ export interface ModelConfig {
     base_url?: string;
     api_key?: string;
     provider?: string; // Provider identifier: openai, aliyun, zhipu, generic
+    rerank_parameters?: { max_input_tokens?: number };
     embedding_parameters?: {
       dimension?: number;
       truncate_prompt_tokens?: number;

@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T22:20:00+08:00",
+  "source_environment": "codex-authored-post-terminal-generic-regression",
+  "target_environment": "local-production-mode",
+  "purpose": "bounded production-path regression for retrieval identity, three-valued state, transformation fidelity, tool restraint, citations, and terminal delivery",
+  "required_model_id": "prod-deepseek-v4-flash-int8-chat",
+  "source_answers_in_sut_input": false,
+  "source_references_in_sut_input": false,
+  "reference_answers_in_sut_input": false,
+  "required_claims_in_sut_input": false,
+  "judge_feedback_in_sut_input": false,
+  "sealed_holdout_accessed": false,
+  "eval_assistance_enabled": false,
+  "profiles": [
+    "quick-answer",
+    "rag-reasoning",
+    "general-agent"
+  ],
+  "repetitions": 3,
+  "concurrency": 8,
+  "cases": [
+    {
+      "case_id": "post-terminal-product-identity-and-state",
+      "source_session_alias": "codex-post-terminal-product-identity",
+      "source_agent_kind": "new-generic-regression",
+      "kb_slug": "imoutai-private-wecom",
+      "family": "exact-entity-retrieval-plus-three-valued-dialogue-state",
+      "high_usage_user": false,
+      "turns": [
+        {
+          "source_ordinal": 1,
+          "query": "请从当前知识库核实会议签到能力要求的客户端版本和支持系统，只写资料能确认的条件，并在结论旁引用。"
+        },
+        {
+          "source_ordinal": 2,
+          "query": "换一个对象：再查爱茅台鸿蒙客户端从哪里获取、安装前有什么明确准备。不要把上一问的会议客户端条件并到这个产品上。"
+        },
+        {
+          "source_ordinal": 3,
+          "query": "记录一个与产品资料无关的事项：Cinder 包已进入联调，负责人是 Inez，上线决定没有提供。整理已知事实和未决字段，不查资料；我说的是不要把它写成已批准，这句话本身也不等于未批准。"
+        },
+        {
+          "source_ordinal": 4,
+          "query": "In exactly two English sentences, restate only the Cinder facts and the unresolved release-decision field. Do not call tools or add a future action."
+        },
+        {
+          "source_ordinal": 5,
+          "query": "回到爱茅台资料，重新取证后给同事写两句获取与安装准备说明；不得加入资料没有写的兼容性、步骤或承诺。"
+        },
+        {
+          "source_ordinal": 6,
+          "query": "最后分两部分：先列 Cinder 的用户事实且不加资料引用；再列本轮爱茅台资料结论并使用本轮有效引用。不要混合两个对象。"
+        }
+      ]
+    },
+    {
+      "case_id": "post-terminal-policy-polarity-and-transform",
+      "source_session_alias": "codex-post-terminal-policy-polarity",
+      "source_agent_kind": "new-generic-regression",
+      "kb_slug": "company-policies",
+      "family": "cross-document-rag-plus-modality-and-information-preserving-transform",
+      "high_usage_user": false,
+      "turns": [
+        {
+          "source_ordinal": 1,
+          "query": "请从制度资料核实员工培训的计划审批、实施前备案、效果评价和材料留存要求。按环节写，证据放在对应结论旁。"
+        },
+        {
+          "source_ordinal": 2,
+          "query": "另记两项活动：Pine 分享会拟在四月举行，由 Lio 主持；Quartz 外派学习的人选和日期都未知。只做双列信息板，不检索，也不要补全地点、预算或审批状态。"
+        },
+        {
+          "source_ordinal": 3,
+          "query": "Pine 改为 7月3日开始、7月5日结束，主持人仍是 Lio。Quartz 不变。只列两个活动当前的日期字段。"
+        },
+        {
+          "source_ordinal": 4,
+          "query": "把 Pine 邀请草稿写成恰好两句自然中文，只能使用名称、日期和主持人，不要添加报名、场地、后续通知或任何代办承诺。"
+        },
+        {
+          "source_ordinal": 5,
+          "query": "有人要求通知里不要声称 Quartz 已获批准。请更新信息板：这只是表述约束，批准与否仍然未知；不要改写成尚未批准或审批中。"
+        },
+        {
+          "source_ordinal": 6,
+          "query": "切回制度并重新检索：培训效果评价有哪些明确方法，结束后需要保存哪些材料？不要从活动信息板推导制度，逐项引用。"
+        }
+      ]
+    },
+    {
+      "case_id": "post-terminal-travel-recall-and-current-field",
+      "source_session_alias": "codex-post-terminal-travel-recall",
+      "source_agent_kind": "new-generic-regression",
+      "kb_slug": "expense-operation-guide",
+      "family": "rag-recall-plus-business-recency-without-runtime-clock",
+      "high_usage_user": false,
+      "turns": [
+        {
+          "source_ordinal": 1,
+          "query": "查当前操作指引：交通补助的低峰或低折扣规则，以及超过四小时情形分别怎样处理？请覆盖这两个要点并准确引用。"
+        },
+        {
+          "source_ordinal": 2,
+          "query": "记录行程：去苏州参加验收，2月10日出发、2月12日返回，同行人是 Mo，交通方式未定。只依据本条消息。"
+        },
+        {
+          "source_ordinal": 3,
+          "query": "更正日期为2月11日出发、2月13日返回，旧日期作废；交通确定为动车，其他事实不变。"
+        },
+        {
+          "source_ordinal": 4,
+          "query": "用四行列出目的、当前日期、交通和同行人。这里的当前日期是行程字段的最新值，不是系统今天日期；不要检索。"
+        },
+        {
+          "source_ordinal": 5,
+          "query": "把当前行程压缩成恰好两句交接文字，不要增加订票、上传、报销、审批或后续同步安排。"
+        },
+        {
+          "source_ordinal": 6,
+          "query": "重新查询操作指引后，先给交通补助中低峰规则和超过四小时规则并引用，再单独列我的当前行程事实且不要给用户事实加文档引用。"
+        }
+      ]
+    }
+  ]
+}

@@ -840,6 +840,8 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     faq_config TEXT,
     question_generation_config TEXT NULL,
     is_temporary BOOLEAN NOT NULL DEFAULT 0,
+    chat_session_id VARCHAR(36) NOT NULL DEFAULT '',
+    chat_owner_id VARCHAR(512) NOT NULL DEFAULT '',
     is_pinned INTEGER NOT NULL DEFAULT 0,
     pinned_at DATETIME NULL,
     asr_config TEXT,

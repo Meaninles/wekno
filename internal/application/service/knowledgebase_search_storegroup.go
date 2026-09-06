@@ -195,6 +195,9 @@ func (s *knowledgeBaseService) authorizeKBAccess(
 	callerTenantRole := types.TenantRoleFromContext(ctx)
 
 	for _, kb := range kbs {
+		if !kb.AllowsPrivateAccess(ctx) {
+			return apperrors.NewNotFoundError("knowledge base not found")
+		}
 		if kb.TenantID == requestTenantID {
 			continue
 		}

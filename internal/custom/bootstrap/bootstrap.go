@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/Tencent/WeKnora/internal/custom/modules/agentconfig"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/capacitycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatuploads"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
@@ -36,6 +38,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 	"github.com/Tencent/WeKnora/internal/custom/modules/impreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
 	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
 	"github.com/Tencent/WeKnora/internal/custom/modules/mobiledocument"
@@ -46,6 +49,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sessiontitle"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
@@ -63,6 +67,9 @@ import (
 )
 
 type Handlers struct {
+	SessionTitles        *sessiontitle.Handler
+	chatUploadService    *chatuploads.Service
+	ChatUploads          *chatuploads.Handler
 	AgentEval            *agenteval.Handler
 	ConfigCenter         *configcenter.Handler
 	IAM                  *iam.Handler
@@ -146,8 +153,11 @@ func NewHandlers(
 	runtimeInstanceRegistry *runtimeinstances.Registry,
 	dependencyControl *dependencycontrol.Service,
 	taskEnqueuer interfaces.TaskEnqueuer,
+	sessionHandler *sessionhandler.Handler,
 ) (*Handlers, error) {
 	ctx := context.Background()
+	chatUploadService := chatuploads.NewService(db, sessionService, knowledgeService, knowledgeBaseService, modelService)
+	sessionHandler.SetUploadResolver(chatUploadService)
 	configCenterService := configcenter.NewService(db)
 	adminService := customadmin.NewService(db, userService)
 	wikiAccessService := wikiaccess.NewService(db)
@@ -211,7 +221,6 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
-	generalAgentService.SetLightweightSkillProvider(skillHubService)
 	generalAgentService.SetProfessionalSkillProvider(skillHubService)
 	derivativeControlService := derivativecontrol.NewService(
 		db,
@@ -225,6 +234,12 @@ func NewHandlers(
 	capacityControlService := capacitycontrol.NewService(db, admissionManager)
 	runMaintenance := profile.RunsMigration() && customMigrationsEnabled()
 	if runMaintenance {
+		if err := chatUploadService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := knowledgeaux.Migrate(ctx, db); err != nil {
+			return nil, err
+		}
 		if err := splitManager.ApplyMigrations(ctx); err != nil {
 			return nil, err
 		}
@@ -357,8 +372,16 @@ func NewHandlers(
 	appservice.RegisterEffectiveLightweightSkillContextResolver(skillHubService.EffectiveLightweightSkillContext)
 	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
+	appservice.RegisterCustomAgentConfigNormalizer(func(_ context.Context, agent *types.CustomAgent) error {
+		resolved, err := agentconfig.NormalizePrompts(agent.Config, cfg.PromptTemplates)
+		if err == nil {
+			agent.Config = resolved
+		}
+		return err
+	})
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
 	appservice.RegisterSessionDeletedHook(generalAgentService.DeleteSessionArtifacts)
+	appservice.RegisterSessionDeletedHook(chatUploadService.DeleteSessionUploads)
 	appservice.RegisterKnowledgeDeleteCompletedHook(knowledgeFolderService.OnKnowledgeDeleteCompleted)
 	appservice.RegisterDerivativeChatResolver(derivativeControlService.ResolveChatModel)
 	appservice.RegisterChatModelUsageGuard(derivativeControlService.GuardChatModel)
@@ -387,8 +410,11 @@ func NewHandlers(
 		return false
 	})
 	appservice.RegisterRuntimeToolRegistrar(func(ctx context.Context, registry *agenttools.ToolRegistry, config *types.AgentConfig, sessionID string) error {
+		if config != nil && len(config.RuntimeLightweightSkills) > 0 {
+			registry.RegisterTool(&skillhub.ReadTool{Skills: config.RuntimeLightweightSkills})
+		}
 		if config != nil && config.MultiTurnEnabled && sessionID != "" {
-			registry.RegisterTool(&conversationmemory.ReadTool{DB: db, SessionID: sessionID})
+			registry.RegisterTool(&conversationmemory.ReadTool{DB: db, SessionID: sessionID, SearchTargets: config.SearchTargets})
 		}
 		if config != nil && config.AgentType == types.AgentTypeKnowledgeBaseManager && config.KnowledgeManagement != nil {
 			allowed := make(map[string]bool, len(config.AllowedTools))
@@ -447,6 +473,9 @@ func NewHandlers(
 		return nil
 	})
 	return &Handlers{
+		ChatUploads:       chatuploads.NewHandler(chatUploadService, sessionHandler.ResolveUploadAgent),
+		SessionTitles:     sessiontitle.NewHandler(sessionService),
+		chatUploadService: chatUploadService,
 		AgentEval: agenteval.NewHandler(agenteval.LoadConfigFromEnv(), func() bool {
 			return langfuse.GetManager().Enabled()
 		}),
@@ -614,9 +643,15 @@ func RegisterMaintenanceSchedulers(
 			if handlers.generalAgentService != nil {
 				handlers.generalAgentService.StartArtifactHousekeeping()
 			}
+			if handlers.chatUploadService != nil {
+				handlers.chatUploadService.Start(ctx)
+			}
 			return nil
 		},
 		Stop: func() {
+			if handlers.chatUploadService != nil {
+				handlers.chatUploadService.Stop()
+			}
 			if handlers.generalAgentService != nil {
 				handlers.generalAgentService.StopArtifactHousekeeping()
 			}
@@ -633,11 +668,17 @@ func RegisterMaintenanceSchedulers(
 	})
 }
 
-func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
+func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers, uploadGuard gin.HandlerFunc, sessionGuard gin.HandlerFunc) {
 	if embed == nil || handlers == nil || handlers.GeneralAgent == nil {
 		return
 	}
 	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.GeneralAgent.DownloadEmbedArtifact)
+	if handlers.SessionTitles != nil && sessionGuard != nil {
+		handlers.SessionTitles.Register(embed.Group("", sessionGuard))
+	}
+	if handlers.ChatUploads != nil && uploadGuard != nil {
+		handlers.ChatUploads.Register(embed.Group("", uploadGuard))
+	}
 }
 
 // RegisterPublicRoutes registers stateless capability URLs before the global
@@ -680,6 +721,12 @@ func RegisterRoutes(
 	}
 	customPublic := v1.Group("/custom")
 	{
+		if handlers.SessionTitles != nil {
+			handlers.SessionTitles.Register(customPublic)
+		}
+		if handlers.ChatUploads != nil {
+			handlers.ChatUploads.Register(customPublic)
+		}
 		if handlers.AgentEval != nil && viewer != nil {
 			customPublic.GET("/agent-eval/capabilities", viewer, handlers.AgentEval.Capabilities)
 		}
@@ -699,6 +746,7 @@ func RegisterRoutes(
 		generalAgentInternalRoutes := customPublic.Group("/general-agent/internal")
 		{
 			generalAgentInternalRoutes.POST("/tools/call", handlers.GeneralAgent.CallTool)
+			generalAgentInternalRoutes.POST("/model/call", handlers.GeneralAgent.CallModel)
 			generalAgentInternalRoutes.POST("/artifacts/upload", handlers.GeneralAgent.UploadArtifact)
 		}
 		authSecurityRoutes := customPublic.Group("/auth-security")

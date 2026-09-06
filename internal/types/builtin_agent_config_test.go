@@ -2,6 +2,16 @@ package types
 
 import "testing"
 
+func TestBuiltinWikiFixerUsesWriteCapableRuntime(t *testing.T) {
+	if err := LoadBuiltinAgentsConfig("../../config"); err != nil {
+		t.Fatal(err)
+	}
+	agent := GetBuiltinAgent(BuiltinWikiFixerID, 10000)
+	if agent == nil || !agent.IsAgentMode() {
+		t.Fatal("Wiki edits would be routed through ordinary QA")
+	}
+}
+
 func TestBuiltinSmartReasoningUsesStableFactualRAGDefaults(t *testing.T) {
 	if err := LoadBuiltinAgentsConfig("../../config"); err != nil {
 		t.Fatalf("load built-in agent config: %v", err)

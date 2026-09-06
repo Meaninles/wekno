@@ -94,6 +94,7 @@ import { marked } from 'marked'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { getChunkByIdOnly } from '@/api/knowledge-base'
 import { getWikiPage, type WikiPage } from '@/api/wiki'
+import { withWikiDirectoryEvidence } from '@/custom/modules/sourceReferences/wikiCitation'
 import { useChatResourcesStore } from '@/stores/chatResources'
 import { hydrateProtectedFileImages, sanitizeMarkdownHTML } from '@/utils/security'
 import { wrapChatMarkdownTables } from '@/utils/chatMarkdownRenderer'
@@ -437,7 +438,7 @@ async function openWikiDrawer(kbId: string, slug: string) {
     window.dispatchEvent(new CustomEvent('weknora:wiki-drawer-open'))
     const page = await resolveWikiPage(kbId, slug)
     currentWikiKbId.value = page.knowledge_base_id || kbId
-    wikiDrawerPage.value = page
+    wikiDrawerPage.value = withWikiDirectoryEvidence(page, allItems.value)
     wikiDrawerVisible.value = true
   } catch (e) {
     console.error(`Failed to load wiki page ${slug}:`, e)

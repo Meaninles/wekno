@@ -1146,7 +1146,7 @@ export default {
     imageTypeSizeError: "仅支持 JPG/PNG/GIF/WEBP 格式，单张不超过 10MB",
     imageUploadTooltip: "上传图片（支持粘贴/拖拽）",
     attachmentUploadTooltip: "上传附件（文档、音频等）",
-    attachmentWithCount: "已上传 {count} 个附件",
+    attachmentWithCount: "已选择 {count} 个附件",
     attachmentTooMany: "最多上传 {max} 个附件",
     attachmentTooLarge: "文件 {name} 超过 {max}MB 限制",
     attachmentTypeNotSupported: "不支持的文件类型：{name}",
@@ -5772,8 +5772,6 @@ export default {
       enableDesc: "FAQ 答案将优先于普通文档被引用，提高回答准确性",
       thresholdLabel: "直接回答阈值",
       thresholdDesc: "当问题与 FAQ 相似度超过此值时，直接使用 FAQ 答案",
-      boostLabel: "FAQ 分数加权",
-      boostDesc: "FAQ 结果的相关性分数乘以此系数，使其排序更靠前",
     },
     dataAnalysis: {
       enableLabel: "启用数据分析",

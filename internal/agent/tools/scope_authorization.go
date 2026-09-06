@@ -20,6 +20,19 @@ func searchTargetsAllowKnowledgeID(
 		return false, nil
 	}
 
+	if knowledgeService != nil {
+		tenantID, ok := types.TenantIDFromContext(ctx)
+		if !ok {
+			return false, nil
+		}
+		rows, err := knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, []string{knowledgeID})
+		if err != nil {
+			return false, err
+		}
+		if len(rows) != 1 || rows[0].ID != knowledgeID || rows[0].KnowledgeBaseID != kbID || !rows[0].IsPublished() {
+			return false, nil
+		}
+	}
 	var tagIDs []string
 	matchedKB := false
 	for _, target := range searchTargets {

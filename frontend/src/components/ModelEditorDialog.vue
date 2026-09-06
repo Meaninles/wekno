@@ -310,11 +310,16 @@
 
       <!-- Section 3 — 高级选项（仅在有内容时渲染，避免空 section 出现底部分隔线） -->
       <section
-        v-if="activeModelType === 'embedding' || isChatLikeModel || activeModelType === 'vllm' || activeModelType === 'asr'"
+        v-if="activeModelType === 'rerank' || activeModelType === 'embedding' || isChatLikeModel || activeModelType === 'vllm' || activeModelType === 'asr'"
         class="setting-drawer__section"
       >
         <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionAdvanced') }}</h4>
 
+        <div v-if="activeModelType === 'rerank'" class="form-item">
+          <label class="form-label">重排输入上限（tokens）</label>
+          <t-input-number v-model="formData.rerankMaxInputTokens" :min="128" :max="131072" />
+          <p class="form-desc">填写模型服务实际支持的查询与文档总长度。超长证据会按窗口评分，保留原来源身份。</p>
+        </div>
         <!-- Embedding 专用：维度 -->
         <div v-if="activeModelType === 'embedding'" class="form-item">
           <label class="form-label">{{ $t('model.editor.dimensionLabel') }}</label>
@@ -351,13 +356,20 @@
           </div>
         </div>
 
-        <div v-if="showGeneralAgentClaudeBaseUrlField" class="form-item">
-          <label class="form-label">{{ $t('model.editor.generalAgentClaudeBaseUrlLabel') }}</label>
-          <t-input
-            v-model="formData.generalAgentClaudeBaseUrl"
-            :placeholder="$t('model.editor.generalAgentClaudeBaseUrlPlaceholder')"
-          />
-          <p class="form-desc">{{ $t('model.editor.generalAgentClaudeBaseUrlDesc') }}</p>
+        <div v-if="isChatLikeModel" class="form-item">
+          <label class="form-label">智能体运行方式</label>
+          <t-select v-model="formData.runtimeAdapter">
+            <t-option value="platform" label="平台原生协议" />
+            <t-option v-if="formData.provider === 'anthropic'" value="claude-sdk" label="Claude SDK" />
+          </t-select>
+          <p v-if="formData.runtimeAdapter === 'claude-sdk'" class="form-desc">SDK 不支持 temperature；历史由平台管理，文件工具与原生方式共用。</p>
+        </div>
+
+        <div v-if="isChatLikeModel" class="form-item">
+          <label class="form-label">思考强度</label>
+          <t-input v-model="reasoningEffort" placeholder="留空使用模型默认值" />
+          <p class="form-desc">按上游模型支持的值填写；仅在开启思考时发送，平台与 Claude SDK 共用。</p>
+          <p v-if="formData.extraConfig?.generation_policy === 'gateway'" class="form-desc">此模型由网关按实际模型和思考开关设置官方采样参数，智能体温度不覆盖网关策略。</p>
         </div>
 
         <div v-if="activeModelType === 'asr'" class="form-item">
@@ -441,6 +453,8 @@ interface ModelFormData {
   displayName?: string
   baseUrl?: string
   apiKey?: string
+  rerankMaxInputTokens?: number
+  runtimeAdapter?: string
   dimension?: number
   supportsDimensionOverride?: boolean
   interfaceType?: 'ollama' | 'openai'
@@ -709,6 +723,16 @@ const resolvedThinkingControl = (): ThinkingControlValue =>
   )
 
 /** 用户是否手动改过思考参数格式（改过则不再自动覆盖，直到换服务商） */
+const reasoningEffort = computed({
+  get: () => formData.value.extraConfig?.reasoning_effort || '',
+  set: (value: string) => {
+    const extra = { ...(formData.value.extraConfig || {}) }
+    if (value.trim()) extra.reasoning_effort = value.trim()
+    else delete extra.reasoning_effort
+    formData.value.extraConfig = extra
+  },
+})
+
 const thinkingControlManual = ref(false)
 /** 正在从 modelData 灌入表单，忽略厂商/来源控件的程序化 change 副作用 */
 const hydratingForm = ref(false)
@@ -873,6 +897,7 @@ const formData = ref<ModelFormData>({
   baseUrl: '',
   apiKey: '',
   dimension: undefined,
+  runtimeAdapter: 'platform',
   supportsDimensionOverride: false,
   interfaceType: 'ollama',
   isDefault: false,
@@ -1116,7 +1141,8 @@ const resetForm = () => {
     displayName: '',
     baseUrl: '',
     apiKey: '',
-    dimension: undefined, // 默认不填，让用户手动输入或通过检测按钮获取
+    dimension: undefined,
+  runtimeAdapter: 'platform', // 默认不填，让用户手动输入或通过检测按钮获取
     supportsDimensionOverride: false,
     interfaceType: undefined,
     isDefault: false,
@@ -1502,6 +1528,10 @@ const checkRemoteAPI = async () => {
 // 确认保存
 const handleConfirm = async () => {
   try {
+    if (activeModelType.value === 'rerank' && (!Number.isInteger(formData.value.rerankMaxInputTokens) || (formData.value.rerankMaxInputTokens || 0) <= 64)) {
+      MessagePlugin.warning('请填写重排模型实际支持的输入上限（tokens，须大于 64）')
+      return
+    }
     // 手动校验必填字段
     if (!formData.value.modelName || !formData.value.modelName.trim()) {
       MessagePlugin.warning(t('model.editor.validation.modelNameRequired'))

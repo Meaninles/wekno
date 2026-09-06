@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"github.com/Tencent/WeKnora/internal/custom/modules/agentconfig"
 	"strings"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -27,9 +27,19 @@ func (s *sessionService) KnowledgeQA(
 	req *types.QARequest,
 	eventBus *event.EventBus,
 ) error {
+	if req.CustomAgent != nil {
+		resolved, err := agentconfig.ResolvePrompts(req.CustomAgent.Config, s.cfg.PromptTemplates)
+		if err != nil {
+			return err
+		}
+		requestCopy, agentCopy := *req, *req.CustomAgent
+		agentCopy.Config = resolved
+		requestCopy.CustomAgent = &agentCopy
+		req = &requestCopy
+	}
 	// Knowledge profiles use the shared tool loop: the answering model selects
 	// retrieval directly, instead of a serial rewrite/classification model.
-	if req.CustomAgent != nil && req.CustomAgent.Config.AgentMode == types.AgentModeQuickAnswer && req.CustomAgent.ID != types.BuiltinSimpleChatID {
+	if req.CustomAgent != nil && req.CustomAgent.Config.AgentMode == types.AgentModeQuickAnswer {
 		requestCopy := *req
 		agentCopy := *req.CustomAgent
 		if len(agentCopy.Config.AllowedTools) == 0 {
@@ -147,6 +157,7 @@ func (s *sessionService) KnowledgeQA(
 
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
+			RetrievalBudget:         retrievalConfig.GetEffectiveBudget(),
 			Query:                   req.Query,
 			LightweightSkillContext: lightweightSkillContext,
 			SessionID:               req.Session.ID,
@@ -849,6 +860,7 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
 
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
+			RetrievalBudget:  rc.GetEffectiveBudget(),
 			Query:            query,
 			UserID:           userID,
 			KnowledgeBaseIDs: knowledgeBaseIDs,
@@ -943,8 +955,11 @@ func (s *sessionService) handleFallbackResponse(ctx context.Context, chatManage 
 // handleFixedFallback handles fixed fallback response
 func (s *sessionService) handleFixedFallback(ctx context.Context, chatManage *types.ChatManage) {
 	fallbackContent := strings.TrimSpace(chatManage.FallbackResponse)
-	if conversationmemory.TerminalAnswerIntegrityReason(fallbackContent) != "" {
-		fallbackContent = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
+	if fallbackContent == "" {
+		if chatManage.EventBus != nil {
+			chatManage.EventBus.Emit(ctx, types.Event{Type: types.EventType(event.EventError), SessionID: chatManage.SessionID, Data: event.ErrorData{Error: "empty configured fallback response", Stage: "configuration"}})
+		}
+		return
 	}
 	chatManage.ChatResponse = &types.ChatResponse{Content: fallbackContent}
 	s.emitFallbackAnswer(ctx, chatManage, fallbackContent)
@@ -983,11 +998,10 @@ func (s *sessionService) handleModelFallback(ctx context.Context, chatManage *ty
 	}
 
 	// Prepare chat options
-	thinking := false
 	opt := &chat.ChatOptions{
 		Temperature:         chatManage.SummaryConfig.Temperature,
 		MaxCompletionTokens: chatManage.SummaryConfig.MaxCompletionTokens,
-		Thinking:            &thinking,
+		Thinking:            chatManage.SummaryConfig.Thinking,
 	}
 
 	// Start streaming response
@@ -1046,9 +1060,6 @@ func prioritizeFallbackCurrentTask(query, promptContent string) string {
 		currentTask,
 		guidance,
 	)
-	if directive := conversationmemory.TerminalGenerationDirective(); directive != "" {
-		content += "\n\n" + directive
-	}
 	return content
 }
 
@@ -1150,61 +1161,19 @@ func (s *sessionService) consumeFallbackStream(
 	chatManage *types.ChatManage,
 	responseChan <-chan types.StreamResponse,
 ) {
-	fallbackID := generateEventID("fallback")
-	eventBus := chatManage.EventBus
-	var finalContent string
-	streamCompleted := false
-	projector := conversationmemory.NewTerminalAnswerProjector()
-	var projected strings.Builder
-	emitProjected := func(content string, done bool) {
-		if content != "" {
-			finalContent += content
+	result := chat.CollectTerminalStream(ctx, responseChan, nil, nil)
+	if !result.Completed || result.TransportError != "" {
+		failure := result.TransportError
+		if failure == "" {
+			failure = chat.ValidateTerminal(result.Answer, result.FinishReason).Error()
 		}
-		if err := eventBus.Emit(ctx, types.Event{
-			ID:        fallbackID,
-			Type:      types.EventType(event.EventAgentFinalAnswer),
-			SessionID: chatManage.SessionID,
-			Data: event.AgentFinalAnswerData{
-				Content:    content,
-				Done:       done,
-				IsFallback: true,
-			},
-		}); err != nil {
-			logger.Errorf(ctx, "Failed to emit fallback answer chunk event: %v", err)
-		}
+		chatManage.EventBus.Emit(ctx, types.Event{Type: types.EventType(event.EventError), SessionID: chatManage.SessionID, Data: event.ErrorData{Error: failure, Stage: "model_completion"}})
+		return
 	}
-
-	for response := range responseChan {
-		// Buffer the model fallback until its terminal protocol integrity is
-		// known, keeping the final SSE surface equal to persisted history.
-		if response.ResponseType == types.ResponseTypeAnswer {
-			projected.WriteString(projector.Feed(response.Content))
-
-			// Update ChatResponse with final content when done
-			if response.Done {
-				projected.WriteString(projector.Flush())
-				candidate := projected.String()
-				if conversationmemory.TerminalAnswerIntegrityReason(candidate) != "" {
-					candidate = strings.TrimSpace(chatManage.FallbackResponse)
-					if conversationmemory.TerminalAnswerIntegrityReason(candidate) != "" {
-						candidate = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
-					}
-				}
-				emitProjected(candidate, false)
-				emitProjected("", true)
-				chatManage.ChatResponse = &types.ChatResponse{Content: finalContent}
-				streamCompleted = true
-				logger.Infof(ctx, "Fallback streaming response completed")
-				break
-			}
-		}
-	}
-
-	// If channel closed without Done=true, emit final event with fixed response
-	if !streamCompleted {
-		logger.Warnf(ctx, "Fallback stream closed without completion, emitting final event with fixed response")
-		s.handleFixedFallback(ctx, chatManage)
-	}
+	answer, refs, _ := sourcerefs.FilterAnswerCitations(result.Answer, chatManage.CitationResult)
+	chatManage.CitationResult = refs
+	chatManage.ChatResponse = &types.ChatResponse{Content: answer, FinishReason: result.FinishReason}
+	s.emitFallbackAnswer(ctx, chatManage, answer)
 }
 
 // emitKnowledgeReferencesEvent streams retrieved chunks to the client as a

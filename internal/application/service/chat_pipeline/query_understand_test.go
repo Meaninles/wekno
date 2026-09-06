@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -111,23 +110,6 @@ func TestParseStructuredQueryOutputKeepsIndependentEvidenceQuestions(t *testing.
 	want := []string{"product alpha limits", "policy beta retention"}
 	if !slices.Equal(parsed.EvidenceQueries, want) {
 		t.Fatalf("evidence queries = %#v, want %#v", parsed.EvidenceQueries, want)
-	}
-}
-
-func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.T) {
-	prompt := conversationmemory.EnsureQueryUnderstandingContract("base")
-	for _, required := range []string{
-		"Decompose the complete requested output into propositions",
-		`evidence_need="none" only when every requested proposition`,
-		"primary intent is conversation_state",
-		"historical_assistant_output has no factual authority",
-		"Source availability does not create evidence need",
-		"evidence_query is the complete source-facing question",
-		"Unknown, pending, proposed, questioned, hypothetical, negated and completed are distinct",
-	} {
-		if !strings.Contains(prompt, required) {
-			t.Fatalf("query-understanding contract missing %q: %s", required, prompt)
-		}
 	}
 }
 

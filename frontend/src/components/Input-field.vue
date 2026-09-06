@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES, chatImagePlaceholder } from "@/custom/modules/chatuploads/uploads"
 import { ref, onMounted, onUnmounted, computed, watch, nextTick, h } from "vue";
 import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
@@ -135,22 +136,22 @@ const handleImageSelect = (event: Event) => {
 
 const addImageFiles = (files: File[]) => {
   if (!isImageUploadEnabledByAgent.value) return;
-  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-  const maxSize = 10 * 1024 * 1024;
+  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'];
+  const maxSize = CHAT_UPLOAD_MAX_BYTES;
   for (const file of files) {
     if (uploadedImages.value.length >= 5) {
       MessagePlugin.warning(t('chat.imageTooMany'));
       break;
     }
     if (!allowed.includes(file.type)) {
-      MessagePlugin.warning(t('chat.imageTypeSizeError'));
+      MessagePlugin.warning(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`);
       continue;
     }
     if (file.size > maxSize) {
-      MessagePlugin.warning(t('chat.imageTypeSizeError'));
+      MessagePlugin.warning(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`);
       continue;
     }
-    uploadedImages.value.push({ file, preview: URL.createObjectURL(file) });
+    uploadedImages.value.push({ file, preview: chatImagePlaceholder() });
   }
 };
 
@@ -988,7 +989,7 @@ const loadAgents = async (force = false) => {
 const ensureSelectedAgentNotDisabled = () => {
   if (settingsStore.selectedAgentSourceTenantId) return
   const currentId = settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID
-  if (!disabledOwnAgentIds.value.includes(currentId)) return
+  if (agents.value.some(a => a.id === currentId) && !disabledOwnAgentIds.value.includes(currentId)) return
 
   const isEnabled = (id: string) =>
     agents.value.some(a => a.id === id) && !disabledOwnAgentIds.value.includes(id)
@@ -2661,6 +2662,7 @@ onBeforeRouteUpdate((to, from, next) => {
 })
 
 defineExpose({
+  getQuery: () => query.value,
   triggerSend(text: string) {
     if (!text.trim()) return;
     query.value = text;
@@ -2685,7 +2687,7 @@ defineExpose({
 <template>
   <div class="answers-input" :class="{ 'is-embedded': embeddedMode }" @drop="onDrop" @dragover="onDragOver">
     <!-- Hidden file input for image upload -->
-    <input ref="imageInputRef" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
+    <input ref="imageInputRef" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/tiff" multiple
       style="display:none" @change="handleImageSelect" />
     <!-- 富文本输入框容器 -->
     <div class="rich-input-container" data-guide="chat-input">
@@ -2698,7 +2700,7 @@ defineExpose({
       </div>
 
       <!-- 附件列表区域 (由 AttachmentUpload 组件渲染) -->
-      <AttachmentUpload ref="attachmentUploadRef" :max-files="CHAT_ATTACHMENT_MAX_FILES" :max-size="20"
+      <AttachmentUpload ref="attachmentUploadRef" :max-files="CHAT_ATTACHMENT_MAX_FILES" :max-size="CHAT_UPLOAD_MAX_MB"
         :supported-file-types="agentSupportedFileTypes"
         @update:files="uploadedAttachments = $event" />
 

@@ -49,10 +49,7 @@ func TestOriginalInputFileSpecsSelectedKnowledgeIDRequiresKnowledgeService(t *te
 	}
 
 	got, err := svc.originalInputFileSpecs(context.Background(), req, "run-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("originalInputFileSpecs length = %d, want 0 when selected knowledge file cannot be materialized", len(got))
+	if err == nil || len(got) != 0 {
+		t.Fatalf("unavailable selected source must fail explicitly, got files=%v err=%v", got, err)
 	}
 }

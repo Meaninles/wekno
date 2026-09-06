@@ -142,7 +142,7 @@ func (r *chunkRepository) ListChunksByID(
 	ctx context.Context, tenantID uint64, ids []string,
 ) ([]*types.Chunk, error) {
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := publishedChunkQuery(ctx, r.db.WithContext(ctx)).
 		Where("tenant_id = ? AND id IN ?", tenantID, ids).
 		Find(&chunks).Error; err != nil {
 		return nil, err
@@ -156,7 +156,7 @@ func (r *chunkRepository) ListChunksByIDOnly(ctx context.Context, ids []string) 
 		return nil, nil
 	}
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&chunks).Error; err != nil {
+	if err := publishedChunkQuery(ctx, r.db.WithContext(ctx)).Where("id IN ?", ids).Find(&chunks).Error; err != nil {
 		return nil, err
 	}
 	return chunks, nil
@@ -207,7 +207,8 @@ func (r *chunkRepository) ListAdjacentTextChunks(
 	}
 	status := []int{int(types.ChunkStatusIndexed), int(types.ChunkStatusDefault)}
 	base := func() *gorm.DB {
-		return r.db.WithContext(ctx).
+		query := publishedChunkQuery(ctx, r.db.WithContext(ctx))
+		return query.
 			Where(
 				"tenant_id = ? AND knowledge_id = ? AND chunk_type = ? AND status IN (?)",
 				tenantID,
@@ -269,6 +270,7 @@ func (r *chunkRepository) ListPagedChunksByKnowledgeID(
 	keyword = strings.TrimSpace(keyword)
 
 	baseFilter := func(db *gorm.DB) *gorm.DB {
+		db = publishedChunkQuery(ctx, db)
 		db = db.Where("tenant_id = ? AND knowledge_id = ? AND chunk_type IN (?) AND status in (?)",
 			tenantID, knowledgeID, chunkType, []int{int(types.ChunkStatusIndexed), int(types.ChunkStatusDefault)})
 		if tagID != "" {
@@ -383,7 +385,7 @@ func (r *chunkRepository) ListChunksByParentIDs(
 		return nil, nil
 	}
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := publishedChunkQuery(ctx, r.db.WithContext(ctx)).
 		Where("tenant_id = ? AND parent_chunk_id IN ?", tenantID, parentIDs).
 		Find(&chunks).Error; err != nil {
 		return nil, err

@@ -88,8 +88,8 @@ type Part struct {
 	// FailureAttempts counts only completed, classified business failures.
 	// Lease expiry, process replacement and dependency deferral never change it.
 	FailureAttempts int `json:"failure_attempts" gorm:"not null;default:0"`
-	// BackpressureEvents remembers provider/infrastructure throttling so the
-	// document resumes with one probe instead of reopening a burst window.
+	// BackpressureEvents records provider/infrastructure throttling. Unresolved
+	// parts resume with one probe; completed history never reduces concurrency.
 	BackpressureEvents int `json:"backpressure_events" gorm:"not null;default:0"`
 	// DispatchEpoch fences disposable Redis/Asynq wake-ups independently of
 	// execution leases. A missing or archived wake-up can be replaced without

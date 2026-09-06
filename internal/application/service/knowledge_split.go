@@ -719,7 +719,7 @@ func (s *knowledgeService) parsePhysicalDocumentPart(
 	// governed by their stricter format-specific preflight instead.
 	if !docparser.IsSimpleFormat(part.FileType) &&
 		part.InputSize > int64(secutils.GetMaxFileSize()) {
-		return nil, nil, fmt.Errorf("split part %d exceeds parser transport ceiling", part.PartIndex)
+		return nil, nil, &documentsplit.RemoteError{Code: "part_transport_limit", Message: fmt.Sprintf("split part %d exceeds parser transport ceiling", part.PartIndex)}
 	}
 	digest := sha256.New()
 	content, err := io.ReadAll(io.TeeReader(
@@ -730,17 +730,15 @@ func (s *knowledgeService) parsePhysicalDocumentPart(
 	}
 	if int64(len(content)) != part.InputSize ||
 		!strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), part.InputSHA256) {
-		return nil, nil, errors.New("stored split part hash or size mismatch")
+		return nil, nil, &documentsplit.RemoteError{Code: "part_integrity", Message: "stored split part hash or size mismatch"}
 	}
 	guard := fileguard.AnalyzeBytes(part.FileName, part.FileType, content)
 	if err := guard.ValidationError(); err != nil {
-		return nil, nil, fmt.Errorf("split part safety preflight: %w", err)
+		return nil, nil, &documentsplit.RemoteError{Code: "part_safety", Message: fmt.Sprintf("split part safety preflight: %v", err)}
 	}
 	if guard.NeedsSplit() {
-		return nil, nil, fmt.Errorf(
-			"splitter produced a part that still exceeds parser workload limits: %s",
-			strings.Join(guard.SplitReasons, "；"),
-		)
+		return nil, nil, &documentsplit.RemoteError{Code: "part_workload_limit", Message: fmt.Sprintf(
+			"splitter produced a part that still exceeds parser workload limits: %s", strings.Join(guard.SplitReasons, "；"))}
 	}
 
 	processOverrides, _ := knowledge.ProcessOverrides()
@@ -894,10 +892,11 @@ func buildPhysicalPartChunks(
 			id := newID("parent", index)
 			parentIDs[index] = id
 			chunk := makeChunk(
-				id, parent.Content, logicalHeader,
+				id, parent.Content, strings.TrimSpace(logicalHeader+"\n"+parent.ContextHeader),
 				baseIndex+index, basePosition+parent.Start, basePosition+parent.End,
 				types.ChunkTypeParentText,
 			)
+			chunk.SourceLocator = chunker.MergeSourceLocator(chunk.SourceLocator, parent.SourceLocator)
 			if index > 0 {
 				chunks[len(chunks)-1].NextChunkID = id
 				chunk.PreChunkID = chunks[len(chunks)-1].ID
@@ -918,6 +917,7 @@ func buildPhysicalPartChunks(
 				basePosition+child.Start, basePosition+child.End,
 				types.ChunkTypeText,
 			)
+			chunk.SourceLocator = chunker.MergeSourceLocator(chunk.SourceLocator, child.SourceLocator)
 			if child.ParentIndex >= 0 && child.ParentIndex < len(parentIDs) {
 				chunk.ParentChunkID = parentIDs[child.ParentIndex]
 			}
@@ -946,6 +946,7 @@ func buildPhysicalPartChunks(
 				baseIndex+index, basePosition+item.Start, basePosition+item.End,
 				types.ChunkTypeText,
 			)
+			chunk.SourceLocator = chunker.MergeSourceLocator(chunk.SourceLocator, item.SourceLocator)
 			if previous != nil {
 				previous.NextChunkID = chunk.ID
 				chunk.PreChunkID = previous.ID
@@ -961,7 +962,7 @@ func buildPhysicalPartChunks(
 		}
 	}
 	mappings := make([]splitImageMapping, 0, len(storedImages))
-	for _, image := range storedImages {
+	for imageIndex, image := range storedImages {
 		chunkID := ""
 		for _, chunk := range textChunks {
 			if strings.Contains(chunk.Content, image.ServingURL) {
@@ -969,8 +970,19 @@ func buildPhysicalPartChunks(
 				break
 			}
 		}
-		if chunkID == "" && len(textChunks) > 0 {
-			chunkID = textChunks[0].ID
+		if chunkID == "" && image.ServingURL != "" {
+			index := baseIndex
+			for _, existing := range chunks {
+				index = max(index, existing.ChunkIndex+1)
+			}
+			if index >= baseIndex+splitChunkIndexStride {
+				return nil, nil, 0, errors.New("image anchors exceed physical part chunk capacity")
+			}
+			anchor := knowledgeaux.ImageAnchor(image.ServingURL, index)
+			chunk := makeChunk(newID("image", imageIndex), anchor.Content, logicalHeader, index, 0, 0, types.ChunkTypeText)
+			chunk.SourceLocator = chunker.MergeSourceLocator(part.Locator, anchor.SourceLocator)
+			chunks = append(chunks, chunk)
+			chunkID = chunk.ID
 		}
 		if chunkID != "" {
 			mappings = append(mappings, splitImageMapping{
@@ -1379,49 +1391,10 @@ func (s *knowledgeService) ProcessDocumentSplitFinalize(
 		}
 	}
 
-	// Publish only after every new vector is ready. PublishGeneration performs
-	// the old-disable/new-enable swap atomically in the relational store, so a
-	// crash can leave either the old logical document or the new one visible,
-	// never a partially parsed mix. Enabled-but-unpublished vectors are harmless
-	// because their database chunks remain disabled.
-	if err := s.splitManager.PublishGeneration(
-		ctx, knowledge.TenantID, knowledge.ID,
-		knowledge.ProcessingGeneration, parts,
-	); err != nil {
-		return fmt.Errorf("publish split chunk generation: %w", err)
-	}
-
-	// Retire the now-disabled previous generation by stable chunk ID. Deleting
-	// by knowledge ID would also erase the newly published vectors.
-	for {
-		oldIDs, err := s.splitManager.ListOldChunkIDs(
-			ctx, knowledge.TenantID, knowledge.ID,
-			knowledge.ProcessingGeneration, "", s.splitManager.Config().FinalizeBatchSize,
-		)
-		if err != nil {
-			return err
-		}
-		if len(oldIDs) == 0 {
-			break
-		}
-		if engine != nil {
-			if err := engine.DeleteByChunkIDList(
-				ctx, oldIDs, embedder.GetDimensions(), knowledge.Type,
-			); err != nil {
-				return fmt.Errorf("delete prior generation vectors: %w", err)
-			}
-		}
-		if err := s.splitManager.DeleteOldChunksByIDs(
-			ctx, knowledge.TenantID, knowledge.ID,
-			knowledge.ProcessingGeneration, oldIDs,
-		); err != nil {
-			return fmt.Errorf("delete prior generation chunks: %w", err)
-		}
-	}
-	if err := s.graphEngine.DelGraph(ctx, []types.NameSpace{{
-		KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID,
-	}}); err != nil {
-		return fmt.Errorf("delete previous logical document graph: %w", err)
+	// Link physical boundaries while all draft rows are invisible. Publication
+	// happens in the shared owner-fenced core transaction below.
+	if err := s.splitManager.LinkGeneration(ctx, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration, parts); err != nil {
+		return err
 	}
 
 	processOverrides, _ := knowledge.ProcessOverrides()
@@ -1455,6 +1428,7 @@ func (s *knowledgeService) ProcessDocumentSplitFinalize(
 	expectedStatus := knowledge.ParseStatus
 	expectedOwner := knowledge.ProcessingOwner
 	now := time.Now()
+	knowledge.EmbeddingModelID = kb.EmbeddingModelID
 	finalizeIndexedKnowledgeState(
 		knowledge, totalStorage, textChunkCount,
 		eff.EnableMultimodel && len(allMappings) > 0, now,

@@ -51,9 +51,6 @@ func Filter(
 			}
 		}
 	}
-	if len(chunkIDs) == 0 {
-		return results, nil
-	}
 	chunks, err := loadChunks(ctx, chunkIDs)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval fence load chunks: %w", err)
@@ -116,15 +113,7 @@ func Filter(
 				chunk.KnowledgeID != item.KnowledgeID ||
 				knowledge.TenantID != expectedTenant ||
 				knowledge.KnowledgeBaseID != item.KnowledgeBaseID ||
-				knowledge.EnableStatus != "enabled" ||
-				knowledge.DeletedAt.Valid ||
-				knowledge.CoreStatus != types.CoreStatusReady {
-				continue
-			}
-			if knowledge.Type != types.KnowledgeTypeFAQ &&
-				(knowledge.ProcessingGeneration == "" ||
-					chunk.ProcessingGeneration == "" ||
-					chunk.ProcessingGeneration != knowledge.ProcessingGeneration) {
+				!knowledge.IsPublishedChunk(chunk) {
 				continue
 			}
 			copyResult.Results = append(copyResult.Results, item)

@@ -13,12 +13,12 @@ import (
 	"time"
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
-	"github.com/google/uuid"
 )
 
 const defaultOriginalInputMaxBytes int64 = 200 * 1024 * 1024
@@ -39,13 +39,15 @@ func (s *Service) originalInputFileSpecs(ctx context.Context, req *types.QAReque
 	for _, knowledgeID := range compactStrings(req.KnowledgeIDs) {
 		spec, err := s.selectedKnowledgeOriginalInputSpec(ctx, knowledgeID, runID)
 		if err != nil {
-			logger.Warnf(ctx, "selected knowledge original input preparation failed for %s, falling back to existing knowledge context/tools: %v", knowledgeID, err)
-			continue
+			return nil, fmt.Errorf("prepare selected source %s: %w", knowledgeID, err)
 		}
+		if spec.ID == "" {
+			continue
+		} // Non-file entries remain available through retrieval.
 		out = append(out, spec)
 	}
 	if req.Session != nil && req.CustomAgent != nil && req.CustomAgent.Config.MultiTurnEnabled && s.db != nil && s.artifactStore != nil {
-		userID, _ := types.UserIDFromContext(ctx)
+		userID := types.SessionOwnerIDFromContext(ctx)
 		var rows []Artifact
 		err := s.db.WithContext(ctx).Where("tenant_id = ? AND user_id = ? AND session_id = ? AND storage_state = ?", tenantIDFromContext(ctx), userID, req.Session.ID, artifactStorageStateReady).Order("created_at DESC, id DESC").Find(&rows).Error
 		if err != nil {
@@ -112,87 +114,60 @@ func (s *Service) selectedKnowledgeOriginalInputSpec(
 		return OriginalInputFileSpec{}, fmt.Errorf("读取选中的知识库原文件失败（%s）: %w", knowledgeID, err)
 	}
 	defer reader.Close()
-	if knowledge == nil || knowledge.Type != "file" || strings.TrimSpace(knowledge.FilePath) == "" {
+	if knowledge != nil && knowledge.Type != "file" {
+		return OriginalInputFileSpec{}, nil
+	}
+	if knowledge == nil || strings.TrimSpace(knowledge.FilePath) == "" {
 		return OriginalInputFileSpec{}, fmt.Errorf("选中的知识库条目不是可传给 Claude SDK 的原始文件：%s", knowledgeID)
 	}
-	data, err := readOriginalInputBytes(reader, originalInputMaxBytes())
-	if err != nil {
-		return OriginalInputFileSpec{}, fmt.Errorf("读取选中的知识库原文件内容失败（%s）: %w", knowledgeID, err)
+	if knowledge.FileSize <= 0 || knowledge.FileSize > originalInputMaxBytes() {
+		return OriginalInputFileSpec{}, fmt.Errorf("original file size is outside the configured limit")
 	}
-	if knowledge.FileSize > 0 && int64(len(data)) != knowledge.FileSize {
-		return OriginalInputFileSpec{}, fmt.Errorf(
-			"选中的知识库原文件大小校验失败（%s）：记录=%d 实际=%d",
-			knowledgeID,
-			knowledge.FileSize,
-			len(data),
-		)
+	// Hash directly from storage without allocating or uploading another copy.
+	// Chat-private files already carry the server-computed acceptance hash.
+	sha := ""
+	var kb types.KnowledgeBase
+	if err := s.db.WithContext(ctx).Where("id = ? AND tenant_id = ?", knowledge.KnowledgeBaseID, knowledge.TenantID).Take(&kb).Error; err != nil {
+		return OriginalInputFileSpec{}, err
+	}
+	if kb.ChatSessionID != "" && kb.AllowsPrivateAccess(ctx) {
+		sha = knowledge.GetMetadata()["chat_upload_sha256"]
+	}
+	if len(sha) != 64 {
+		hash := sha256.New()
+		n, err := io.Copy(hash, io.LimitReader(reader, originalInputMaxBytes()+1))
+		if err != nil {
+			return OriginalInputFileSpec{}, err
+		}
+		if n != knowledge.FileSize {
+			return OriginalInputFileSpec{}, fmt.Errorf("original file size mismatch: expected %d, read %d", knowledge.FileSize, n)
+		}
+		sha = hex.EncodeToString(hash.Sum(nil))
+	}
+	storage, err := knowledgeaux.New(s.db, s.fileService).SourceFileServiceForRead(ctx, knowledge.TenantID, knowledge.KnowledgeBaseID, knowledge.ID, knowledge.FilePath, kb.GetStorageProvider())
+	if err != nil {
+		return OriginalInputFileSpec{}, err
+	}
+	downloadURL, err := storage.GetFileURL(ctx, knowledge.FilePath)
+	if err != nil {
+		return OriginalInputFileSpec{}, err
+	}
+	if !isHTTPDownloadURL(downloadURL) {
+		return OriginalInputFileSpec{}, fmt.Errorf("original source requires an HTTP download URL")
 	}
 	if strings.TrimSpace(filename) == "" {
 		filename = knowledge.FileName
 	}
-	runtimeFile, err := s.createOriginalInputTransferObject(
-		ctx,
-		data,
-		filename,
-		tenantIDFromContext(ctx),
-		types.OriginalInputSourceSelectedKnowledge,
-		types.OriginalInputRoleSelectedKnowledgeOriginal,
-	)
+	name, err := safeOriginalInputFileName(filename)
 	if err != nil {
-		return OriginalInputFileSpec{}, fmt.Errorf("准备选中的知识库原文件传输对象失败（%s）: %w", knowledgeID, err)
+		return OriginalInputFileSpec{}, err
 	}
-	runtimeFile.KnowledgeID = knowledge.ID
-	runtimeFile.KnowledgeBaseID = knowledge.KnowledgeBaseID
-	return originalInputFileSpecFromRuntime(*runtimeFile)
-}
-
-func (s *Service) createOriginalInputTransferObject(
-	ctx context.Context,
-	data []byte,
-	fileName string,
-	tenantID uint64,
-	source string,
-	role string,
-) (*types.OriginalInputFile, error) {
-	safeName, err := safeOriginalInputFileName(fileName)
-	if err != nil {
-		return nil, err
-	}
-	sum := sha256.Sum256(data)
-	sha := hex.EncodeToString(sum[:])
-	ext := strings.ToLower(filepath.Ext(safeName))
-	if ext == "" {
-		ext = ".bin"
-	}
-	fileService := resolveOriginalInputFileService(ctx, s.fileService)
-	if fileService == nil {
-		return nil, fmt.Errorf("original file transfer storage is not configured")
-	}
-	transferName := fmt.Sprintf("claude_original_%s%s", uuid.NewString(), ext)
-	storageURL, err := fileService.SaveBytes(ctx, data, tenantID, transferName, true)
-	if err != nil {
-		return nil, err
-	}
-	downloadURL, err := fileService.GetFileURL(ctx, storageURL)
-	if err != nil {
-		cleanupOriginalInputTransferObject(ctx, fileService, storageURL)
-		return nil, err
-	}
-	if !isHTTPDownloadURL(downloadURL) {
-		cleanupOriginalInputTransferObject(ctx, fileService, storageURL)
-		return nil, fmt.Errorf("Claude SDK 原文件传输需要 HTTP(S) 对象下载 URL，当前得到 %q", downloadURL)
-	}
-	return &types.OriginalInputFile{
-		ID:          uuid.NewString(),
-		Source:      source,
-		Role:        role,
-		FileName:    safeName,
-		FileType:    strings.TrimPrefix(ext, "."),
-		FileSize:    int64(len(data)),
-		SHA256:      sha,
-		DownloadURL: downloadURL,
-		StorageURL:  storageURL,
-	}, nil
+	// No StorageURL: the original belongs to its knowledge lifecycle and must
+	// never be removed by the run's disposable transfer cleanup.
+	return OriginalInputFileSpec{ID: knowledge.ID, Source: types.OriginalInputSourceSelectedKnowledge,
+		Role: types.OriginalInputRoleSelectedKnowledgeOriginal, FileName: name,
+		FileType: strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."), FileSize: knowledge.FileSize,
+		SHA256: sha, DownloadURL: downloadURL, KnowledgeID: knowledge.ID, KnowledgeBaseID: knowledge.KnowledgeBaseID}, nil
 }
 
 func cleanupOriginalInputTransferObject(
@@ -225,21 +200,6 @@ func (s *Service) cleanupOriginalInputTransferObjects(
 	for storageURL := range storageURLs {
 		cleanupOriginalInputTransferObject(ctx, fileService, storageURL)
 	}
-}
-
-func readOriginalInputBytes(reader io.Reader, maxBytes int64) ([]byte, error) {
-	if maxBytes <= 0 {
-		maxBytes = defaultOriginalInputMaxBytes
-	}
-	limited := io.LimitReader(reader, maxBytes+1)
-	data, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("file exceeds original input limit of %.1fMB", float64(maxBytes)/1024/1024)
-	}
-	return data, nil
 }
 
 func originalInputMaxBytes() int64 {

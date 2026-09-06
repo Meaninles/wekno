@@ -400,6 +400,9 @@ func (h *WikiPageHandler) GetPage(c *gin.Context) {
 	}
 
 	page, err := h.wikiService.GetPageBySlug(c.Request.Context(), kbID, slug)
+	if err == nil && (page == nil || page.Status == types.WikiPageStatusArchived) {
+		err = repository.ErrWikiPageNotFound
+	}
 	if err != nil {
 		if stderrors.Is(err, repository.ErrWikiPageNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Wiki page not found"})

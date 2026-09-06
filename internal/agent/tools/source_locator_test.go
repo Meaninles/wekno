@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -75,12 +76,10 @@ func TestGrepChunksOutputCarriesOriginalSourceLocator(t *testing.T) {
 	}
 }
 
-func TestWriteModelSourceLocator(t *testing.T) {
-	var builder strings.Builder
-	writeModelSourceLocator(&builder, testSheetLocator)
-	output := builder.String()
-	if !strings.Contains(output, "<source_locator>") ||
-		!strings.Contains(output, `&quot;row_start&quot;:180001`) {
+func TestKnowledgeSearchEvidenceUsesOriginalSourceLocator(t *testing.T) {
+	output, _ := chatretrieval.FormatEvidence([]*types.SearchResult{{ID: "chunk-1", SourceLocator: testSheetLocator}}, nil)
+	if !strings.Contains(output, `"source_locator"`) ||
+		!strings.Contains(output, `"row_start":180001`) {
 		t.Fatalf("source locator not rendered: %s", output)
 	}
 	if strings.Contains(output, "physical_part_index") {

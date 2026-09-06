@@ -29,9 +29,6 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	if strings.Count(messages[0].Content, "[WEKNORA_CITATION_OUTPUT]") != 1 {
 		t.Fatalf("shared citation contract should be injected once: %s", messages[0].Content)
 	}
-	if !strings.Contains(messages[0].Content, "A prior turn's output format, ending, or citation constraint is inactive") {
-		t.Fatalf("evidence-backed multi-turn answers must not inherit stale turn constraints: %s", messages[0].Content)
-	}
 	if strings.Count(messages[len(messages)-1].Content, "question with evidence") != 1 {
 		t.Fatalf("current request must occur once: %#v", messages)
 	}
@@ -44,14 +41,14 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	}
 }
 
-func TestEffectiveThinkingOptionOnlyDisablesDialogueStateTurns(t *testing.T) {
+func TestEffectiveThinkingOptionPreservesConfiguredValueAcrossIntents(t *testing.T) {
 	enabled := true
 	conversation := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Thinking: &enabled}},
 		PipelineState:   types.PipelineState{Intent: types.IntentConversation},
 	}
-	if got := effectiveThinkingOption(conversation); got == nil || *got {
-		t.Fatalf("conversation-state thinking = %v, want explicit false", got)
+	if got := effectiveThinkingOption(conversation); got != &enabled {
+		t.Fatalf("conversation-state thinking = %v, want configured value", got)
 	}
 	mixed := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
@@ -78,13 +75,13 @@ func TestEffectiveThinkingOptionOnlyDisablesDialogueStateTurns(t *testing.T) {
 	}
 }
 
-func TestEffectiveTemperatureOnlyCapsDialogueStateTurns(t *testing.T) {
+func TestEffectiveTemperaturePreservesConfiguredValueAcrossIntents(t *testing.T) {
 	conversation := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Temperature: 0.8}},
 		PipelineState:   types.PipelineState{Intent: types.IntentConversation},
 	}
-	if got := effectiveTemperature(conversation); got != 0.2 {
-		t.Fatalf("conversation-state temperature = %v, want 0.2", got)
+	if got := effectiveTemperature(conversation); got != 0.8 {
+		t.Fatalf("conversation-state temperature = %v, want configured 0.8", got)
 	}
 	conversation.SummaryConfig.Temperature = 0.1
 	if got := effectiveTemperature(conversation); got != 0.1 {
@@ -241,7 +238,6 @@ func TestIntoChatMessage_WithMergeResults(t *testing.T) {
 		`[EVIDENCE id=S1 type=document_fragment`,
 		`citation_handle_for_this_evidence: <src id="S1" />`,
 		`[CITATION_USE]`,
-		`The handle must appear in the final user-visible answer`,
 	} {
 		if !contains(cm.UserContent, expected) {
 			t.Errorf("UserContent should contain %q, got: %s", expected, cm.UserContent)

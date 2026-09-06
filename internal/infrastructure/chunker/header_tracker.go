@@ -44,7 +44,6 @@ type headerTracker struct {
 	hooks         []headerTrackerHook
 	activeHeaders map[int]string // priority -> header text
 	endedHeaders  map[int]bool   // priorities that have been ended
-	pendingExtend map[int]bool   // headers with empty column names awaiting first data row
 	// pendingTableBreak is set when a table row unit ends with a paragraph break
 	// (the blank line between tables is consumed by \n\n splitting). The header
 	// stays active until the next unit is seen so we can detect a new table.
@@ -59,7 +58,6 @@ func newHeaderTracker() *headerTracker {
 		hooks:         defaultHeaderHooks,
 		activeHeaders: make(map[int]string),
 		endedHeaders:  make(map[int]bool),
-		pendingExtend: make(map[int]bool),
 	}
 }
 
@@ -85,7 +83,6 @@ func (ht *headerTracker) update(split string) {
 			if hook.endPattern.MatchString(split) {
 				ht.endedHeaders[hook.priority] = true
 				delete(ht.activeHeaders, hook.priority)
-				delete(ht.pendingExtend, hook.priority)
 			}
 		}
 	}
@@ -94,26 +91,13 @@ func (ht *headerTracker) update(split string) {
 	// after "| last row |\n\n" and resolve on the next unit; also end when a new
 	// table row has a different column count than the active header.
 	if _, active := ht.activeHeaders[markdownTableHookPriority]; active {
-		if !ht.pendingExtend[markdownTableHookPriority] {
+		{
 			if splitEndsWithParagraphBreak(split) {
 				ht.pendingTableBreak = true
 			} else {
 				ht.endTableHeaderOnColumnMismatch(split)
 			}
 		}
-	}
-
-	// 2. If a header has an empty column-name row (e.g. "||"), replace it with
-	//    a proper Markdown table header using the first data row as column names.
-	//
-	//    Before: "||"           + "| --- | --- |\n"
-	//    After:  "| col1 | col2 |\n" + "| --- | --- |\n"
-	for p := range ht.pendingExtend {
-		if _, active := ht.activeHeaders[p]; active && tableRowPattern.MatchString(split) {
-			sep := extractSeparatorLine(ht.activeHeaders[p])
-			ht.activeHeaders[p] = split + sep
-		}
-		delete(ht.pendingExtend, p)
 	}
 
 	// 3. Check for new header-start markers (only for hooks that are neither active nor ended)
@@ -126,9 +110,6 @@ func (ht *headerTracker) update(split string) {
 		}
 		if loc := hook.startPattern.FindString(split); loc != "" {
 			ht.activeHeaders[hook.priority] = loc
-			if isEmptyTableHeaderRow(loc) {
-				ht.pendingExtend[hook.priority] = true
-			}
 		}
 	}
 
@@ -165,42 +146,9 @@ func (ht *headerTracker) getHeaders() string {
 	return strings.Join(parts, "\n")
 }
 
-// isEmptyTableHeaderRow checks if the header row (the line before the separator)
-// contains only pipes and whitespace — meaning the column names are empty.
-// This is common with MarkItDown and similar converters that produce tables like:
-//
-//	||
-//	| --- | --- |
-//	| real column A | real column B |
-func isEmptyTableHeaderRow(header string) bool {
-	idx := strings.IndexByte(header, '\n')
-	if idx < 0 {
-		return false
-	}
-	row := strings.TrimSpace(header[:idx])
-	for _, r := range row {
-		if r != '|' && r != ' ' && r != '\t' {
-			return false
-		}
-	}
-	return true
-}
-
-// extractSeparatorLine returns the separator line (e.g. "| --- | --- |\n") from
-// a table header string. It looks for the line containing "---".
-func extractSeparatorLine(header string) string {
-	for _, line := range strings.Split(header, "\n") {
-		if strings.Contains(line, "---") {
-			return line + "\n"
-		}
-	}
-	return ""
-}
-
 func (ht *headerTracker) clearTableHeader() {
 	ht.endedHeaders[markdownTableHookPriority] = true
 	delete(ht.activeHeaders, markdownTableHookPriority)
-	delete(ht.pendingExtend, markdownTableHookPriority)
 }
 
 func (ht *headerTracker) endTableHeaderOnColumnMismatch(split string) {

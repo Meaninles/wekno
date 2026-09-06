@@ -832,6 +832,31 @@ func (s *knowledgeService) GetKnowledgeBatchWithSharedAccess(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
+	if len(ownList) > 0 {
+		kbIDs := make([]string, 0, len(ownList))
+		for _, k := range ownList {
+			if k != nil {
+				kbIDs = append(kbIDs, k.KnowledgeBaseID)
+			}
+		}
+		kbs, err := s.kbService.GetKnowledgeBasesByIDsOnly(ctx, kbIDs)
+		if err != nil {
+			return nil, err
+		}
+		allowed := make(map[string]bool, len(kbs))
+		for _, kb := range kbs {
+			if kb != nil {
+				allowed[kb.ID] = kb.AllowsPrivateAccess(ctx)
+			}
+		}
+		filtered := ownList[:0]
+		for _, k := range ownList {
+			if k != nil && allowed[k.KnowledgeBaseID] {
+				filtered = append(filtered, k)
+			}
+		}
+		ownList = filtered
+	}
 	foundSet := make(map[string]bool)
 	for _, k := range ownList {
 		if k != nil {

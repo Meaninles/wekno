@@ -462,7 +462,7 @@ func vectorParams(query string) []types.RetrieveParams {
 
 func TestRetrieveFromStores_Empty(t *testing.T) {
 	t.Parallel()
-	res, err := (&knowledgeBaseService{}).retrieveFromStores(
+	res, err := (&knowledgeBaseService{}).retrieveTestStoreGroups(
 		context.Background(), nil, retriever.EngineAwareNormalizer{})
 	assert.NoError(t, err)
 	assert.Nil(t, res)
@@ -487,7 +487,7 @@ func TestRetrieveFromStores_SingleGroupFastPath(t *testing.T) {
 	}
 
 	s := &knowledgeBaseService{}
-	res, err := s.retrieveFromStores(context.Background(),
+	res, err := s.retrieveTestStoreGroups(context.Background(),
 		[]*storeGroup{g}, retriever.EngineAwareNormalizer{})
 	require.NoError(t, err)
 	require.Len(t, res, 1)
@@ -518,7 +518,7 @@ func TestRetrieveFromStores_MultiGroupParallel_Concat(t *testing.T) {
 	}
 
 	s := &knowledgeBaseService{}
-	res, err := s.retrieveFromStores(context.Background(),
+	res, err := s.retrieveTestStoreGroups(context.Background(),
 		groups, retriever.EngineAwareNormalizer{})
 	require.NoError(t, err)
 
@@ -573,7 +573,7 @@ func TestRetrieveFromStores_MixedEngine_Normalizes(t *testing.T) {
 	}
 
 	s := &knowledgeBaseService{}
-	res, err := s.retrieveFromStores(context.Background(),
+	res, err := s.retrieveTestStoreGroups(context.Background(),
 		groups, retriever.EngineAwareNormalizer{})
 	require.NoError(t, err)
 
@@ -604,7 +604,7 @@ func TestRetrieveFromStores_MixedEngine_Normalizes(t *testing.T) {
 		{Engine: buildBoundComposite(t, fakeES2), BaseParams: vectorParams("q"), TopK: 50, KBIDs: []string{"kb-es2"}},
 		{Engine: buildBoundComposite(t, fakePG2), BaseParams: vectorParams("q"), TopK: 50, KBIDs: []string{"kb-pg2"}},
 	}
-	res2, err := s.retrieveFromStores(context.Background(), groups2, retriever.EngineAwareNormalizer{})
+	res2, err := s.retrieveTestStoreGroups(context.Background(), groups2, retriever.EngineAwareNormalizer{})
 	require.NoError(t, err)
 	scoresByChunk2 := map[string]float64{}
 	for _, rr := range res2 {
@@ -633,7 +633,7 @@ func TestRetrieveFromStores_MixedEngine_Normalizes(t *testing.T) {
 		{Engine: buildBoundComposite(t, fakeMilvus), BaseParams: vectorParams("q"), TopK: 50, KBIDs: []string{"kb-mv"}},
 		{Engine: buildBoundComposite(t, fakePG3), BaseParams: vectorParams("q"), TopK: 50, KBIDs: []string{"kb-pg3"}},
 	}
-	res3, err := s.retrieveFromStores(context.Background(), groups3, retriever.EngineAwareNormalizer{})
+	res3, err := s.retrieveTestStoreGroups(context.Background(), groups3, retriever.EngineAwareNormalizer{})
 	require.NoError(t, err)
 	scoresByChunk3 := map[string]float64{}
 	for _, rr := range res3 {
@@ -665,7 +665,7 @@ func TestRetrieveFromStores_KeywordPassthroughOnMixed(t *testing.T) {
 		{Engine: buildBoundComposite(t, fakePGKW), BaseParams: []types.RetrieveParams{{Query: "q", TopK: 50, RetrieverType: types.KeywordsRetrieverType}}, TopK: 50, KBIDs: []string{"kb-pg"}},
 	}
 	s := &knowledgeBaseService{}
-	res, err := s.retrieveFromStores(context.Background(), groups, retriever.EngineAwareNormalizer{})
+	res, err := s.retrieveTestStoreGroups(context.Background(), groups, retriever.EngineAwareNormalizer{})
 	require.NoError(t, err)
 
 	scoresByChunk := map[string]float64{}
@@ -696,7 +696,7 @@ func TestRetrieveFromStores_OneGroupFails_AllFail(t *testing.T) {
 		{Engine: buildBoundComposite(t, fakeBad), BaseParams: vectorParams("q"), TopK: 50, KBIDs: []string{"kb-bad"}},
 	}
 	s := &knowledgeBaseService{}
-	_, err := s.retrieveFromStores(context.Background(), groups, retriever.EngineAwareNormalizer{})
+	_, err := s.retrieveTestStoreGroups(context.Background(), groups, retriever.EngineAwareNormalizer{})
 	require.Error(t, err)
 
 	// Generic infra failure → 2201 (Unavailable). Message MUST NOT echo
@@ -731,7 +731,7 @@ func TestRetrieveFromStores_PerGroupTimeout(t *testing.T) {
 	s := &knowledgeBaseService{}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.retrieveFromStores(ctx, groups, retriever.EngineAwareNormalizer{})
+	_, err := s.retrieveTestStoreGroups(ctx, groups, retriever.EngineAwareNormalizer{})
 	require.Error(t, err)
 	app, ok := apperrors.IsAppError(err)
 	require.True(t, ok, "expected typed AppError on timeout, got %T", err)
@@ -962,7 +962,7 @@ func TestRetrieveFromStores_IterativePattern_NoInternalRace(t *testing.T) {
 		for _, g := range groups {
 			g.TopK = 10 + k
 		}
-		_, err := s.retrieveFromStores(context.Background(),
+		_, err := s.retrieveTestStoreGroups(context.Background(),
 			groups, retriever.EngineAwareNormalizer{})
 		require.NoError(t, err)
 	}
@@ -972,4 +972,12 @@ func TestRetrieveFromStores_IterativePattern_NoInternalRace(t *testing.T) {
 	for _, g := range groups {
 		assert.Equal(t, 50, g.BaseParams[0].TopK, "BaseParams TopK must stay immutable")
 	}
+}
+
+// Fan-out tests exercise scheduling and normalization independently of evidence
+// visibility. The production entry always applies retrievalfence.Retrieve.
+func (s *knowledgeBaseService) retrieveTestStoreGroups(ctx context.Context, groups []*storeGroup, normalizer retriever.ScoreNormalizer) ([]*types.RetrieveResult, error) {
+	return s.retrieveStoreGroups(ctx, groups, normalizer, func(ctx context.Context, group *storeGroup) ([]*types.RetrieveResult, error) {
+		return group.Engine.Retrieve(ctx, paramsWithTopK(group))
+	})
 }

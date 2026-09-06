@@ -46,6 +46,13 @@ func TestFinalizeIndexedKnowledgeState(t *testing.T) {
 			}
 
 			finalizeIndexedKnowledgeState(knowledge, 4096, tt.textChunkCount, tt.hasPendingMultimodal, now)
+			if tt.hasPendingMultimodal {
+				if knowledge.CoreStatus != types.CoreStatusProcessing || knowledge.CoreCompletedAt != nil {
+					t.Fatal("pending image extraction must not report a published core")
+				}
+			} else if knowledge.CoreStatus != types.CoreStatusReady || knowledge.CoreCompletedAt == nil {
+				t.Fatal("completed text indexing should publish without waiting for optional enrichment")
+			}
 
 			if knowledge.ParseStatus != tt.wantParseStatus {
 				t.Fatalf("ParseStatus = %q, want %q", knowledge.ParseStatus, tt.wantParseStatus)

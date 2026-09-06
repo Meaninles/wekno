@@ -52,7 +52,7 @@ func (h *Handler) DownloadArtifact(c *gin.Context) {
 	}
 	ctx := logger.CloneContext(c.Request.Context())
 	tenantID, _ := types.TenantIDFromContext(ctx)
-	userID, _ := types.UserIDFromContext(ctx)
+	userID := types.SessionOwnerIDFromContext(ctx)
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
 		c.Error(errors.NewBadRequestError("artifact id is required"))

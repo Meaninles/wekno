@@ -23,11 +23,11 @@ type BuiltinAgentI18n struct {
 
 // BuiltinAgentEntry is one entry in the builtin_agents list in YAML.
 type BuiltinAgentEntry struct {
-	ID        string                       `yaml:"id"`
-	Avatar    string                       `yaml:"avatar"`
-	IsBuiltin bool                         `yaml:"is_builtin"`
-	I18n      map[string]BuiltinAgentI18n  `yaml:"i18n"`
-	Config    CustomAgentConfig            `yaml:"config"`
+	ID        string                      `yaml:"id"`
+	Avatar    string                      `yaml:"avatar"`
+	IsBuiltin bool                        `yaml:"is_builtin"`
+	I18n      map[string]BuiltinAgentI18n `yaml:"i18n"`
+	Config    CustomAgentConfig           `yaml:"config"`
 }
 
 // builtinAgentsFile is the top-level YAML structure.
@@ -70,6 +70,12 @@ func LoadBuiltinAgentsConfig(configDir string) error {
 		if err := yaml.Unmarshal(data, &file); err != nil {
 			loadErr = fmt.Errorf("parse builtin_agents.yaml: %w", err)
 			return
+		}
+		for _, entry := range file.BuiltinAgents {
+			if entry.Config.AgentMode != AgentModeQuickAnswer && entry.Config.AgentMode != AgentModeSmartReasoning {
+				loadErr = fmt.Errorf("builtin agent %q must declare a valid agent_mode, got %q", entry.ID, entry.Config.AgentMode)
+				return
+			}
 		}
 
 		builtinAgentEntriesMu.Lock()

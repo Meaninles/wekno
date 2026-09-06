@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -27,6 +28,10 @@ var ErrWikiPageConflict = errors.New("wiki page version conflict")
 // wikiPageRepository implements the WikiPageRepository interface
 type wikiPageRepository struct {
 	db *gorm.DB
+}
+
+func (r *wikiPageRepository) MutateIdentity(ctx context.Context, page *types.WikiPage, newSlug *string) error {
+	return wikicontract.MutateIdentity(ctx, r.db, page, newSlug)
 }
 
 // NewWikiPageRepository creates a new wiki page repository
@@ -872,7 +877,7 @@ func (r *wikiPageRepository) ListGraphNeighbors(
 // Handles both old format ("knowledgeID") and new format ("knowledgeID|title") in source_refs JSON array.
 func (r *wikiPageRepository) ListBySourceRef(ctx context.Context, kbID string, sourceKnowledgeID string) ([]*types.WikiPage, error) {
 	var pages []*types.WikiPage
-	query, err := applyWikiPageSourceRefFilter(
+	query, err := wikidelete.SourceRefQuery(
 		r.db.WithContext(ctx), kbID, sourceKnowledgeID,
 	)
 	if err != nil {
@@ -895,7 +900,7 @@ func (r *wikiPageRepository) ListBySourceRef(ctx context.Context, kbID string, s
 // text-LIKE branch — both added in migration 000041.
 func (r *wikiPageRepository) ListSlugsBySourceRef(ctx context.Context, kbID string, sourceKnowledgeID string) ([]string, error) {
 	var slugs []string
-	query, err := applyWikiPageSourceRefFilter(
+	query, err := wikidelete.SourceRefQuery(
 		r.db.WithContext(ctx).Model(&types.WikiPage{}),
 		kbID,
 		sourceKnowledgeID,
@@ -918,7 +923,7 @@ func (r *wikiPageRepository) ListSourceProvenanceBySourceRef(
 	kbID string,
 	sourceKnowledgeID string,
 ) ([]types.WikiPageSourceProvenance, error) {
-	query, err := applyWikiPageSourceRefFilter(
+	query, err := wikidelete.SourceRefQuery(
 		r.db.WithContext(ctx).Model(&types.WikiPage{}),
 		kbID,
 		sourceKnowledgeID,
@@ -942,54 +947,6 @@ func (r *wikiPageRepository) ListSourceProvenanceBySourceRef(
 // "knowledge-id|legacy-title". PostgreSQL keeps the indexed containment/text
 // predicate used in production. SQLite expands the JSON array so IDs
 // containing LIKE metacharacters cannot match a neighbouring document.
-func applyWikiPageSourceRefFilter(
-	query *gorm.DB,
-	kbID string,
-	sourceKnowledgeID string,
-) (*gorm.DB, error) {
-	if query == nil {
-		return nil, errors.New("wiki page source-ref query is nil")
-	}
-	if query.Dialector != nil && query.Dialector.Name() == "sqlite" {
-		prefixPattern := escapeLikePattern(sourceKnowledgeID) + "|%"
-		return query.Where(
-			`knowledge_base_id = ? AND EXISTS (
-				SELECT 1
-				  FROM json_each(
-					CASE WHEN json_valid(wiki_pages.source_refs)
-					     THEN wiki_pages.source_refs ELSE '[]' END
-				  ) AS source_ref
-				 WHERE CAST(source_ref.value AS TEXT) = ?
-				    OR CAST(source_ref.value AS TEXT) LIKE ? ESCAPE '\'
-			)`,
-			kbID,
-			sourceKnowledgeID,
-			prefixPattern,
-		), nil
-	}
-
-	needle, err := json.Marshal([]string{sourceKnowledgeID})
-	if err != nil {
-		return nil, fmt.Errorf("marshal source ref needle: %w", err)
-	}
-	prefix, err := json.Marshal(sourceKnowledgeID + "|")
-	if err != nil {
-		return nil, fmt.Errorf("marshal source ref prefix: %w", err)
-	}
-	prefixStr := string(prefix)
-	if len(prefixStr) >= 2 && prefixStr[len(prefixStr)-1] == '"' {
-		prefixStr = prefixStr[:len(prefixStr)-1]
-	}
-	likePattern := "%" + escapeLikePattern(prefixStr) + "%"
-
-	return query.Where(
-		"knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
-		kbID,
-		string(needle),
-		likePattern,
-	), nil
-}
-
 // ListBySlugs returns lightweight projections (slug, title, page_type,
 // status, aliases, out_links) for the given slugs in one IN query.
 // Used by wiki ingest's lazy fetcher path to resolve slug -> title /
@@ -1654,6 +1611,9 @@ func (r *wikiPageRepository) Search(ctx context.Context, kbID string, query stri
 		Select("*, "+rankExpr, query, query, query, query).
 		Where("knowledge_base_id = ? AND (title ~* ? OR content ~* ? OR summary ~* ? OR slug ~* ?)",
 			kbID, query, query, query, query).
+		// Directory membership comes from the live index. Stored index/log
+		// prose is navigation history, not searchable business-page evidence.
+		Where("page_type NOT IN ?", []string{types.WikiPageTypeIndex, types.WikiPageTypeLog}).
 		Where("status != ?", "archived").
 		Order("match_rank DESC, updated_at DESC").
 		Limit(limit).

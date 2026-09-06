@@ -101,7 +101,7 @@ func TestRemoteAPIChatSDKPathReturnsStructuredRetryAfter(t *testing.T) {
 	remote := newTestRemoteChat(t)
 	remote.client = openai.NewClientWithConfig(sdkConfig)
 
-	_, err := remote.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, &ChatOptions{})
+	_, err := remote.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, &ChatOptions{Temperature: 0.7})
 	if err == nil {
 		t.Fatal("Chat() error = nil, want HTTP 429")
 	}

@@ -3,13 +3,38 @@ package types
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// ValidateInputCapability prevents silently submitting evidence to a reranker
+// whose truncation boundary is unknown to the platform.
+func (m *Model) ValidateInputCapability() error {
+	if err := ValidateThinkingControl(m.Parameters.ExtraConfig); err != nil {
+		return err
+	}
+	if m.Type == ModelTypeRerank && m.Parameters.RerankParameters.MaxInputTokens <= 64 {
+		return fmt.Errorf("rerank_parameters.max_input_tokens must declare the model's supported input limit (>64)")
+	}
+	return nil
+}
+
+// ValidateThinkingControl rejects misspelled capability fields instead of
+// silently selecting a different provider protocol.
+func ValidateThinkingControl(extra map[string]string) error {
+	switch strings.ToLower(strings.TrimSpace(extra["thinking_control"])) {
+	case "", "none", "enable_thinking", "thinking_type", "chat_template_kwargs":
+		return nil
+	default:
+		return fmt.Errorf("extra_config.thinking_control must be none, enable_thinking, thinking_type or chat_template_kwargs")
+	}
+}
 
 // ModelType represents the type of AI model
 type ModelType string
@@ -92,11 +117,18 @@ type EmbeddingParameters struct {
 	SupportsDimensionOverride bool `yaml:"supports_dimension_override" json:"supports_dimension_override"`
 }
 
+type RerankParameters struct {
+	// MaxInputTokens is the provider's total query+document input budget.
+	// Zero delegates to the provider without requesting silent truncation.
+	MaxInputTokens int `yaml:"max_input_tokens" json:"max_input_tokens"`
+}
+
 type ModelParameters struct {
 	BaseURL             string              `yaml:"base_url"             json:"base_url"`
 	APIKey              string              `yaml:"api_key"              json:"api_key"`
 	InterfaceType       string              `yaml:"interface_type"       json:"interface_type"`
 	EmbeddingParameters EmbeddingParameters `yaml:"embedding_parameters" json:"embedding_parameters"`
+	RerankParameters    RerankParameters    `yaml:"rerank_parameters" json:"rerank_parameters"`
 	ParameterSize       string              `yaml:"parameter_size"       json:"parameter_size"` // Ollama model parameter size (e.g., "7B", "13B", "70B")
 	Provider            string              `yaml:"provider"             json:"provider"`       // Provider identifier: openai, aliyun, zhipu, generic
 	ExtraConfig         map[string]string   `yaml:"extra_config"         json:"extra_config"`   // Provider-specific configuration

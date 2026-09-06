@@ -1,51 +1,35 @@
 package tools
 
 import (
+	"context"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
-
-	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestRenderKnowledgeSearchExactEvidenceSplitsAggregateParent(t *testing.T) {
-	result := &searchResultWithMeta{SearchResult: &types.SearchResult{
-		ID: "child-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
-		ChunkType: string(types.ChunkTypeText), ParentChunkID: "parent-1",
-		Content: "第一段第二段第三段", SubChunkID: []string{"child-2"},
-	}}
-	refs := []*types.SearchResult{
-		{ID: "child-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ParentChunkID: "parent-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "第一段"},
-		{ID: "child-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ParentChunkID: "parent-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "第二段"},
-		{ID: "child-3", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ParentChunkID: "parent-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "第三段"},
-	}
-	output := renderKnowledgeSearchExactEvidence(result, refs)
-	for _, id := range []string{"child-1", "child-2", "child-3"} {
-		if !strings.Contains(output, `[EXACT_FRAGMENT chunk_id="`+id+`"]`) {
-			t.Fatalf("exact child %s is not model-visible: %s", id, output)
-		}
-	}
-	if strings.Contains(output, result.Content) {
-		t.Fatalf("aggregate parent survived exact evidence rendering: %s", output)
-	}
-}
+type evidenceChunkService struct{ interfaces.ChunkService }
 
-func TestRenderKnowledgeSearchExactEvidenceMapsSummaryToExactParent(t *testing.T) {
-	result := &searchResultWithMeta{SearchResult: &types.SearchResult{
-		ID: "summary-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
-		ChunkType: string(types.ChunkTypeSummary), ParentChunkID: "text-1",
-		Content: "generated summary must not be used as evidence",
-	}}
-	refs := []*types.SearchResult{
-		{ID: "other", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "other text"},
-		{ID: "text-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "authoritative parent text"},
-	}
+func (evidenceChunkService) GetRepository() interfaces.ChunkRepository { return nil }
 
-	output := renderKnowledgeSearchExactEvidence(result, refs)
-	if !strings.Contains(output, `[EXACT_FRAGMENT chunk_id="text-1"]`) ||
-		!strings.Contains(output, "authoritative parent text") {
-		t.Fatalf("summary parent evidence is not model-visible: %s", output)
-	}
-	if strings.Contains(output, "generated summary") || strings.Contains(output, "other text") {
-		t.Fatalf("non-parent text leaked into exact evidence: %s", output)
+// Exercise the real tool boundary and registry, including a repeated call after
+// old tool payloads may have been archived. A per-tool "seen" map must not hide
+// requested evidence from the current context.
+func TestKnowledgeSearchEvidenceRemainsReadableAndCitable(t *testing.T) {
+	tool := &KnowledgeSearchTool{chunkService: evidenceChunkService{}}
+	input := []*searchResultWithMeta{{SearchResult: &types.SearchResult{ID: "chunk-a", KnowledgeID: "doc-a", KnowledgeBaseID: "kb-a", ChunkType: string(types.ChunkTypeText), Content: "physical source text", ImageInfo: `[{"ocr_text":"physical source text","caption":"image description"}]`}}}
+	for range 2 {
+		result, err := tool.formatOutput(context.Background(), input, []string{"kb-a"}, []string{"query"}, map[string]string{"kb-a": "collection"})
+		require.NoError(t, err)
+		require.Len(t, result.SourceReferences, 1)
+		require.Equal(t, 1, strings.Count(result.Output, "physical source text"))
+		require.Contains(t, result.Output, "image description")
+		registry := sourcerefs.NewRegistry()
+		refs, _ := sourcerefs.RegisterToolResult(registry, "knowledge_search", result)
+		output := sourcerefs.AppendCitationCatalog(result.Output, refs)
+		require.Contains(t, output, "citation_handle_for_this_evidence:")
+		require.NotContains(t, output, "already_seen")
 	}
 }

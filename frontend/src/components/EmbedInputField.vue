@@ -10,7 +10,7 @@
       </div>
     </div>
     <div v-if="uploadedImages.length" class="embed-input-box__images">
-      <div v-for="(img, index) in uploadedImages" :key="img.preview" class="embed-image-thumb">
+      <div v-for="(img, index) in uploadedImages" :key="index" class="embed-image-thumb">
         <img :src="img.preview" :alt="img.file.name" />
         <button type="button" class="embed-image-thumb__remove" @click="removeImage(index)">
           <t-icon name="close" size="12px" />
@@ -32,7 +32,7 @@
     <input
       ref="imageInputRef"
       type="file"
-      accept="image/jpeg,image/png,image/gif,image/webp"
+      accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/tiff"
       multiple
       class="embed-hidden-file-input"
       @change="handleImageSelect"
@@ -67,23 +67,23 @@
             </svg>
           </button>
         </t-tooltip>
-        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="t('input.imageUpload.tooltip')">
+        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="t('chat.imageUploadTooltip')">
           <button
             type="button"
             class="embed-control-btn embed-image-btn"
             :class="{ active: uploadedImages.length > 0 }"
-            :aria-label="t('input.imageUpload.label')"
+            :aria-label="t('chat.imageUploadTooltip')"
             @click="triggerImageUpload"
           >
             <t-icon name="image" size="18px" />
           </button>
         </t-tooltip>
-        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="t('input.fileUpload.tooltip')">
+        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="t('chat.attachmentUploadTooltip')">
           <button
             type="button"
             class="embed-control-btn embed-file-btn"
             :class="{ active: uploadedAttachments.length > 0 }"
-            :aria-label="t('input.fileUpload.label')"
+            :aria-label="t('chat.attachmentUploadTooltip')"
             @click="triggerFileUpload"
           >
             <t-icon name="attach" size="18px" />
@@ -114,6 +114,7 @@
 </template>
 
 <script setup lang="ts">
+import { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES, chatImagePlaceholder } from "@/custom/modules/chatuploads/uploads"
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { embedToast } from '@/utils/embedToast'
@@ -174,8 +175,8 @@ const triggerFileUpload = () => {
 }
 
 const addImageFiles = (files: File[]) => {
-  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-  const maxSize = 10 * 1024 * 1024
+  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff']
+  const maxSize = CHAT_UPLOAD_MAX_BYTES
   for (const file of files) {
     if (!isEmbedImageFile(file)) continue
     if (uploadedImages.value.length >= 5) {
@@ -183,14 +184,14 @@ const addImageFiles = (files: File[]) => {
       break
     }
     if (!allowed.includes(file.type)) {
-      embedToast(t('chat.imageTypeSizeError'))
+      embedToast(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`)
       continue
     }
     if (file.size > maxSize) {
-      embedToast(t('chat.imageTypeSizeError'))
+      embedToast(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`)
       continue
     }
-    uploadedImages.value.push({ file, preview: URL.createObjectURL(file) })
+    uploadedImages.value.push({ file, preview: chatImagePlaceholder() })
   }
 }
 
@@ -202,15 +203,15 @@ const handleImageSelect = (event: Event) => {
 }
 
 const addAttachmentFiles = (files: File[]) => {
-  const maxSize = 20 * 1024 * 1024
+  const maxSize = CHAT_UPLOAD_MAX_BYTES
   for (const file of files) {
     if (isEmbedImageFile(file)) continue
     if (uploadedAttachments.value.length >= 5) {
-      embedToast(t('input.fileUpload.tooMany'))
+      embedToast(t('chat.attachmentTooMany', { max: 5 }))
       break
     }
     if (file.size > maxSize) {
-      embedToast(t('input.fileUpload.tooLarge'))
+      embedToast(`文件每个最大 ${CHAT_UPLOAD_MAX_MB} MiB`)
       continue
     }
     uploadedAttachments.value.push({ file })
@@ -244,8 +245,17 @@ const submit = () => {
   if (getTextareaEl()) query.value = ''
   uploadedImages.value.forEach((img) => URL.revokeObjectURL(img.preview))
   uploadedImages.value = []
-  // Keep file attachments selected so follow-up turns upload the same transient context.
+  uploadedAttachments.value = []
 }
+
+defineExpose({ restoreDraft: (text: string, images: File[], attachments: File[]) => {
+  query.value = text
+  uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview))
+  uploadedImages.value = []
+  uploadedAttachments.value = []
+  addImageFiles(images)
+  addAttachmentFiles(attachments)
+} })
 
 const onKeydown = (_val: string, ctx: { e: KeyboardEvent }) => {
   const e = ctx?.e

@@ -183,6 +183,8 @@ function Start-EvalStack {
         "runtime-docreader-2", "runtime-docreader-3",
         "runtime-docreader-entry", "runtime-entry"
     ))
+    & (Join-Path $PSScriptRoot "frontend.ps1") -Action restart
+    if ($LASTEXITCODE -ne 0) { throw "Frontend failed to start" }
 }
 
 function Start-MainStack {
@@ -221,7 +223,7 @@ if ($Action -eq "down") {
 }
 if ($Target -eq "eval") {
     Start-EvalStack
-    Write-Host "Eval worktree active: API http://localhost:18080, Langfuse http://localhost:13001"
+    Write-Host "Eval worktree active: frontend http://localhost:5177, API http://localhost:8080, Langfuse http://localhost:13001"
 } else {
     Start-MainStack
     Write-Host "Main worktree active: API http://localhost:8080"

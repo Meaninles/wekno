@@ -36,7 +36,7 @@ func TestRenderIndexOverviewForAgent_IncludesIntroAndTruncationHint(t *testing.T
 
 	got := renderIndexOverviewForAgent(resp)
 
-	assertContains(t, got, "# Wiki Index")
+	assertContains(t, got, "Current Wiki directory")
 	// Truncation banner for the big group: Total != len(Items).
 	assertContains(t, got, "4500 total, showing top 2")
 	// Non-truncated group uses the simple "(N)" form.
@@ -109,7 +109,9 @@ func TestRenderIndexOverviewForAgent_StripsLegacyInlineDirectory(t *testing.T) {
 	if strings.Contains(got, "summary/legacy") {
 		t.Fatalf("legacy inline directory should have been stripped, got:\n%s", got)
 	}
-	assertContains(t, got, "Welcome.")
+	if strings.Contains(got, "Welcome.") {
+		t.Fatal("stored intro leaked into live directory")
+	}
 	assertContains(t, got, "[[entity/live|Live]] — fresh")
 }
 

@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS knowledges (
     tenant_id             INTEGER NOT NULL,
     knowledge_base_id     VARCHAR(64) NOT NULL,
     processing_generation VARCHAR(64) NOT NULL,
+    publication_state VARCHAR(16) NOT NULL DEFAULT 'published',
     parse_status          VARCHAR(32) NOT NULL,
     processed_at          DATETIME,
     wiki_status           VARCHAR(32) NOT NULL DEFAULT 'pending',

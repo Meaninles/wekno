@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
-	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"slices"
@@ -113,14 +112,7 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 			// preserve the existing "warn and break" behavior so the
 			// caller still gets partial results from the iterations that
 			// succeeded.
-			if _, ok := apperrors.IsAppError(err); ok {
-				logger.WarnWithFields(ctx, logger.Fields{
-					"iteration": i + 1,
-				}, "Iterative retrieval surfaced typed failure")
-				return nil, err
-			}
-			logger.Warnf(ctx, "Iterative retrieval failed at iteration %d: %v", i+1, err)
-			break
+			return nil, err
 		}
 
 		// Collect results

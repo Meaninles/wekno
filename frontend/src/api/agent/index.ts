@@ -25,6 +25,7 @@ export interface KnowledgeManagementConfig {
 }
 
 export interface CustomAgentConfig {
+  retrieval_budget?: { candidate_count: number; fusion_count: number; evidence_tokens: number };
   // ===== 基础设置 =====
   agent_mode?: 'quick-answer' | 'smart-reasoning';  // 运行模式：quick-answer=RAG模式, smart-reasoning=ReAct Agent模式
   // 智能推理模式下的类型预设，用于一键应用"系统提示词 + 工具 + KB 兼容性"组合
@@ -289,6 +290,7 @@ export interface KBCapabilities {
 
 // 预设的"自动填充"配置载荷：仅包含被预设覆盖的字段；其他字段不动
 export interface AgentTypePresetConfig {
+  system_prompt?: string;
   system_prompt_id?: string;
   thinking?: boolean;
   temperature?: number;
@@ -299,7 +301,6 @@ export interface AgentTypePresetConfig {
   retain_retrieval_history?: boolean;
   faq_priority_enabled?: boolean;
   faq_direct_answer_threshold?: number;
-  faq_score_boost?: number;
   web_search_enabled?: boolean;
   claude_sdk_web_search_enabled?: boolean;
   web_fetch_enabled?: boolean;

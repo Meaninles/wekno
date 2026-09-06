@@ -2,14 +2,10 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
-	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
-	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -25,21 +21,12 @@ const agentHistoryFetchMultiplier = 4
 // maxRounds is small or unset.
 const agentHistoryFetchMin = 50
 
-var agentHistoryThinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
-
 // LoadAgentHistory rebuilds the multi-turn LLM context for an Agent-mode
 // session directly from the persistent messages table. The result is a
 // chronologically ordered list of chat.Message entries suitable for prepending
 // to the current turn (without system prompt; the engine adds that itself).
 //
-// For each historical turn it emits:
-//  1. A user message (RenderedContent if present, else Content, plus any
-//     image captions appended).
-//  2. For each AgentStep with non-terminal tool calls (i.e. excluding
-//     final_answer), an assistant message carrying the step's thought and
-//     tool_calls, followed by one tool message per tool result.
-//  3. A final assistant message with the canonical answer (msg.Content with
-//     <think> blocks stripped).
+// Historical tools and reasoning are stored for inspection, not replayed.
 //
 // User messages survive interrupted assistant executions. The newest
 // maxRounds turns are returned in chronological order.
@@ -118,97 +105,14 @@ func buildUserHistoryMessage(m *types.Message, sourceID ...string) chat.Message 
 	return chat.Message{Role: "user", Content: content}
 }
 
-// buildAssistantHistoryMessages reconstructs the assistant side of one
-// historical turn. It walks AgentSteps to expand intermediate tool calls into
-// proper OpenAI-shaped assistant + tool messages, then emits the canonical
-// final answer as a trailing assistant message.
-//
-// AgentSteps from KnowledgeQA-mode turns are empty, in which case the result
-// is just the single final-answer assistant message — exactly mirroring how
-// the KnowledgeQA pipeline replays history today.
+// buildAssistantHistoryMessages replays only the bounded final answer. Full
+// tool arguments/results remain available through the stable conversation handle.
 func buildAssistantHistoryMessages(m *types.Message) []chat.Message {
-	msgs := make([]chat.Message, 0, len(m.AgentSteps)*2+1)
-	for _, step := range m.AgentSteps {
-		nonTerminalCalls := filterNonTerminalToolCalls(step.ToolCalls)
-		if len(nonTerminalCalls) == 0 {
-			continue
-		}
-		assistantMsg := chat.Message{
-			Role:             "assistant",
-			Content:          step.Thought,
-			ReasoningContent: step.ReasoningContent,
-			ToolCalls:        make([]chat.ToolCall, 0, len(nonTerminalCalls)),
-		}
-		for _, tc := range nonTerminalCalls {
-			argsJSON, _ := json.Marshal(tc.Args)
-			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, chat.ToolCall{
-				ID:               tc.ID,
-				Type:             "function",
-				ProviderMetadata: tc.ProviderMetadata,
-				Function: chat.FunctionCall{
-					Name:      tc.Name,
-					Arguments: string(argsJSON),
-				},
-			})
-		}
-		msgs = append(msgs, assistantMsg)
-		for _, tc := range nonTerminalCalls {
-			msgs = append(msgs, chat.Message{
-				Role:       "tool",
-				Content:    toolCallOutput(tc),
-				ToolCallID: tc.ID,
-				Name:       tc.Name,
-			})
-		}
+	content := conversationmemory.AssistantRecord(m)
+	if content == "" {
+		return nil
 	}
-
-	finalContent := agentHistoryThinkTagRegex.ReplaceAllString(m.Content, "")
-	finalContent = sourcerefs.StripCitationProtocol(finalContent)
-	finalContent = strings.TrimSpace(finalContent)
-	if finalContent != "" {
-		msgs = append(msgs, chat.Message{
-			Role:    "assistant",
-			Content: conversationmemory.HistoricalAssistantOutput(finalContent),
-		})
-	}
-	return msgs
-}
-
-// legacyFinalAnswerToolName is the name of the now-removed final_answer tool.
-// It is retained here only to filter such calls out of OLD persisted agent
-// histories: pre-existing conversations recorded a final_answer tool call as
-// the terminal step, and the canonical answer text is replayed via the
-// trailing assistant message instead. Re-injecting it would duplicate the
-// answer or confuse the model into thinking the previous turn is mid-flight.
-const legacyFinalAnswerToolName = "final_answer"
-
-// filterNonTerminalToolCalls drops legacy final_answer entries from historical
-// tool calls (see legacyFinalAnswerToolName). New turns never produce them.
-func filterNonTerminalToolCalls(calls []types.ToolCall) []types.ToolCall {
-	out := make([]types.ToolCall, 0, len(calls))
-	for _, tc := range calls {
-		if tc.Name == legacyFinalAnswerToolName {
-			continue
-		}
-		out = append(out, tc)
-	}
-	return out
-}
-
-// toolCallOutput returns the textual content to use for a historical tool
-// message: the recorded Output on success, or an "Error: …" line otherwise so
-// the model can tell that an earlier tool call failed.
-func toolCallOutput(tc types.ToolCall) string {
-	if tc.Result == nil {
-		return ""
-	}
-	if !tc.Result.Success {
-		if tc.Result.Error != "" {
-			return "Error: " + tc.Result.Error
-		}
-		return "Error: tool call failed"
-	}
-	return agenttools.CompactToolOutputForHistory(tc.Name, tc.Result)
+	return []chat.Message{{Role: "assistant", Content: content}}
 }
 
 // extractImageCaptionsFromMessage concatenates non-empty Caption fields from

@@ -132,6 +132,9 @@ type KnowledgeListFilter struct {
 // It contains metadata about the knowledge source, its processing status,
 // and references to the physical file if applicable.
 type Knowledge struct {
+	PublicationState          string `json:"publication_state" gorm:"type:varchar(16);not null;default:published"`
+	PublishedGeneration       string `json:"published_generation,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	PublishedEmbeddingModelID string `json:"-" gorm:"type:varchar(64);not null;default:''"`
 	// Unique identifier of the knowledge
 	ID string `json:"id"                 gorm:"type:varchar(36);primaryKey"`
 	// Tenant ID

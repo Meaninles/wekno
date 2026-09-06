@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUpdated, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import { getChunkByIdOnly, getKnowledgeDetails } from "@/api/knowledge-base";
 import { getWikiPage, type WikiPage } from "@/api/wiki";
+import { withWikiDirectoryEvidence } from "@/custom/modules/sourceReferences/wikiCitation";
 import { useChatResourcesStore } from "@/stores/chatResources";
 import { hydrateProtectedFileImages } from "@/utils/security";
 import {
@@ -245,7 +246,7 @@ async function loadWiki(kbId: string, slug: string, pushCurrent: boolean) {
     if (pushCurrent && previous) {
       wikiStack.value = [...wikiStack.value, previous];
     }
-    wikiPage.value = nextPage;
+    wikiPage.value = withWikiDirectoryEvidence(nextPage, props.item ? [props.item] : []);
   } catch (err: any) {
     console.error("[mobile] load citation wiki failed", err);
     error.value = err?.message || "Wiki 页面加载失败";

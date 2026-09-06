@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CHAT_UPLOAD_MAX_MB } from "@/custom/modules/chatuploads/uploads"
 import { ref, computed } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useI18n } from 'vue-i18n';
@@ -30,7 +31,7 @@ const attachments = ref<AttachmentFile[]>([]);
 const fileInputRef = ref<HTMLInputElement>();
 
 const maxFiles = computed(() => props.maxFiles || 5);
-const maxSize = computed(() => (props.maxSize || 20) * 1024 * 1024); // Convert MB to bytes
+const maxSize = computed(() => (props.maxSize || CHAT_UPLOAD_MAX_MB) * 1024 * 1024); // Convert MB to bytes
 const normalizedSupportedFileTypes = computed(() => {
   return (props.supportedFileTypes || [])
     .map(type => type.trim().toLowerCase().replace(/^\./, ''))
@@ -78,7 +79,7 @@ const addFiles = async (files: File[]) => {
     
     // Check file size
     if (file.size > maxSize.value) {
-      MessagePlugin.warning(t('chat.attachmentTooLarge', { name: file.name, max: props.maxSize || 20 }));
+      MessagePlugin.warning(t('chat.attachmentTooLarge', { name: file.name, max: props.maxSize || CHAT_UPLOAD_MAX_MB }));
       continue;
     }
     

@@ -36,8 +36,9 @@ type GraphData struct {
 
 // NameSpace represents the name space of the knowledge base and knowledge
 type NameSpace struct {
-	KnowledgeBase string `json:"knowledge_base"`
-	Knowledge     string `json:"knowledge"`
+	Generation    *string `json:"generation,omitempty"`
+	KnowledgeBase string  `json:"knowledge_base"`
+	Knowledge     string  `json:"knowledge"`
 }
 
 // Labels returns the labels of the name space

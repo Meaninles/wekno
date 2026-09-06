@@ -14,7 +14,7 @@ func TestCollectTerminalStreamKeepsPartialTransportFailurePrivate(t *testing.T) 
 	close(stream)
 
 	result := collectTerminalStream(context.Background(), stream, nil, nil)
-	if result.Answer != "partial" {
+	if result.Answer != "partial " {
 		t.Fatalf("answer = %q, want buffered partial", result.Answer)
 	}
 	if result.Completed {

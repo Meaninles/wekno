@@ -102,6 +102,7 @@ func NewListKnowledgeChunksTool(
 
 // Execute performs the chunk fetch against the chunk service.
 func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
+	ctx = types.WithPublishedChunks(ctx)
 	// Parse args from json.RawMessage
 	var input ListKnowledgeChunksInput
 	if err := json.Unmarshal(args, &input); err != nil {
@@ -173,8 +174,9 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	}
 
 	pagination := &types.Pagination{
-		Page:     offset/chunkLimit + 1,
-		PageSize: chunkLimit,
+		StartOffset: &offset,
+		Page:        offset/chunkLimit + 1,
+		PageSize:    chunkLimit,
 	}
 
 	chunks, total, err := t.chunkService.GetRepository().ListPagedChunksByKnowledgeID(ctx,
@@ -310,7 +312,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 // executeByChunkID loads one chunk by faq_id / chunk_id (FAQ entry or any chunk).
 func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID string) (*types.ToolResult, error) {
 	chunk, err := t.chunkService.GetChunkByIDOnly(ctx, chunkID)
-	if err != nil || chunk == nil {
+	if err != nil || chunk == nil || !chunk.IsEnabled {
 		return &types.ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("chunk not found: %v", err),

@@ -161,6 +161,26 @@ func TestCreateKnowledgeBase_DefaultStorageProviderFromTenant(t *testing.T) {
 	assert.Equal(t, "cos", kbExplicit.GetStorageProvider())
 }
 
+func TestCreateKnowledgeBaseEmbedUploadPreservesPrivateOwnerWithoutAccountCreator(t *testing.T) {
+	repo := newFakeKBRepo()
+	svc := newPR3KBService(repo, &fakeRegistry{}, &fakeOwnership{})
+	const channel = "d0303a5f-4b2e-488f-82fc-b3395eca7061"
+	const session = "51119d83-da45-4fe9-bb24-0cf55d2af1e4"
+	principal := types.EmbedSessionPrincipal(10000, channel, session)
+	ctx := context.WithValue(ctxWithTenant(10000), types.UserIDContextKey, "embed-"+channel)
+	ctx = types.WithPrincipal(ctx, principal)
+	kb, err := svc.CreateKnowledgeBase(ctx, &types.KnowledgeBase{
+		Name: "对话附件", IsTemporary: true, ChatSessionID: session,
+		ChatOwnerID: principal.StorageID(), CreatorID: "untrusted-client-value",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, kb.CreatorID)
+	assert.Equal(t, principal.StorageID(), kb.ChatOwnerID)
+	assert.True(t, kb.AllowsPrivateAccess(ctx))
+	other := types.WithPrincipal(ctx, types.EmbedSessionPrincipal(10000, channel, "other-session"))
+	assert.False(t, kb.AllowsPrivateAccess(other))
+}
+
 // ---------------------------------------------------------------------------
 // CreateKnowledgeBase — vector_store_id binding validation matrix
 // ---------------------------------------------------------------------------

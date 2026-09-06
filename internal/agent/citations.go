@@ -5,10 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -98,7 +96,7 @@ func (e *AgentEngine) syncCitationReferences(state *types.AgentState) []*types.S
 }
 
 // finalizeCurrentTurnCitationProtocol applies the same local citation
-// normalization to natural-stop answers and synthesized fallback answers.
+// normalization to completed answers from the shared execution loop.
 // It never changes claim text, retrieves evidence, or calls a model. Handles
 // not backed by this turn's immutable registry are removed before the answer
 // reaches SSE, persistence, or future history.
@@ -106,33 +104,6 @@ func (e *AgentEngine) finalizeCurrentTurnCitationProtocol(
 	answer string,
 ) (string, sourcerefs.CitationValidationReport) {
 	refs := e.citationState.snapshot()
-	repaired := sourcerefs.RepairAnswerCitations(answer, refs)
-	filtered, _, report := sourcerefs.FilterAnswerCitations(repaired, refs)
+	filtered, _, report := sourcerefs.FilterAnswerCitations(answer, refs)
 	return strings.TrimSpace(filtered), report
-}
-
-// prepareCitationAwareGenerationMessages places the current-turn terminal
-// citation reminder at the final model-input boundary once evidence exists.
-// It edits a shallow copy so persisted ReAct history and tool outputs remain
-// unchanged, and it does not add another model request or alter tool choice.
-func (e *AgentEngine) prepareCitationAwareGenerationMessages(messages []chat.Message) []chat.Message {
-	refs := e.citationState.snapshot()
-	if len(messages) == 0 || !sourcerefs.HasCitableReferences(refs) {
-		return messages
-	}
-	out := append([]chat.Message(nil), messages...)
-	reminder := sourcerefs.TerminalCitationInstruction()
-	if outputDirective := conversationmemory.TerminalGenerationDirective(); outputDirective != "" {
-		reminder += "\n\n" + outputDirective
-	}
-	if out[len(out)-1].Role == "user" && out[len(out)-1].Content == reminder {
-		return out
-	}
-	// Keep the final-output contract in its own terminal user message. Appending
-	// it inside a tool payload makes some OpenAI-compatible local models treat it
-	// as retrieved evidence instead of an instruction, which measurably lowers
-	// citation presence and list-placement adherence. This adds no model call and
-	// leaves the retrieved content and tool-selection flow untouched.
-	out = append(out, chat.Message{Role: "user", Content: reminder})
-	return out
 }

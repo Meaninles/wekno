@@ -173,7 +173,7 @@ func (p *PluginSearchEntity) OnEvent(ctx context.Context,
 	var entityResults []*types.SearchResult
 	for _, chunk := range chunks {
 		knowledge := knowledgeMap[chunk.KnowledgeID]
-		if knowledge == nil {
+		if knowledge == nil || !knowledge.IsPublished() || !chunk.IsEnabled {
 			logger.Warnf(
 				ctx,
 				"Skipping graph chunk %s because knowledge %s is unavailable",

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	textencoding "github.com/Tencent/WeKnora/internal/custom/modules/textencoding"
+	"github.com/Tencent/WeKnora/internal/custom/modules/toolcontract"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -31,7 +33,7 @@ var dataAnalysisTool = BaseTool{
 
 var tableAnalysisTool = BaseTool{
 	name:        ToolTableAnalysis,
-	description: "Use this tool for CSV/Excel table analysis. It exposes both a normal DuckDB table and a faithful original-file cell evidence table, executes SELECT-only DuckDB SQL, and can return structured chart data when chart_requested is true. You may use VALUES or UNION ALL to normalize irregular files, but chart results must include non-empty LLM-authored source_mapping JSON that maps result data back to original file evidence. The prompt template is weak guidance only and is not validated as a fixed schema.",
+	description: "Use this tool for CSV/Excel table analysis. It exposes both a normal DuckDB table and a faithful original-file cell evidence table, executes SELECT-only DuckDB SQL, and can return structured chart data when chart_requested is true. SQL results include executor-owned dataset and query provenance. For irregular files, query the original cell evidence table to derive values. Literal SQL values remain model-authored inputs, not independently verified source data.",
 	schema:      utils.GenerateSchema[TableAnalysisInput](),
 }
 
@@ -56,37 +58,6 @@ func normalizeIdentifierForMatch(s string) string {
 	normalized = strings.ReplaceAll(normalized, " ", "")
 	normalized = strings.ReplaceAll(normalized, "\u3000", "")
 	return normalized
-}
-
-func reconcileSQLColumnsWithSchema(sqlText string, schema *TableSchema) (string, []string) {
-	if schema == nil || len(schema.Columns) == 0 {
-		return sqlText, nil
-	}
-
-	normalizedToCanonical := make(map[string]string, len(schema.Columns))
-	for _, col := range schema.Columns {
-		key := normalizeIdentifierForMatch(col.Name)
-		if key == "" {
-			continue
-		}
-		if _, exists := normalizedToCanonical[key]; !exists {
-			normalizedToCanonical[key] = col.Name
-		}
-	}
-
-	quotedIdentifierPattern := regexp.MustCompile(`"([^"]+)"`)
-	fixes := make([]string, 0)
-	rewritten := quotedIdentifierPattern.ReplaceAllStringFunc(sqlText, func(token string) string {
-		name := strings.Trim(token, "\"")
-		canonical, ok := normalizedToCanonical[normalizeIdentifierForMatch(name)]
-		if !ok || canonical == name {
-			return token
-		}
-		fixes = append(fixes, fmt.Sprintf("%q -> %q", name, canonical))
-		return fmt.Sprintf(`"%s"`, canonical)
-	})
-
-	return rewritten, fixes
 }
 
 func buildMissingColumnSuggestion(sqlErr error, schema *TableSchema) string {
@@ -119,17 +90,16 @@ func buildMissingColumnSuggestion(sqlErr error, schema *TableSchema) string {
 }
 
 type DataAnalysisInput struct {
-	KnowledgeID     string                 `json:"knowledge_id" jsonschema:"id of the knowledge-base CSV/Excel file or current-turn uploaded table attachment to query"`
-	Sql             string                 `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against the loaded CSV/Excel table; use the table name returned by table_schema"`
-	ChartRequested  bool                   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
-	PreferredChart  string                 `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
-	ChartIntent     string                 `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare subcategory counts by sequence; used only when chart_requested is true"`
-	PrimaryMetric   string                 `json:"primary_metric,omitempty" jsonschema:"optional SQL result column name that should be the primary visual metric when chart_requested is true"`
-	SecondaryMetric string                 `json:"secondary_metric,omitempty" jsonschema:"optional SQL result column name for a secondary metric, especially dual_axis_combo or relationship charts"`
-	Dimension       string                 `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
-	Series          string                 `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
-	ChartTitle      string                 `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
-	SourceMapping   map[string]interface{} `json:"source_mapping,omitempty" jsonschema:"required for table_analysis chart result queries: LLM-authored JSON mapping from SQL result fields/rows/values to original CSV/Excel fields, cells, ranges, and derivation rules; use the prompt template as weak guidance only; the runtime forwards it and may inspect referenced cells, but never auto-generates it or validates an exact template shape"`
+	KnowledgeID     string `json:"knowledge_id" jsonschema:"id of the knowledge-base CSV/Excel file or current-turn uploaded table attachment to query"`
+	Sql             string `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against the loaded CSV/Excel table; use the table name returned by table_schema"`
+	ChartRequested  bool   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
+	PreferredChart  string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
+	ChartIntent     string `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare subcategory counts by sequence; used only when chart_requested is true"`
+	PrimaryMetric   string `json:"primary_metric,omitempty" jsonschema:"optional SQL result column name that should be the primary visual metric when chart_requested is true"`
+	SecondaryMetric string `json:"secondary_metric,omitempty" jsonschema:"optional SQL result column name for a secondary metric, especially dual_axis_combo or relationship charts"`
+	Dimension       string `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
+	Series          string `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
+	ChartTitle      string `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
 }
 
 type TableAnalysisInput = DataAnalysisInput
@@ -411,21 +381,7 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		}, err
 	}
 
-	// Replace knowledge ID with table name
-	input.Sql = strings.ReplaceAll(input.Sql, input.KnowledgeID, schema.TableName)
-	if rewrittenSQL, fixes := reconcileSQLColumnsWithSchema(input.Sql, schema); len(fixes) > 0 {
-		logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Auto-rewrote SQL identifiers for session %s: %v", t.sessionID, fixes)
-		input.Sql = rewrittenSQL
-	}
 	input.Sql = normalizeTableAnalysisSQL(input.Sql)
-	if t.isTableAnalysisTool() && input.ChartRequested && !hasUsableTableAnalysisSourceMapping(input.SourceMapping) {
-		err := fmt.Errorf("table_analysis chart result queries must include non-empty LLM-authored source_mapping JSON that maps result data back to original file evidence; the template is weak guidance only and is not validated as a fixed schema")
-		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Missing source_mapping for session %s: %v", t.sessionID, err)
-		return &types.ToolResult{
-			Success: false,
-			Error:   err.Error(),
-		}, err
-	}
 
 	if !t.isTableAnalysisTool() {
 		// Preserve legacy data_analysis behavior. The table_analysis tool uses
@@ -480,14 +436,9 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		}, err
 	}
 
-	queryOutput := t.formatQueryResults(results, input.Sql)
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Completed execution query, total %d rows for session %s", len(results), t.sessionID)
 	chartRequested := input.ChartRequested && t.allowChart
 	chart := inferStructuredChartSpec(columns, results, input.PreferredChart, chartRequested, tableChartHintsFromInput(input))
-	sourceMappingValidation := map[string]interface{}{"status": "not_applicable"}
-	if t.isTableAnalysisTool() {
-		sourceMappingValidation = t.validateTableAnalysisSourceMapping(ctx, schema, input.SourceMapping)
-	}
 	displayMode := "text_only"
 	if eligible, _ := chart["eligible"].(bool); eligible {
 		displayMode = "chart_only"
@@ -496,26 +447,26 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 	if t.isTableAnalysisTool() {
 		limits["max_rows"] = tableAnalysisMaxRows
 	}
-	return &types.ToolResult{
-		Success: true,
-		Output:  queryOutput,
-		Data: map[string]interface{}{
-			"display_type":              DisplayTypeStructuredAnalysis,
-			"display_mode":              displayMode,
-			"analysis_type":             "file",
-			"source":                    map[string]interface{}{"type": "file", "knowledge_id": input.KnowledgeID, "table_name": schema.TableName, "allowed_tables": allowedTables},
-			"columns":                   columns,
-			"rows":                      results,
-			"row_count":                 len(results),
-			"query":                     input.Sql,
-			"chart_requested":           chartRequested,
-			"chart":                     chart,
-			"source_mapping":            input.SourceMapping,
-			"source_mapping_validation": sourceMappingValidation,
-			"limits":                    limits,
-			"session_id":                t.sessionID,
-		},
-	}, nil
+	data := map[string]interface{}{
+		"display_type":    DisplayTypeStructuredAnalysis,
+		"display_mode":    displayMode,
+		"analysis_type":   "file",
+		"source":          map[string]interface{}{"type": "file", "knowledge_id": input.KnowledgeID, "table_name": schema.TableName, "allowed_tables": allowedTables},
+		"columns":         columns,
+		"rows":            results,
+		"row_count":       len(results),
+		"query":           input.Sql,
+		"chart_requested": chartRequested,
+		"chart":           chart,
+		"lineage":         toolcontract.QueryLineage(map[string]any{"knowledge_id": input.KnowledgeID, "table": schema.TableName, "metadata": schema.Metadata}, input.Sql, columns, results, truncated),
+		"limits":          limits,
+		"session_id":      t.sessionID,
+	}
+	output, err := toolcontract.QueryOutput(data)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, err
+	}
+	return &types.ToolResult{Success: true, Output: output, Data: data}, nil
 }
 
 // executeSingleQuery executes a single SQL query and returns columns and results
@@ -598,36 +549,6 @@ func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery stri
 
 	truncated := maxRows > 0 && len(results) >= maxRows
 	return columns, results, truncated, nil
-}
-
-// formatQueryResults formats query results into JSONL format (one JSON object per line)
-func (t *DataAnalysisTool) formatQueryResults(results []map[string]string, query string) string {
-	var output strings.Builder
-
-	output.WriteString("=== DuckDB Query Results ===\n\n")
-	output.WriteString(fmt.Sprintf("Executed SQL: %s\n\n", query))
-	output.WriteString(fmt.Sprintf("Returned %d rows\n\n", len(results)))
-
-	if len(results) == 0 {
-		output.WriteString("No matching records found.\n")
-		return output.String()
-	}
-
-	output.WriteString("=== Data Details ===\n\n")
-	if len(results) > 10 {
-		output.WriteString(fmt.Sprintf("Showing all %d records. Consider using a LIMIT clause to restrict the result count for better performance.\n\n", len(results)))
-	}
-
-	// Write each record as a separate JSON line
-	for i, record := range results {
-		recordBytes, _ := json.Marshal(record)
-
-		// Remove the trailing newline added by Encode
-		recordStr := strings.Trim(string(recordBytes), "\n")
-		output.WriteString(fmt.Sprintf("record %d: %s\n", i+1, recordStr))
-	}
-
-	return output.String()
 }
 
 func (t *DataAnalysisTool) applyDisplayIntentToInput(input *DataAnalysisInput) error {
@@ -1705,6 +1626,9 @@ func (t *DataAnalysisTool) LoadFromCSV(ctx context.Context, filename string, tab
 		return nil, err
 	}
 	t.attachCellEvidenceTableMetadata(ctx, schema, cellTableName, "CSV cell evidence table")
+	if bytes, readErr := os.ReadFile(filename); readErr == nil {
+		schema.Metadata["source_sha256"] = fmt.Sprintf("%x", sha256.Sum256(bytes))
+	}
 	return schema, nil
 }
 
@@ -1822,6 +1746,9 @@ func (t *DataAnalysisTool) LoadFromExcel(ctx context.Context, filename string, t
 		return nil, err
 	}
 	t.attachCellEvidenceTableMetadata(ctx, schema, cellTableName, "Excel cell evidence table")
+	if bytes, readErr := os.ReadFile(filename); readErr == nil {
+		schema.Metadata["source_sha256"] = fmt.Sprintf("%x", sha256.Sum256(bytes))
+	}
 	return schema, nil
 }
 
@@ -2375,7 +2302,7 @@ func (t *TableSchema) Description() string {
 		builder.WriteString(fmt.Sprintf("- Rows: %v\n", t.Metadata["cell_row_count"]))
 		builder.WriteString("- This is the authoritative source for irregular CSV/Excel understanding. It contains source_kind, sheet_name, row_number, column_number, column_letter, cell_ref, value, effective_value, merged_range, is_merged, and is_blank.\n")
 		builder.WriteString("- Use this table to inspect original cells, section headings, merged cells, and non-rectangular layouts before constructing a normalized analysis result.\n")
-		builder.WriteString("- When using table_analysis for chart output, include source_mapping JSON that maps result fields and rows back to this evidence table or the original file fields.\n")
+
 		if cellColumns, ok := t.Metadata["cell_columns"].([]map[string]interface{}); ok && len(cellColumns) > 0 {
 			builder.WriteString("- Cell evidence column info:\n")
 			for _, col := range cellColumns {

@@ -451,20 +451,10 @@ func (m *Manager) DispatchPlan(ctx context.Context, planID string) error {
 		).Count(&activeRetries).Error; err != nil {
 			return err
 		}
-		var completedRetries int64
-		if err := tx.Model(&Part{}).Where(
-			"plan_id = ? AND state = ? AND (failure_attempts > 0 OR backpressure_events > 0)",
-			planID, PartCompleted,
-		).Count(&completedRetries).Error; err != nil {
-			return err
-		}
-		// A transient provider failure (most notably an embedding TPM 429)
-		// moves a part back to preparing with an attempt count. Resume that
-		// logical document with one probe at a time. Keep the circuit breaker
-		// closed for the rest of this document after a probe succeeds as well:
-		// immediately reopening the full window would recreate the same burst
-		// every few parts and eventually exhaust the retry budget.
-		if (activeRetries > 0 || completedRetries > 0) && window > 1 {
+		// Probe unresolved retries one at a time. Completed parts are history,
+		// not current backpressure: shared model admission owns provider limits.
+		// Recovery must restore the configured bounded document concurrency.
+		if activeRetries > 0 && window > 1 {
 			window = 1
 		}
 		available := window - int(active)
@@ -740,30 +730,6 @@ func (m *Manager) CompletePart(
 			allComplete = true
 			updates["state"] = PlanFinalizing
 			updates["finalizer_task_id"] = FinalizeTaskID(plan.ID)
-		} else {
-			var completedRetries int64
-			if err := tx.Model(&Part{}).Where(
-				"plan_id = ? AND state = ? AND (failure_attempts > 0 OR backpressure_events > 0)",
-				part.PlanID, PartCompleted,
-			).Count(&completedRetries).Error; err != nil {
-				return err
-			}
-			if completedRetries > 0 {
-				// A successful probe commonly consumes most of a provider's
-				// rolling TPM allowance. Pace the next physical part by one
-				// two base backoff windows; otherwise a single-concurrency circuit
-				// breaker still burns an avoidable retry immediately after
-				// every success.
-				resumeAt := now.Add(m.retryBackoff(2))
-				if err := tx.Model(&Part{}).Where(
-					"plan_id = ? AND state = ? AND (lease_until IS NULL OR lease_until < ?)",
-					part.PlanID, PartPreparing, resumeAt,
-				).Updates(map[string]interface{}{
-					"lease_until": resumeAt, "updated_at": now,
-				}).Error; err != nil {
-					return err
-				}
-			}
 		}
 		return tx.Model(&Plan{}).Where("id = ?", plan.ID).Updates(updates).Error
 	})
@@ -1211,7 +1177,7 @@ func (m *Manager) NormalizeGenerationTextChunkIndexes(
 	})
 }
 
-func (m *Manager) PublishGeneration(
+func (m *Manager) LinkGeneration(
 	ctx context.Context, tenantID uint64, knowledgeID, generation string, parts []*Part,
 ) error {
 	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -1234,22 +1200,7 @@ func (m *Manager) PublishGeneration(
 				return err
 			}
 		}
-		// The logical document switches generations in one database
-		// transaction. New vectors may already be ready, but retrieval cannot
-		// expose them before this point; old rows remain available until the
-		// same commit disables them.
-		if err := tx.Model(&types.Chunk{}).Where(
-			"tenant_id = ? AND knowledge_id = ? AND processing_generation <> ?",
-			tenantID, knowledgeID, generation,
-		).Updates(map[string]interface{}{
-			"is_enabled": false, "updated_at": time.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&types.Chunk{}).Where(
-			"tenant_id = ? AND knowledge_id = ? AND processing_generation = ?",
-			tenantID, knowledgeID, generation,
-		).Updates(map[string]interface{}{"is_enabled": true, "updated_at": time.Now()}).Error
+		return nil
 	})
 }
 

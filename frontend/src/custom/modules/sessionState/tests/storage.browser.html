@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>附件草稿存储回归</title>
+<h1>附件草稿存储回归（隔离测试）</h1>
+<p>使用真实 IndexedDB 保存 128 MiB 文件，检查并发更新、刷新恢复、作用域与清理。不会发送问答或读取用户草稿。</p>
+<button id="save">执行 128 MiB 保存测试</button>
+<button id="reload">刷新并验证持久数据</button>
+<button id="clear">清理测试草稿</button>
+<pre role="status" id="status">尚未开始</pre>
+<script type="module">
+import { draftKey, fileId, writeDraft, readDraft, uploadBinding } from '../storage.ts'
+const key = draftKey('storage-browser-fixture', 'isolated-automated-test')
+const endpoint = '/isolated-attachment-test'
+const status = document.querySelector('#status')
+function check(condition, message) { if (!condition) throw new Error(message) }
+function report(value) { status.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
+function action(fn) { return async () => { try { await fn() } catch (error) { report({ error: String(error) }) } } }
+async function verify() {
+  const loaded = await readDraft(key)
+  check(loaded?.value.query === 'latest draft', '并发保存丢失最后一次更新')
+  check(loaded.files.size === 1, '原始附件发生重复')
+  const file = loaded.files.get(loaded.value.fileId)
+  check(file?.size === 128 * 1024 * 1024 && file.name === 'boundary.bin', '文件身份或大小丢失')
+  for (const offset of [0, 65532, file.size / 2, file.size - 4]) {
+    check([...new Uint8Array(await file.slice(offset, offset + 4).arrayBuffer())].every(value => value === 73), '文件内容损坏')
+  }
+  const binding = await uploadBinding(key, file, endpoint)
+  check(binding.uploadId === loaded.value.uploadId && binding.sourceId === 'accepted-source', '刷新后上传句柄改变')
+  check(await readDraft(draftKey('storage-browser-fixture', 'another-test-owner')) === null, '草稿作用域泄漏')
+  return { verified: true, query: loaded.value.query, file: file.name, bytes: file.size, uploadId: binding.uploadId, sourceId: binding.sourceId }
+}
+document.querySelector('#save').onclick = action(async () => {
+  report('正在保存真实 128 MiB 文件…')
+  const started = performance.now()
+  const block = new Uint8Array(65536).fill(73)
+  const file = new File(Array(2048).fill(block), 'boundary.bin', { type: 'application/octet-stream', lastModified: 1000 })
+  const id = fileId(file)
+  const initial = writeDraft(key, { query: 'initial draft', fileId: id }, [file])
+  const latest = writeDraft(key, { query: 'latest draft', fileId: id }, [file])
+  await Promise.all([initial, latest])
+  const binding = await uploadBinding(key, file, endpoint, 'accepted-source')
+  await writeDraft(key, { query: 'latest draft', fileId: id, uploadId: binding.uploadId }, [file])
+  report({ ...(await verify()), duration_ms: Math.round(performance.now() - started), phase: 'before reload' })
+})
+document.querySelector('#reload').onclick = () => { location.hash = 'verify'; location.reload() }
+document.querySelector('#clear').onclick = action(async () => {
+  await writeDraft(key, null, [])
+  check(await readDraft(key) === null, '测试草稿清理失败')
+  report({ cleaned: true })
+})
+if (location.hash === '#verify') await action(async () => report({ ...(await verify()), phase: 'after full reload' }))()
+</script>

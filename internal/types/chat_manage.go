@@ -7,11 +7,12 @@ import (
 
 // PipelineRequest holds immutable configuration set once at the request entry point.
 type PipelineRequest struct {
-	SessionID    string `json:"session_id"`
-	UserID       string `json:"user_id"`
-	Query        string `json:"query,omitempty"`
-	EnableMemory bool   `json:"enable_memory"`
-	MaxRounds    int    `json:"max_rounds"`
+	RetrievalBudget RetrievalBudget `json:"retrieval_budget" yaml:"retrieval_budget"`
+	SessionID       string          `json:"session_id"`
+	UserID          string          `json:"user_id"`
+	Query           string          `json:"query,omitempty"`
+	EnableMemory    bool            `json:"enable_memory"`
+	MaxRounds       int             `json:"max_rounds"`
 
 	// Knowledge base retrieval parameters
 	KnowledgeBaseIDs []string      `json:"knowledge_base_ids"`
@@ -47,7 +48,6 @@ type PipelineRequest struct {
 	// FAQ strategy
 	FAQPriorityEnabled       bool    `json:"-"`
 	FAQDirectAnswerThreshold float64 `json:"-"`
-	FAQScoreBoost            float64 `json:"-"`
 
 	// DataAnalysisEnabled controls whether the in-pipeline DuckDB SQL
 	// tabular SQL stage runs. Off by default to avoid an extra LLM call on
@@ -345,7 +345,6 @@ func (c *ChatManage) Clone() *ChatManage {
 			QueryUnderstandModelID:   c.QueryUnderstandModelID,
 			FAQPriorityEnabled:       c.FAQPriorityEnabled,
 			FAQDirectAnswerThreshold: c.FAQDirectAnswerThreshold,
-			FAQScoreBoost:            c.FAQScoreBoost,
 			DataAnalysisEnabled:      c.DataAnalysisEnabled,
 			Images:                   append([]string(nil), c.Images...),
 			VLMModelID:               c.VLMModelID,

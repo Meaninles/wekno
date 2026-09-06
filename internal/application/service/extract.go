@@ -677,6 +677,7 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		types.NameSpace{
 			KnowledgeBase: reloadedChunks[0].KnowledgeBaseID,
 			Knowledge:     reloadedChunks[0].KnowledgeID,
+			Generation:    &p.ProcessingGeneration,
 		},
 		[]*types.GraphData{graph},
 	); err != nil {

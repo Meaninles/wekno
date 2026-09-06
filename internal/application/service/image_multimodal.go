@@ -527,7 +527,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			ChunkIndex:           parentChunk.ChunkIndex,
 			StartAt:              parentChunk.StartAt,
 			EndAt:                parentChunk.EndAt,
-			IsEnabled:            true,
+			IsEnabled:            false,
 			Flags:                types.ChunkFlagRecommended,
 			ImageInfo:            string(imageInfoJSON),
 			ProcessingGeneration: payload.ProcessingGeneration,
@@ -550,7 +550,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			ChunkIndex:           parentChunk.ChunkIndex,
 			StartAt:              parentChunk.StartAt,
 			EndAt:                parentChunk.EndAt,
-			IsEnabled:            true,
+			IsEnabled:            false,
 			Flags:                types.ChunkFlagRecommended,
 			ImageInfo:            string(imageInfoJSON),
 			ProcessingGeneration: payload.ProcessingGeneration,
@@ -916,7 +916,7 @@ func multimodalChunkIndexInfo(chunk *types.Chunk) *types.IndexInfo {
 		ChunkID:         chunk.ID,
 		KnowledgeID:     chunk.KnowledgeID,
 		KnowledgeBaseID: chunk.KnowledgeBaseID,
-		IsEnabled:       chunk.IsEnabled,
+		IsEnabled:       true, // Visibility is gated by the relational generation publication.
 		IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 	}
 }

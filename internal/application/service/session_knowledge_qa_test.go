@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/models/asr"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -158,93 +157,33 @@ func TestHandleModelFallback_IncludesHistoryMessages(t *testing.T) {
 	assert.Contains(t, chatModel.lastMessages[3].Content, "## Fallback guidance")
 	assert.Contains(t, chatModel.lastMessages[3].Content,
 		"Answer only the current user task above. Use conversation history only when that task explicitly depends on it.")
-	assert.True(t, strings.HasSuffix(chatModel.lastMessages[3].Content,
-		conversationmemory.TerminalGenerationDirective()))
 	assert.NotEqual(t, "Answer the latest user question: 现在还能继续讲吗？", chatModel.lastMessages[3].Content)
 }
 
-func TestConsumeFallbackStreamProjectsSameProductionAnswerToEventsAndState(t *testing.T) {
-	bus := event.NewEventBus()
-	cm := &types.ChatManage{
-		PipelineRequest: types.PipelineRequest{SessionID: "session-projection"},
-		PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()},
-	}
-	var streamed string
-	var done int
-	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		data, ok := evt.Data.(event.AgentFinalAnswerData)
-		require.True(t, ok)
-		streamed += data.Content
-		if data.Done {
-			done++
+func TestRepairFallbackTypedStreamsPreserveAnswerAndError(t *testing.T) {
+	for _, finish := range []string{"stop", "length", ""} {
+		bus := event.NewEventBus()
+		var answer string
+		var errors int
+		bus.On(event.EventAgentFinalAnswer, func(_ context.Context, e event.Event) error {
+			answer += e.Data.(event.AgentFinalAnswerData).Content
+			return nil
+		})
+		bus.On(event.EventError, func(_ context.Context, e event.Event) error { errors++; return nil })
+		cm := &types.ChatManage{PipelineRequest: types.PipelineRequest{SessionID: "session"}, PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()}}
+		stream := make(chan types.StreamResponse, 2)
+		stream <- types.StreamResponse{ResponseType: types.ResponseTypeThinking, Content: "private"}
+		stream <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "result", Done: true, FinishReason: finish}
+		close(stream)
+		(&sessionService{}).consumeFallbackStream(context.Background(), cm, stream)
+		if finish == "stop" {
+			require.Equal(t, "result", answer)
+			require.Equal(t, answer, cm.ChatResponse.Content)
+			require.Zero(t, errors)
+		} else {
+			require.Empty(t, answer)
+			require.Nil(t, cm.ChatResponse)
+			require.Equal(t, 1, errors)
 		}
-		return nil
-	})
-	responses := make(chan types.StreamResponse, 3)
-	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "private analysis\n<weknora_"}
-	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "final_response>Visible fallback answer.</weknora_final_response>hidden"}
-	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Done: true}
-	close(responses)
-
-	(&sessionService{}).consumeFallbackStream(context.Background(), cm, responses)
-
-	require.NotNil(t, cm.ChatResponse)
-	assert.Equal(t, "Visible fallback answer.", streamed)
-	assert.Equal(t, streamed, cm.ChatResponse.Content)
-	assert.Equal(t, 1, done)
-	assert.NotContains(t, streamed, "private")
-	assert.NotContains(t, streamed, "weknora_final_response")
-}
-
-func TestConsumeFallbackStreamUsesSameFixedCandidateWhenStreamClosesEarly(t *testing.T) {
-	bus := event.NewEventBus()
-	cm := &types.ChatManage{
-		PipelineRequest: types.PipelineRequest{
-			SessionID:        "session-early-close",
-			FallbackResponse: "  fixed fallback  ",
-		},
-		PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()},
 	}
-	var streamed string
-	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		data, ok := evt.Data.(event.AgentFinalAnswerData)
-		require.True(t, ok)
-		streamed += data.Content
-		return nil
-	})
-	responses := make(chan types.StreamResponse, 1)
-	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "partial"}
-	close(responses)
-
-	(&sessionService{}).consumeFallbackStream(context.Background(), cm, responses)
-
-	require.NotNil(t, cm.ChatResponse)
-	assert.Equal(t, "fixed fallback", streamed)
-	assert.Equal(t, streamed, cm.ChatResponse.Content)
-}
-
-func TestHandleFixedFallbackHidesProtocolCorruptionFromEventsAndState(t *testing.T) {
-	bus := event.NewEventBus()
-	cm := &types.ChatManage{
-		PipelineRequest: types.PipelineRequest{
-			SessionID:        "session-corrupt-fixed-fallback",
-			FallbackResponse: "<weknora_final_placeholder>",
-			Language:         "zh-CN",
-		},
-		PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()},
-	}
-	var streamed string
-	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
-		data, ok := evt.Data.(event.AgentFinalAnswerData)
-		require.True(t, ok)
-		streamed += data.Content
-		return nil
-	})
-
-	(&sessionService{}).handleFixedFallback(context.Background(), cm)
-
-	require.NotNil(t, cm.ChatResponse)
-	assert.Equal(t, "本次回答未能可靠生成，请重试。", streamed)
-	assert.Equal(t, streamed, cm.ChatResponse.Content)
-	assert.NotContains(t, streamed, "weknora")
 }

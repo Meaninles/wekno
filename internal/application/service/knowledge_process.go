@@ -134,6 +134,8 @@ func (s *knowledgeService) cloneKnowledge(
 
 	completedAt := time.Now()
 	dst.ParseStatus = types.ParseStatusCompleted
+	dst.CoreStatus = types.CoreStatusReady
+	dst.CoreCompletedAt = &completedAt
 	dst.EnableStatus = "enabled"
 	dst.StorageSize = src.StorageSize
 	dst.ProcessedAt = &completedAt
@@ -289,9 +291,6 @@ func buildDocumentFanoutPlan(
 					break
 				}
 			}
-			if chunkID == "" && len(chunks) > 0 {
-				chunkID = chunks[0].ChunkID
-			}
 			plan.Images = append(plan.Images, processownership.ImageFanout{
 				ChunkID:         chunkID,
 				ImageURL:        image.ServingURL,
@@ -337,6 +336,10 @@ func finalizeIndexedKnowledgeState(
 	knowledge.ProcessedAt = &now
 	knowledge.CoreStatus = types.CoreStatusReady
 	knowledge.CoreCompletedAt = &now
+	if hasPendingMultimodal {
+		knowledge.CoreStatus = types.CoreStatusProcessing
+		knowledge.CoreCompletedAt = nil
+	}
 	knowledge.UpdatedAt = now
 }
 
@@ -349,24 +352,7 @@ func buildSplitterConfig(kb *types.KnowledgeBase) chunker.SplitterConfig {
 }
 
 func buildSplitterConfigFromChunking(cc types.ChunkingConfig) chunker.SplitterConfig {
-	chunkCfg := chunker.SplitterConfig{
-		ChunkSize:    cc.ChunkSize,
-		ChunkOverlap: cc.ChunkOverlap,
-		Separators:   cc.Separators,
-		Strategy:     cc.Strategy,
-		TokenLimit:   cc.TokenLimit,
-		Languages:    cc.Languages,
-	}
-	if chunkCfg.ChunkSize <= 0 {
-		chunkCfg.ChunkSize = chunker.DefaultChunkSize
-	}
-	if chunkCfg.ChunkOverlap <= 0 {
-		chunkCfg.ChunkOverlap = chunker.DefaultChunkOverlap
-	}
-	if len(chunkCfg.Separators) == 0 {
-		chunkCfg.Separators = []string{"\n\n", "\n", "。"}
-	}
-	return chunkCfg
+	return chunker.ChunkConfig(cc)
 }
 
 func (s *knowledgeService) applyEmbeddingTokenBudget(
@@ -406,27 +392,7 @@ func (s *knowledgeService) applyEmbeddingTokenBudget(
 // buildParentChildConfigs derives parent and child SplitterConfig from ChunkingConfig.
 // The base config (already validated with defaults) is used for separators.
 func buildParentChildConfigs(cc types.ChunkingConfig, base chunker.SplitterConfig) (parent, child chunker.SplitterConfig) {
-	parentSize := cc.ParentChunkSize
-	if parentSize <= 0 {
-		parentSize = 4096
-	}
-	childSize := cc.ChildChunkSize
-	if childSize <= 0 {
-		childSize = 384
-	}
-	parent = chunker.SplitterConfig{
-		ChunkSize:    parentSize,
-		ChunkOverlap: base.ChunkOverlap, // reuse configured overlap for parents
-		Separators:   base.Separators,
-	}
-	child = chunker.SplitterConfig{
-		ChunkSize:    childSize,
-		ChunkOverlap: childSize / 5, // ~20% overlap for child chunks
-		Separators:   base.Separators,
-		TokenLimit:   base.TokenLimit,
-		Languages:    base.Languages,
-	}
-	return
+	return chunker.ParentChildConfig(cc, base)
 }
 
 // processChunks processes chunks and creates embeddings for knowledge content
@@ -439,6 +405,11 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	if len(opts) > 0 {
 		options = opts[0]
 	}
+	urls := make([]string, 0, len(options.StoredImages))
+	for _, image := range options.StoredImages {
+		urls = append(urls, image.ServingURL)
+	}
+	chunks = knowledgeaux.EnsureImageAnchors(chunks, urls)
 
 	// Check if knowledge is being deleted/cancelled before processing.
 	// Both statuses short-circuit identically here — there's nothing to clean
@@ -466,45 +437,28 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		logger.Infof(ctx, "Vector/keyword indexing disabled for KB %s, skipping embedding model", kb.ID)
 	}
 
-	// 幂等性处理：清理旧的chunks和索引数据，避免重复数据
-	logger.Infof(ctx, "Cleaning up existing chunks and index data for knowledge: %s", knowledge.ID)
-	if err := s.heartbeatActiveProcessing(ctx, knowledge, "checkpoint before deleting old chunks"); err != nil {
+	// A retry only removes this unpublished attempt. The previous generation
+	// remains available until the fenced core transaction publishes the new one.
+	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	retrieveEngine, err := retriever.CreateRetrieveEngineForKB(ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
+	if err != nil {
 		return err
 	}
-
-	// 删除旧的chunks
-	if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
-		return fmt.Errorf("delete existing chunks before processing: %w", err)
+	if s.auxObjects == nil {
+		return errors.New("index staging: auxiliary registry is unavailable")
 	}
-
-	// 删除旧的索引数据 — only when vector/keyword indexing is enabled
-	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-	retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
-		ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
+	draftIDs, err := s.auxObjects.DraftChunkIDs(ctx, knowledge)
 	if err != nil {
-		return fmt.Errorf("resolve retrieve engine before processing: %w", err)
+		return err
 	}
-	if embeddingModel != nil {
-		if err := s.heartbeatActiveProcessing(ctx, knowledge, "checkpoint before deleting old index"); err != nil {
+	if embeddingModel != nil && len(draftIDs) > 0 {
+		if err := retrieveEngine.DeleteByChunkIDList(ctx, draftIDs, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 			return err
 		}
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
-			return fmt.Errorf("delete existing index before processing: %w", err)
-		} else {
-			logger.Infof(ctx, "Successfully deleted existing index data for knowledge: %s", knowledge.ID)
-		}
 	}
-
-	// 删除知识图谱数据（如果存在）
-	if err := s.heartbeatActiveProcessing(ctx, knowledge, "checkpoint before deleting old graph"); err != nil {
+	if err := s.auxObjects.DeleteDraftChunks(ctx, knowledge, draftIDs); err != nil {
 		return err
 	}
-	namespace := types.NameSpace{KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID}
-	if err := s.graphEngine.DelGraph(ctx, []types.NameSpace{namespace}); err != nil {
-		return fmt.Errorf("delete existing graph before processing: %w", err)
-	}
-
-	logger.Infof(ctx, "Cleanup completed, starting to process new chunks")
 
 	// ========== DocReader 解析结果日志 ==========
 	logger.Infof(ctx, "[DocReader] ========== 解析结果概览 ==========")
@@ -582,8 +536,10 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 				KnowledgeID:          knowledge.ID,
 				KnowledgeBaseID:      knowledge.KnowledgeBaseID,
 				Content:              pc.Content,
+				ContextHeader:        pc.ContextHeader,
+				SourceLocator:        pc.SourceLocator,
 				ChunkIndex:           pc.Seq,
-				IsEnabled:            true,
+				IsEnabled:            false,
 				CreatedAt:            time.Now(),
 				UpdatedAt:            time.Now(),
 				StartAt:              pc.Start,
@@ -623,8 +579,9 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 			KnowledgeBaseID:      knowledge.KnowledgeBaseID,
 			Content:              chunkData.Content,
 			ContextHeader:        chunkData.ContextHeader,
+			SourceLocator:        chunkData.SourceLocator,
 			ChunkIndex:           int(chunkData.Seq),
-			IsEnabled:            true,
+			IsEnabled:            false,
 			CreatedAt:            time.Now(),
 			UpdatedAt:            time.Now(),
 			StartAt:              int(chunkData.Start),
@@ -674,6 +631,10 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		return nil
 	}
 
+	currentChunkIDs := make([]string, 0, len(insertChunks))
+	for _, c := range insertChunks {
+		currentChunkIDs = append(currentChunkIDs, c.ID)
+	}
 	// Save chunks to database — ALWAYS, regardless of indexing strategy.
 	// Chunks are needed for wiki generation, graph extraction, and summary generation
 	// even when vector/keyword indexing is disabled.
@@ -689,7 +650,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		}
 		if sequenceErr := cleanupArtifactsBeforeFailureTransition(
 			func() error {
-				if cleanupErr := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); cleanupErr != nil {
+				if cleanupErr := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); cleanupErr != nil {
 					// CreateChunks can be partially committed by a batched repository.
 					// Never publish Failed until that possible partial write is gone.
 					return errors.Join(err, fmt.Errorf("cleanup partial chunk write: %w", cleanupErr))
@@ -765,20 +726,20 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 				if checkpointErr := s.heartbeatActiveProcessing(ctx, knowledge, "checkpoint before tenant-refresh cleanup"); checkpointErr != nil {
 					return errors.Join(err, checkpointErr)
 				}
-				if cleanupErr := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); cleanupErr != nil {
+				if cleanupErr := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); cleanupErr != nil {
 					return errors.Join(err, fmt.Errorf("cleanup chunks after tenant refresh failure: %w", cleanupErr))
 				}
 				return fmt.Errorf("refresh tenant storage before indexing: %w", err)
 			}
 			// Check if there's enough storage quota available
-			if tenantInfo.StorageUsed+totalStorageSize > tenantInfo.StorageQuota {
+			if tenantInfo.StorageUsed-knowledge.StorageSize+totalStorageSize > tenantInfo.StorageQuota {
 				quotaErr := errors.New("存储空间不足")
 				if checkpointErr := s.heartbeatActiveProcessing(ctx, knowledge, "checkpoint before quota-failure cleanup"); checkpointErr != nil {
 					return errors.Join(quotaErr, checkpointErr)
 				}
 				if sequenceErr := cleanupArtifactsBeforeFailureTransition(
 					func() error {
-						if cleanupErr := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); cleanupErr != nil {
+						if cleanupErr := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); cleanupErr != nil {
 							return errors.Join(quotaErr, fmt.Errorf("cleanup chunks after storage quota failure: %w", cleanupErr))
 						}
 						return nil
@@ -804,7 +765,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		} else if aborted {
 			logger.Infof(ctx, "Knowledge aborted (%s) before indexing: %s", status, knowledge.ID)
 			if status == types.ParseStatusDeleting {
-				if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
+				if err := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); err != nil {
 					logger.Warnf(ctx, "Failed to cleanup chunks after deletion detected: %v", err)
 				}
 			}
@@ -818,11 +779,11 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		if err != nil {
 			cleanupVectorArtifacts := func() error {
 				var cleanupErr error
-				if deleteErr := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); deleteErr != nil {
+				if deleteErr := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); deleteErr != nil {
 					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete chunks after vector failure: %w", deleteErr))
 				}
-				if deleteErr := retrieveEngine.DeleteByKnowledgeIDList(
-					ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type,
+				if deleteErr := retrieveEngine.DeleteByChunkIDList(
+					ctx, currentChunkIDs, embeddingModel.GetDimensions(), kb.Type,
 				); deleteErr != nil {
 					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete index after vector failure: %w", deleteErr))
 				}
@@ -886,10 +847,10 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		} else if aborted {
 			logger.Infof(ctx, "Knowledge aborted (%s) after indexing: %s", status, knowledge.ID)
 			if status == types.ParseStatusDeleting {
-				if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
+				if err := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); err != nil {
 					logger.Warnf(ctx, "Failed to cleanup chunks after deletion detected: %v", err)
 				}
-				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type); err != nil {
+				if err := retrieveEngine.DeleteByChunkIDList(ctx, currentChunkIDs, embeddingModel.GetDimensions(), kb.Type); err != nil {
 					logger.Warnf(ctx, "Failed to cleanup index after deletion detected: %v", err)
 				}
 			}
@@ -910,6 +871,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	expectedGeneration := knowledge.ProcessingGeneration
 	expectedOwner := knowledge.ProcessingOwner
 	now := time.Now()
+	knowledge.EmbeddingModelID = kb.EmbeddingModelID
 	finalizeIndexedKnowledgeState(
 		knowledge,
 		totalStorageSize,
@@ -956,12 +918,12 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		// generation or delete/cancel also makes this checkpoint fail closed.
 		knowledge.ProcessingOwner = expectedOwner
 		if checkpointErr := s.heartbeatActiveProcessing(ctx, knowledge, "checkpoint after finalization conflict"); checkpointErr == nil {
-			if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
+			if err := s.auxObjects.DeleteDraftChunks(ctx, knowledge, currentChunkIDs); err != nil {
 				finalizeErr = errors.Join(finalizeErr, fmt.Errorf("cleanup chunks after finalization failure: %w", err))
 			}
 			if kb.NeedsEmbeddingModel() && retrieveEngine != nil && embeddingModel != nil {
-				if err := retrieveEngine.DeleteByKnowledgeIDList(
-					ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type,
+				if err := retrieveEngine.DeleteByChunkIDList(
+					ctx, currentChunkIDs, embeddingModel.GetDimensions(), kb.Type,
 				); err != nil {
 					finalizeErr = errors.Join(finalizeErr, fmt.Errorf("cleanup index after finalization failure: %w", err))
 				}
@@ -1984,7 +1946,7 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 	// Filter text chunks only
 	textChunks := make([]*types.Chunk, 0)
 	for _, chunk := range chunks {
-		if chunk.ChunkType == types.ChunkTypeText {
+		if chunk.ChunkType == types.ChunkTypeText && chunk.ProcessingGeneration == payload.ProcessingGeneration {
 			textChunks = append(textChunks, chunk)
 		}
 	}
@@ -3564,10 +3526,7 @@ func (s *knowledgeService) reparseKnowledgeWithIdentity(
 			return err
 		}
 		existing.ParseStatus = types.ParseStatusPending
-		existing.EnableStatus = "disabled"
-		existing.Description = ""
 		existing.ProcessedAt = nil
-		existing.EmbeddingModelID = kb.EmbeddingModelID
 		existing.PendingSubtasksCount = 0
 		existing.ErrorMessage = errorMessage
 		existing.UpdatedAt = now
@@ -3610,16 +3569,6 @@ func (s *knowledgeService) reparseKnowledgeWithIdentity(
 		}
 		s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 		return existing, nil
-	}
-
-	// For non-manual knowledge, cleanup synchronously then enqueue document processing
-	logger.Infof(ctx, "Cleaning up existing resources for knowledge: %s", knowledgeID)
-	if err := s.cleanupKnowledgeResources(ctx, existing); err != nil {
-		logger.ErrorWithFields(ctx, err, map[string]interface{}{
-			"knowledge_id": knowledgeID,
-		})
-		markReparseFailed(types.ParseStatusProcessing, err)
-		return nil, err
 	}
 
 	prepared, err := s.prepareReparseDocumentWorkflow(
@@ -4263,31 +4212,6 @@ func (s *knowledgeService) ProcessManualUpdate(ctx context.Context, t *asynq.Tas
 		}
 	}
 	ctx = withAttempt(ctx, attempt)
-
-	// Cleanup old resources (indexes, chunks, graph) for update operations
-	if payload.NeedCleanup {
-		if err := s.heartbeatActiveProcessing(ctx, knowledge, "fence manual cleanup"); err != nil {
-			if errors.Is(err, errKnowledgeStateFenceConflict) {
-				return nil
-			}
-			return err
-		}
-		if err := s.cleanupKnowledgeResources(ctx, knowledge); err != nil {
-			logger.ErrorWithFields(ctx, err, map[string]interface{}{
-				"knowledge_id": payload.KnowledgeID,
-			})
-			// Cleanup can fail after only a subset of external resources were
-			// removed. Keep the generation nonterminal and retry; publishing failed
-			// here would make leaked vectors/chunks look final.
-			return fmt.Errorf("cleanup old manual resources: %w", err)
-		}
-		if err := s.heartbeatActiveProcessing(ctx, knowledge, "fence post-cleanup manual processing"); err != nil {
-			if errors.Is(err, errKnowledgeStateFenceConflict) {
-				return nil
-			}
-			return err
-		}
-	}
 
 	// Run manual processing (image resolution + chunking + embedding) synchronously within the worker
 	if err := s.triggerManualProcessing(ctx, kb, knowledge, payload.Content, true); err != nil {
@@ -4952,6 +4876,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			chunks[i] = types.ParsedChunk{
 				Content:       c.Content,
 				ContextHeader: c.ContextHeader,
+				SourceLocator: c.SourceLocator,
 				Seq:           c.Seq,
 				Start:         c.Start,
 				End:           c.End,
@@ -4960,7 +4885,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		}
 		parentChunks := make([]types.ParsedParentChunk, len(pcResult.Parents))
 		for i, p := range pcResult.Parents {
-			parentChunks[i] = types.ParsedParentChunk{Content: p.Content, Seq: p.Seq, Start: p.Start, End: p.End}
+			parentChunks[i] = types.ParsedParentChunk{Content: p.Content, ContextHeader: p.ContextHeader, SourceLocator: p.SourceLocator, Seq: p.Seq, Start: p.Start, End: p.End}
 		}
 		processOpts.ParentChunks = parentChunks
 		logger.Infof(ctx, "Split document into %d parent + %d child chunks for knowledge %s",
@@ -4972,6 +4897,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			chunks[i] = types.ParsedChunk{
 				Content:       c.Content,
 				ContextHeader: c.ContextHeader,
+				SourceLocator: c.SourceLocator,
 				Seq:           c.Seq,
 				Start:         c.Start,
 				End:           c.End,

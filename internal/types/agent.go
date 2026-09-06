@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -13,17 +14,18 @@ const DefaultMaxContextTokens = 200000
 // AgentConfig represents the full agent configuration (used at tenant level and runtime)
 // This includes all configuration parameters for agent execution
 type AgentConfig struct {
-	AgentID             string   `json:"agent_id,omitempty"`              // Runtime custom/built-in agent ID
-	AgentTenantID       uint64   `json:"-"`                               // Runtime source tenant for shared custom agents
-	MaxIterations       int      `json:"max_iterations"`                  // Maximum number of ReAct iterations
-	AllowedTools        []string `json:"allowed_tools"`                   // List of allowed tool names
-	AgentType           string   `json:"agent_type,omitempty"`            // Smart-reasoning preset type
-	Temperature         float64  `json:"temperature"`                     // LLM temperature for agent
-	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"` // Maximum output tokens for each agent model call
-	KnowledgeBases      []string `json:"knowledge_bases"`                 // Accessible knowledge base IDs
-	KnowledgeIDs        []string `json:"knowledge_ids"`                   // Accessible knowledge IDs (individual documents)
-	DBDataSources       []string `json:"db_data_sources,omitempty"`       // Accessible database analytics source IDs
-	SystemPrompt        string   `json:"system_prompt,omitempty"`         // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
+	RetrievalBudget     RetrievalBudget `json:"retrieval_budget" yaml:"retrieval_budget"`
+	AgentID             string          `json:"agent_id,omitempty"`              // Runtime custom/built-in agent ID
+	AgentTenantID       uint64          `json:"-"`                               // Runtime source tenant for shared custom agents
+	MaxIterations       int             `json:"max_iterations"`                  // Maximum number of ReAct iterations
+	AllowedTools        []string        `json:"allowed_tools"`                   // List of allowed tool names
+	AgentType           string          `json:"agent_type,omitempty"`            // Smart-reasoning preset type
+	Temperature         float64         `json:"temperature"`                     // LLM temperature for agent
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"` // Maximum output tokens for each agent model call
+	KnowledgeBases      []string        `json:"knowledge_bases"`                 // Accessible knowledge base IDs
+	KnowledgeIDs        []string        `json:"knowledge_ids"`                   // Accessible knowledge IDs (individual documents)
+	DBDataSources       []string        `json:"db_data_sources,omitempty"`       // Accessible database analytics source IDs
+	SystemPrompt        string          `json:"system_prompt,omitempty"`         // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
 	// DocumentTemplate is scoped to AgentTypeDocumentProcessingAgent and carries
 	// template requirement/reference files into the Claude SDK sidecar.
 	DocumentTemplate *DocumentTemplateConfig `json:"document_template,omitempty"`
@@ -70,9 +72,10 @@ type AgentConfig struct {
 	AllowedProfessionalSkills []string `json:"allowed_professional_skills,omitempty"`
 
 	// Runtime-only fields (not persisted)
-	RuntimeModelID          string `json:"-"` // Chat model ID selected for the current agent run.
-	VLMModelID              string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
-	LightweightSkillContext string `json:"-"` // Platform-resolved lightweight Skill system instructions for this run.
+	RuntimeModelID           string                    `json:"-"` // Chat model ID selected for the current agent run.
+	VLMModelID               string                    `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
+	LightweightSkillContext  string                    `json:"-"` // Platform-resolved lightweight Skill system instructions for this run.
+	RuntimeLightweightSkills []RuntimeLightweightSkill `json:"-"`
 	// DurableUserContext is the bounded, user-only source ledger for completed
 	// turns. Recent statements may also remain in normal history; this separate
 	// provenance view is runtime-only and is never persisted as configuration or
@@ -90,13 +93,9 @@ type AgentConfig struct {
 	// LLM call timeout in seconds (default: 120). Controls the maximum time for a single LLM call.
 	LLMCallTimeout int `json:"llm_call_timeout,omitempty"`
 
-	// Maximum character length for tool output (default: 16000).
-	// Outputs exceeding this limit are truncated with head + tail preservation.
-	MaxToolOutputChars int `json:"max_tool_output_chars,omitempty"`
-
 	// Maximum context window tokens for the agent (default: 200000).
-	// The agent compresses older messages to stay within this limit,
-	// preserving tool_call/tool_result pairs.
+	// Exact older tool results are archived behind readable handles as needed,
+	// preserving tool_call/tool_result pairs and original source content.
 	MaxContextTokens int `json:"max_context_tokens,omitempty"`
 
 	// Whether to execute independent tool calls in parallel (default: false).
@@ -111,10 +110,17 @@ type AgentConfig struct {
 	RerankThreshold          float64 `json:"rerank_threshold,omitempty"`
 	FAQPriorityEnabled       bool    `json:"faq_priority_enabled,omitempty"`
 	FAQDirectAnswerThreshold float64 `json:"faq_direct_answer_threshold,omitempty"`
-	FAQScoreBoost            float64 `json:"faq_score_boost,omitempty"`
 
 	// General-agent artifact settings.
 	EnableArtifacts bool `json:"enable_artifacts,omitempty"`
+}
+
+type RuntimeLightweightSkill struct {
+	Key            string `json:"key"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	Instructions   string `json:"-"`
+	SelectedByUser bool   `json:"selected_by_user,omitempty"`
 }
 
 // TableAnalysisDisplayIntent captures whether the current user turn requires
@@ -301,4 +307,30 @@ type FunctionDefinition struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// RetrievalBudget separates candidate generation, reranking and evidence context.
+type RetrievalBudget struct {
+	CandidateCount int `json:"candidate_count" yaml:"candidate_count"`
+	FusionCount    int `json:"fusion_count" yaml:"fusion_count"`
+	EvidenceTokens int `json:"evidence_tokens" yaml:"evidence_tokens"`
+}
+
+func (b RetrievalBudget) Validate() error {
+	for _, field := range []struct {
+		name           string
+		value, maximum int
+	}{
+		{"candidate_count", b.CandidateCount, 500},
+		{"fusion_count", b.FusionCount, 500},
+		{"evidence_tokens", b.EvidenceTokens, 64000},
+	} {
+		if field.value < 0 || field.value > field.maximum {
+			return fmt.Errorf("retrieval_budget.%s must be between 0 (automatic) and %d", field.name, field.maximum)
+		}
+	}
+	if b.CandidateCount > 0 && b.FusionCount > b.CandidateCount {
+		return fmt.Errorf("retrieval_budget.fusion_count cannot exceed candidate_count")
+	}
+	return nil
 }

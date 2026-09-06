@@ -294,6 +294,7 @@ func renderPromptPlaceholdersWithStatus(
 		"current_time":      currentTime,
 		"language":          language,
 		"skills":            "", // Remove {{skills}} placeholder; skills are appended separately if present
+		"contexts":          "", // Tool agents receive evidence through tool results, not the QA template slot.
 	})
 	return result
 }

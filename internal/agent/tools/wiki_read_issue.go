@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -20,7 +21,7 @@ func NewWikiReadIssueTool(wikiService interfaces.WikiPageService, kbIDs []string
 		BaseTool: NewBaseTool(
 			ToolWikiReadIssue,
 			"Read the details of a specific wiki page issue or list pending issues for a wiki page.",
-			json.RawMessage(`{
+			wikicontract.TargetSchema(json.RawMessage(`{
   "type": "object",
   "properties": {
     "issue_id": {
@@ -33,7 +34,7 @@ func NewWikiReadIssueTool(wikiService interfaces.WikiPageService, kbIDs []string
     }
   },
   "description": "Provide either issue_id or slug to read issue(s)."
-}`),
+}`), false),
 		),
 		wikiService: wikiService,
 		kbIDs:       kbIDs,
@@ -42,6 +43,7 @@ func NewWikiReadIssueTool(wikiService interfaces.WikiPageService, kbIDs []string
 
 func (t *wikiReadIssueTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
 	var params struct {
+		wikicontract.Target
 		IssueID string `json:"issue_id"`
 		Slug    string `json:"slug"`
 	}
@@ -60,7 +62,10 @@ func (t *wikiReadIssueTool) Execute(ctx context.Context, args json.RawMessage) (
 		return &types.ToolResult{Success: false, Error: "No knowledge bases available"}, nil
 	}
 
-	kbID := t.kbIDs[0]
+	kbID, targetErr := params.Target.KnowledgeBase(t.kbIDs)
+	if targetErr != nil {
+		return &types.ToolResult{Success: false, Error: targetErr.Error()}, nil
+	}
 
 	if issueID != "" {
 		// Just reuse ListIssues since there's no GetIssueByID yet
@@ -68,7 +73,7 @@ func (t *wikiReadIssueTool) Execute(ctx context.Context, args json.RawMessage) (
 		if err != nil {
 			return &types.ToolResult{Success: false, Error: "Failed to list issues: " + err.Error()}, nil
 		}
-		
+
 		for _, issue := range issues {
 			if issue.ID == issueID {
 				out, _ := json.MarshalIndent(issue, "", "  ")

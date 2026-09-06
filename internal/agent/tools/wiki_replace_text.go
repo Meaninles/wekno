@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -23,7 +24,7 @@ func NewWikiReplaceTextTool(wikiPageService interfaces.WikiPageService, kbIDs []
 		BaseTool: NewBaseTool(
 			ToolWikiReplaceText,
 			"Replace specific exact text in a Wiki page. Ideal for minor corrections.",
-			json.RawMessage(`{
+			wikicontract.TargetSchema(json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
@@ -45,7 +46,7 @@ func NewWikiReplaceTextTool(wikiPageService interfaces.WikiPageService, kbIDs []
 					}
 				},
 				"required": ["slug", "old_text", "new_text"]
-			}`),
+			}`), true),
 		),
 		wikiPageService:  wikiPageService,
 		knowledgeService: knowledgeService,
@@ -55,6 +56,7 @@ func NewWikiReplaceTextTool(wikiPageService interfaces.WikiPageService, kbIDs []
 
 func (t *wikiReplaceTextTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
 	var params struct {
+		wikicontract.Target
 		Slug       string   `json:"slug"`
 		OldText    string   `json:"old_text"`
 		NewText    string   `json:"new_text"`
@@ -68,7 +70,10 @@ func (t *wikiReplaceTextTool) Execute(ctx context.Context, args json.RawMessage)
 	if len(t.kbIDs) == 0 {
 		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
-	kbID := t.kbIDs[0]
+	kbID, targetErr := params.Target.KnowledgeBase(t.kbIDs)
+	if targetErr != nil {
+		return &types.ToolResult{Success: false, Error: targetErr.Error()}, nil
+	}
 
 	if params.OldText == "" {
 		return &types.ToolResult{Success: false, Error: "old_text is required"}, nil
@@ -78,6 +83,11 @@ func (t *wikiReplaceTextTool) Execute(ctx context.Context, args json.RawMessage)
 	existingPage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, params.Slug)
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("Failed to fetch page %s: %v", params.Slug, err)}, nil
+	}
+	if existingPage != nil {
+		if err := params.Target.ValidatePage(existingPage, true); err != nil {
+			return &types.ToolResult{Success: false, Error: err.Error()}, nil
+		}
 	}
 
 	if !strings.Contains(existingPage.Content, params.OldText) {

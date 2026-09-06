@@ -59,17 +59,7 @@ type Service struct {
 	housekeepingMu     sync.Mutex
 	housekeepingCancel context.CancelFunc
 	housekeepingDone   chan struct{}
-	lightweightSkills  lightweightSkillProvider
 	professionalSkills professionalSkillProvider
-}
-
-type lightweightSkillProvider interface {
-	LightweightPackages(
-		context.Context,
-		string,
-		[]string,
-		[]string,
-	) ([]skillhub.LightweightSkillPackage, []skillhub.LightweightSkillDrop, error)
 }
 
 type professionalSkillProvider interface {
@@ -115,12 +105,6 @@ func NewService(
 func (s *Service) SetProfessionalSkillProvider(provider professionalSkillProvider) {
 	if s != nil {
 		s.professionalSkills = provider
-	}
-}
-
-func (s *Service) SetLightweightSkillProvider(provider lightweightSkillProvider) {
-	if s != nil {
-		s.lightweightSkills = provider
 	}
 }
 
@@ -208,16 +192,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		return err
 	}
 	query := s.buildEffectiveQuery(ctx, req)
-	lightMode, lightNames := configuredLightweightSkillSelection(req.CustomAgent)
-	lightweightSkills, lightweightDrops, err := s.lightweightSkillSpecs(ctx, lightMode, lightNames, req.SkillNames)
-	if err != nil {
-		return err
+	lightweightSkills := make([]LightweightSkillSpec, 0, len(agentConfig.RuntimeLightweightSkills))
+	for _, skill := range agentConfig.RuntimeLightweightSkills {
+		lightweightSkills = append(lightweightSkills, LightweightSkillSpec{Key: skill.Key, Name: skill.Name, Description: skill.Description, SelectedByUser: skill.SelectedByUser})
 	}
-	if len(lightweightDrops) > 0 {
-		logger.Warnf(ctx, "general-agent dropped unavailable lightweight skills: %v", lightweightDrops)
-	}
-	logger.Infof(ctx, "general-agent effective lightweight skills: mode=%s configured=%d chat=%d effective=%v",
-		lightMode, len(lightNames), len(req.SkillNames), lightweightSkillNames(lightweightSkills))
 	professionalSkills, err := s.professionalSkillSpecs(
 		ctx,
 		req.CustomAgent,
@@ -237,12 +215,13 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 			originalInputStorageURLs[storageURL] = struct{}{}
 		}
 	}
-	userID, _ := types.UserIDFromContext(ctx)
+	userID := types.SessionOwnerIDFromContext(ctx)
 	active := &activeRun{
+		chatModel: chatModel, agentConfig: agentConfig,
 		runID:              runID,
 		client:             sidecarClient,
 		originalInputFiles: originalInputFilesByID(originalInputFiles),
-		ctx:                ctx,
+		ctx:                conversationmemory.WithLiveTools(ctx),
 		eventBus:           eventBus,
 		registry:           registry,
 		sessionID:          sessionID,
@@ -374,55 +353,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 	eventBus.Emit(ctx, event.Event{ID: fallbackAnswerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID, RequestID: req.RequestID, Data: event.AgentFinalAnswerData{Done: true}})
 
-	artifactResults, err := s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
+	_, err = s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
 	if err != nil {
 		logger.Warnf(ctx, "general-agent persist artifacts failed: %v", err)
 		return fmt.Errorf("智能体产物未能安全写入对象存储，本次运行不能标记完成: %w", err)
-	}
-	artifactData, artifactOutput, emitArtifactResult := buildArtifactToolResult(result, artifactResults, err)
-	if emitArtifactResult {
-		artifactToolCallID := "general-artifacts-" + runID
-		artifactArgs := map[string]any{
-			"run_id":                  result.RunID,
-			"artifact_count":          len(artifactResults),
-			"artifact_original_count": result.ArtifactOriginalCount,
-			"artifact_dropped_count":  result.ArtifactDroppedCount,
-		}
-		if err != nil {
-			artifactArgs["persist_failed"] = true
-		}
-		artifactIteration := active.allocateIteration()
-		artifactToolResult := &types.ToolResult{
-			Success: true,
-			Output:  artifactOutput,
-			Data:    artifactData,
-		}
-		active.recordToolCall(artifactIteration, artifactToolCallID, "create_artifact", artifactArgs, artifactToolResult, 0)
-		eventBus.Emit(ctx, event.Event{
-			Type:      event.EventAgentToolCall,
-			SessionID: sessionID,
-			RequestID: req.RequestID,
-			Data: event.AgentToolCallData{
-				ToolCallID:     artifactToolCallID,
-				ToolName:       "create_artifact",
-				Arguments:      artifactArgs,
-				Iteration:      artifactIteration,
-				PreserveAnswer: true,
-			},
-		})
-		eventBus.Emit(ctx, event.Event{
-			Type:      event.EventAgentToolResult,
-			SessionID: sessionID,
-			RequestID: req.RequestID,
-			Data: event.AgentToolResultData{
-				ToolCallID: artifactToolCallID,
-				ToolName:   "create_artifact",
-				Output:     artifactToolResult.Output,
-				Success:    true,
-				Iteration:  artifactIteration,
-				Data:       artifactData,
-			},
-		})
 	}
 
 	// finalAnswer and citedRefs are the exact pair already emitted above.
@@ -468,40 +402,6 @@ func captureSidecarAnswerEvent(
 	}
 }
 
-func emitSidecarProductionCandidate(
-	ctx context.Context,
-	eventBus *event.EventBus,
-	sessionID string,
-	requestID string,
-	answerID string,
-	answer string,
-	availableRefs []*types.SearchResult,
-) (string, []*types.SearchResult, sourcerefs.CitationValidationReport) {
-	answer = sourcerefs.RepairAnswerCitations(answer, availableRefs)
-	filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(answer, availableRefs)
-	filtered = strings.TrimSpace(filtered)
-	eventBus.Emit(ctx, event.Event{
-		ID:        answerID,
-		Type:      event.EventAgentFinalAnswer,
-		SessionID: sessionID,
-		RequestID: requestID,
-		Data: event.AgentFinalAnswerData{
-			Content: filtered,
-			Done:    false,
-		},
-	})
-	eventBus.Emit(ctx, event.Event{
-		ID:        answerID,
-		Type:      event.EventAgentFinalAnswer,
-		SessionID: sessionID,
-		RequestID: requestID,
-		Data: event.AgentFinalAnswerData{
-			Done: true,
-		},
-	})
-	return filtered, citedRefs, report
-}
-
 func (s *Service) emitSidecarEvent(ctx context.Context, eventBus *event.EventBus, sessionID, fallbackAnswerID string, evt StreamEvent, streamed *strings.Builder, lastAnswerID *string, lastAnswerDone *bool, active *activeRun) {
 	switch evt.Type {
 	case "answer_delta":
@@ -536,13 +436,14 @@ func (s *Service) emitSidecarEvent(ctx context.Context, eventBus *event.EventBus
 				Done:      evt.Done,
 			},
 		})
+	case "runtime_tool":
+		if active != nil {
+			active.recordRuntimeToolEvent(ctx, eventBus, sidecarProgressDataFromEvent(evt))
+		}
 	case "progress":
 		progress := sidecarProgressDataFromEvent(evt)
 		if progress.Content == "" {
 			return
-		}
-		if active != nil {
-			active.recordProgressStatus(progress.ToolCallID, progress.ToolName, progress.Phase, progress.Content, progress.Metadata)
 		}
 		eventBus.Emit(ctx, event.Event{
 			ID:        progress.ToolCallID,
@@ -653,7 +554,7 @@ func (s *Service) resolveLLMConfig(ctx context.Context, config *types.AgentConfi
 	if err != nil {
 		return nil, fmt.Errorf("通用智能体无法读取模型配置: %w", err)
 	}
-	out, err := generalClaudeLLMConfigFromModel(model)
+	out, err := runtimeLLMConfigFromModel(model)
 	if err != nil {
 		return nil, err
 	}
@@ -668,11 +569,12 @@ func generalClaudeLLMConfigFromModel(model *types.Model) (*LLMConfig, error) {
 		return nil, errors.New("通用智能体需要对话模型")
 	}
 	out := &LLMConfig{
-		SupportsVision: model.Parameters.SupportsVision,
-		ModelName:      strings.TrimSpace(model.Name),
-		BaseURL:        strings.TrimSpace(model.Parameters.BaseURL),
-		APIKey:         strings.TrimSpace(model.Parameters.APIKey),
-		Provider:       strings.TrimSpace(model.Parameters.Provider),
+		ReasoningEffort: strings.TrimSpace(model.Parameters.ExtraConfig["reasoning_effort"]),
+		SupportsVision:  model.Parameters.SupportsVision,
+		ModelName:       strings.TrimSpace(model.Name),
+		BaseURL:         strings.TrimSpace(model.Parameters.BaseURL),
+		APIKey:          strings.TrimSpace(model.Parameters.APIKey),
+		Provider:        strings.TrimSpace(model.Parameters.Provider),
 	}
 	if remoteModel := strings.TrimSpace(model.Parameters.ExtraConfig["remote_model_name"]); remoteModel != "" {
 		out.ModelName = remoteModel
@@ -809,29 +711,16 @@ func buildGeneralAgentHistory(
 		if pair.Assistant == nil {
 			continue
 		}
-		answer := strings.TrimSpace(sourcerefs.StripCitationProtocol(pair.Assistant.Content))
+		answer := conversationmemory.AssistantRecord(pair.Assistant)
 		if answer != "" {
 			out = append(out, ChatHistoryMessage{
 				Role:     "assistant",
-				Content:  conversationmemory.HistoricalAssistantOutput(answer),
-				SourceID: "assistant_after_" + userSourceID,
+				Content:  answer,
+				SourceID: conversationmemory.AssistantSourceID(pair.Assistant.ID),
 			})
 		}
 	}
 	return out, archive
-}
-
-func configuredLightweightSkillSelection(agent *types.CustomAgent) (string, []string) {
-	if agent == nil {
-		return "none", nil
-	}
-	if agent.Config.LightweightSkillsSelectionMode != "" {
-		return agent.Config.LightweightSkillsSelectionMode, cloneStringSlice(agent.Config.SelectedLightweightSkills)
-	}
-	if agent.Config.SkillsSelectionMode != "" {
-		return agent.Config.SkillsSelectionMode, cloneStringSlice(agent.Config.SelectedSkills)
-	}
-	return "none", nil
 }
 
 func configuredProfessionalSkillSelection(agent *types.CustomAgent) (string, []string) {
@@ -843,48 +732,6 @@ func configuredProfessionalSkillSelection(agent *types.CustomAgent) (string, []s
 		mode = "none"
 	}
 	return mode, cloneStringSlice(agent.Config.SelectedProfessionalSkills)
-}
-
-func (s *Service) lightweightSkillSpecs(
-	ctx context.Context,
-	mode string,
-	configured []string,
-	chat []string,
-) ([]LightweightSkillSpec, []skillhub.LightweightSkillDrop, error) {
-	mode = strings.TrimSpace(mode)
-	if mode == "" {
-		mode = "none"
-	}
-	if mode != "all" && (mode != "selected" || len(compactStrings(configured)) == 0) && len(compactStrings(chat)) == 0 {
-		return nil, nil, nil
-	}
-	if s.lightweightSkills == nil {
-		return nil, nil, fmt.Errorf("lightweight skill provider is unavailable")
-	}
-	packages, dropped, err := s.lightweightSkills.LightweightPackages(ctx, mode, configured, chat)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve lightweight skills: %w", err)
-	}
-	out := make([]LightweightSkillSpec, 0, len(packages))
-	for _, pkg := range packages {
-		out = append(out, LightweightSkillSpec{
-			Key:          pkg.Key,
-			Name:         pkg.Name,
-			Description:  pkg.Description,
-			Instructions: pkg.Instructions,
-		})
-	}
-	return out, dropped, nil
-}
-
-func lightweightSkillNames(skills []LightweightSkillSpec) []string {
-	out := make([]string, 0, len(skills))
-	for _, skill := range skills {
-		if name := strings.TrimSpace(skill.Name); name != "" {
-			out = append(out, name)
-		}
-	}
-	return out
 }
 
 func effectiveProfessionalSkillSelection(
@@ -1047,27 +894,20 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 			"rerank_threshold":                 config.RerankThreshold,
 			"faq_priority_enabled":             config.FAQPriorityEnabled,
 			"faq_direct_answer_threshold":      config.FAQDirectAnswerThreshold,
-			"faq_score_boost":                  config.FAQScoreBoost,
 			"artifacts_enabled":                config.EnableArtifacts,
-			"artifact_return_policy":           artifactReturnPolicy(config.AgentType),
+			"artifact_return_policy":           artifactReturnPolicy(),
 		}
 		out["visible_resources"] = s.visibleResources(ctx, config)
 	}
 	return out
 }
 
-func artifactReturnPolicy(agentType string) map[string]any {
-	policy := map[string]any{
-		"max_artifact_count":            5,
-		"artifact_count_limited":        true,
+func artifactReturnPolicy() map[string]any {
+	return map[string]any{
+		"artifact_count_limited":        false,
 		"total_return_size_limit_bytes": int64(128 * 1024 * 1024),
-		"order":                         "important files first",
+		"admission":                     "checked at registration; registered files are never silently discarded",
 	}
-	if agentType == types.AgentTypeKnowledgeBaseManager {
-		policy["max_artifact_count"] = nil
-		policy["artifact_count_limited"] = false
-	}
-	return policy
 }
 
 type visibleDBSource struct {
@@ -1467,6 +1307,7 @@ func runtimeConfigSpec(c *types.AgentConfig) RuntimeConfigSpec {
 		AgentType:                   c.AgentType,
 		MaxIterations:               c.MaxIterations,
 		Temperature:                 c.Temperature,
+		MaxCompletionTokens:         c.MaxCompletionTokens,
 		Thinking:                    c.Thinking,
 		AllowedTools:                cloneStringSlice(c.AllowedTools),
 		KnowledgeBases:              cloneStringSlice(c.KnowledgeBases),
@@ -1494,7 +1335,6 @@ func runtimeConfigSpec(c *types.AgentConfig) RuntimeConfigSpec {
 		RerankThreshold:             c.RerankThreshold,
 		FAQPriorityEnabled:          c.FAQPriorityEnabled,
 		FAQDirectAnswerThreshold:    c.FAQDirectAnswerThreshold,
-		FAQScoreBoost:               c.FAQScoreBoost,
 		KnowledgeManagement:         c.KnowledgeManagement,
 	}
 }
@@ -1519,7 +1359,7 @@ func renderSystemPrompt(ctx context.Context, prompt string, webSearchEnabled boo
 	for key, value := range replacements {
 		prompt = strings.ReplaceAll(prompt, "{{"+key+"}}", value)
 	}
-	return prompt
+	return sourcerefs.EnsureGenerationContract(prompt)
 }
 
 func toolCallbackURL() string {
@@ -1555,7 +1395,7 @@ func (s *Service) persistArtifacts(ctx context.Context, _ *Client, runID string,
 	if s.db == nil || s.artifactStore == nil {
 		return nil, errors.New("private artifact persistence is not initialized")
 	}
-	userID, _ := types.UserIDFromContext(ctx)
+	userID := types.SessionOwnerIDFromContext(ctx)
 	out := make([]ArtifactResult, 0, len(artifacts))
 	for _, item := range artifacts {
 		if !item.Persisted || strings.TrimSpace(item.ArtifactID) == "" {
@@ -1621,31 +1461,6 @@ func dedupeSidecarArtifactsByFilenameKeepLast(artifacts []SidecarArtifact) []Sid
 	return out
 }
 
-func buildArtifactToolResult(result *ChatResult, artifacts []ArtifactResult, persistErr error) (map[string]interface{}, string, bool) {
-	if result == nil {
-		result = &ChatResult{}
-	}
-	notice := combinedArtifactNotice(result.ArtifactNotice, persistErr)
-	if len(artifacts) == 0 && notice == "" {
-		return nil, "", false
-	}
-	data := map[string]interface{}{
-		"display_type":            displayTypeArtifacts,
-		"artifacts":               artifactResultMaps(artifacts),
-		"notice":                  notice,
-		"artifact_original_count": result.ArtifactOriginalCount,
-		"artifact_returned_count": result.ArtifactReturnedCount,
-		"artifact_dropped_count":  result.ArtifactDroppedCount,
-		"artifact_returned_size":  result.ArtifactReturnedSize,
-		"artifact_limit_bytes":    result.ArtifactLimitBytes,
-	}
-	if persistErr != nil {
-		data["persist_failed"] = true
-		data["persist_error"] = sanitizeArtifactPersistError(persistErr)
-	}
-	return data, generalArtifactOutput(notice, len(artifacts)), true
-}
-
 func artifactResultMaps(artifacts []ArtifactResult) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(artifacts))
 	for _, item := range artifacts {
@@ -1659,46 +1474,6 @@ func artifactResultMaps(artifacts []ArtifactResult) []map[string]interface{} {
 		})
 	}
 	return out
-}
-
-func combinedArtifactNotice(base string, persistErr error) string {
-	notice := strings.TrimSpace(base)
-	if persistErr == nil {
-		return notice
-	}
-	persistNotice := "产物文件已生成，但保存下载记录失败，暂时无法提供下载链接。请稍后重试或联系管理员查看后端日志。"
-	if msg := sanitizeArtifactPersistError(persistErr); msg != "" {
-		persistNotice += "错误：" + msg
-	}
-	if notice == "" {
-		return persistNotice
-	}
-	return notice + "\n" + persistNotice
-}
-
-func sanitizeArtifactPersistError(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := strings.TrimSpace(err.Error())
-	msg = strings.Join(strings.Fields(msg), " ")
-	const maxLen = 240
-	runes := []rune(msg)
-	if len(runes) > maxLen {
-		msg = string(runes[:maxLen]) + "..."
-	}
-	return msg
-}
-
-func generalArtifactOutput(notice string, returned int) string {
-	notice = strings.TrimSpace(notice)
-	if notice != "" {
-		if returned > 0 {
-			return "已生成产物。" + notice
-		}
-		return notice
-	}
-	return "已生成产物"
 }
 
 func safeFileName(name string) string {

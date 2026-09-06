@@ -49,6 +49,8 @@ var (
 	wikiLinkRE    = regexp.MustCompile(`\[\[([^\]|\n]+)\|([^\]\n]+)\]\]`)
 	wikiPageRE    = regexp.MustCompile(`(?s)<wiki_page>.*?</wiki_page>`)
 	wikiKBRE      = regexp.MustCompile(`(?s)<knowledge_base_id>\s*([^<]+?)\s*</knowledge_base_id>`)
+	wikiIDRE      = regexp.MustCompile(`(?s)<page_id>\s*([^<]+?)\s*</page_id>`)
+	wikiVersionRE = regexp.MustCompile(`(?s)<version>\s*([^<]+?)\s*</version>`)
 	wikiSummaryRE = regexp.MustCompile(`(?s)<summary>\s*(.*?)\s*</summary>`)
 	wikiContentRE = regexp.MustCompile(`(?s)<content>\s*(.*?)\s*</content>`)
 )
@@ -328,6 +330,8 @@ func extractWikiReferences(output string) []*types.SearchResult {
 			ChunkType:       "wiki_page",
 			Metadata: map[string]string{
 				"source_type":       SourceTypeWiki,
+				"page_id":           firstSubmatch(wikiIDRE, block),
+				"page_version":      firstSubmatch(wikiVersionRE, block),
 				"slug":              slug,
 				"knowledge_base_id": kbID,
 			},

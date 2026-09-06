@@ -2,10 +2,12 @@ package skillhub
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/agent/skills"
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 const (
@@ -130,7 +132,8 @@ func renderLightweightPackages(title string, packages []LightweightSkillPackage)
 	}
 	sections := make([]string, 0, len(packages))
 	for _, item := range packages {
-		sections = append(sections, renderContextSection(item.Name, item.Description, item.Instructions))
+		entry, _ := json.Marshal(types.RuntimeLightweightSkill{Key: item.Key, Name: item.Name, Description: item.Description})
+		sections = append(sections, string(entry))
 	}
 	return title + "\n" + strings.Join(sections, "\n\n")
 }

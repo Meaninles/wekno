@@ -1,6 +1,7 @@
 package conversationmemory
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/Tencent/WeKnora/internal/types"
 	"strings"
@@ -30,8 +31,28 @@ func TestHistoryWholeMessagesNotPrefixes(t *testing.T) {
 		rows = append(rows, &types.Message{ID: fmt.Sprint(i), RequestID: fmt.Sprint(i), Role: "user", Content: strings.Repeat("x", 650) + fmt.Sprintf(" terminal-field-%d", i), CreatedAt: time.Unix(int64(i), 0)})
 	}
 	recent, archive := BuildHistory(rows, 5)
-	if !strings.Contains(archive, "terminal-field-21") {
-		t.Fatal("older message tail lost")
+	for _, line := range strings.Split(archive, "\n") {
+		var entry struct {
+			SourceID     string `json:"source_id"`
+			Text         string `json:"text"`
+			ReadRequired bool   `json:"read_required"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.ReadRequired {
+			if entry.Text != "" {
+				t.Fatal("partial text presented as source")
+			}
+			continue
+		}
+		var index int
+		if _, err := fmt.Sscanf(entry.SourceID, "user_message_%d", &index); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Text != rows[index].Content {
+			t.Fatal("whole original message not preserved", entry.SourceID)
+		}
 	}
 	if strings.Contains(archive, "terminal-field-47") || len(recent) != 5 {
 		t.Fatal("recent users duplicated")
@@ -40,5 +61,33 @@ func TestHistoryWholeMessagesNotPrefixes(t *testing.T) {
 	_, archive = BuildHistory(rows, 5)
 	if !strings.Contains(archive, `"read_required":true`) || !strings.Contains(archive, `"source_id":"user_message_0"`) {
 		t.Fatal("overflow lacks original-source read handle")
+	}
+}
+
+func TestRepairHistoryBudgetKeepsFifteenUserTurnsAndReadableAnswers(t *testing.T) {
+	var rows []*types.Message
+	for i := 0; i < 15; i++ {
+		rid := fmt.Sprint(i)
+		rows = append(rows, &types.Message{ID: "u" + rid, RequestID: rid, Role: "user", Content: fmt.Sprintf("用户更正字段 %d，保留原文条件。", i), CreatedAt: time.Unix(int64(i), 0)}, &types.Message{ID: "a" + rid, RequestID: rid, Role: "assistant", Content: strings.Repeat("long generated answer ", 3000), IsCompleted: true})
+	}
+	turns, archive := BuildHistoryWithBudget(rows, 15, 4000)
+	if len(turns) != 15 || archive != "" {
+		t.Fatal("continuous history lost", len(turns))
+	}
+	tokens := 0
+	for i, turn := range turns {
+		if turn.User.Content != rows[i*2].Content {
+			t.Fatal("user correction replaced", i)
+		}
+		if !strings.Contains(turn.Assistant.Content, AssistantSourceID(rows[i*2+1].ID)) {
+			t.Fatal("oversized answer has no read handle", i)
+		}
+		if !strings.Contains(rows[i*2+1].Content, "long generated") {
+			t.Fatal("stored answer changed")
+		}
+		tokens += EstimateTokens(turn.User.Content) + EstimateTokens(turn.Assistant.Content)
+	}
+	if tokens > 4000 {
+		t.Fatal("history exceeded budget", tokens)
 	}
 }

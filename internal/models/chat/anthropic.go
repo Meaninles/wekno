@@ -18,11 +18,12 @@ import (
 const anthropicVersion = "2023-06-01"
 
 type AnthropicChat struct {
-	modelName     string
-	modelID       string
-	baseURL       string
-	apiKey        string
-	customHeaders map[string]string
+	modelName       string
+	modelID         string
+	baseURL         string
+	apiKey          string
+	customHeaders   map[string]string
+	reasoningEffort string
 }
 
 type anthropicMessage struct {
@@ -31,13 +32,15 @@ type anthropicMessage struct {
 }
 
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	MaxTokens   int                `json:"max_tokens"`
-	Stream      bool               `json:"stream,omitempty"`
-	System      string             `json:"system,omitempty"`
-	Messages    []anthropicMessage `json:"messages"`
-	Temperature *float64           `json:"temperature,omitempty"`
-	TopP        *float64           `json:"top_p,omitempty"`
+	Thinking     map[string]string  `json:"thinking,omitempty"`
+	OutputConfig map[string]string  `json:"output_config,omitempty"`
+	Model        string             `json:"model"`
+	MaxTokens    int                `json:"max_tokens"`
+	Stream       bool               `json:"stream,omitempty"`
+	System       string             `json:"system,omitempty"`
+	Messages     []anthropicMessage `json:"messages"`
+	Temperature  *float64           `json:"temperature,omitempty"`
+	TopP         *float64           `json:"top_p,omitempty"`
 }
 
 type anthropicResponse struct {
@@ -102,11 +105,12 @@ func NewAnthropicChat(config *ChatConfig) (*AnthropicChat, error) {
 	}
 
 	return &AnthropicChat{
-		modelName:     config.ModelName,
-		modelID:       config.ModelID,
-		baseURL:       baseURL,
-		apiKey:        config.APIKey,
-		customHeaders: config.CustomHeaders,
+		modelName:       config.ModelName,
+		modelID:         config.ModelID,
+		baseURL:         baseURL,
+		apiKey:          config.APIKey,
+		customHeaders:   config.CustomHeaders,
+		reasoningEffort: strings.TrimSpace(config.ExtraConfig["reasoning_effort"]),
 	}, nil
 }
 
@@ -260,11 +264,21 @@ func (c *AnthropicChat) buildRequest(messages []Message, opts *ChatOptions) anth
 		} else if opts.MaxCompletionTokens > 0 {
 			req.MaxTokens = opts.MaxCompletionTokens
 		}
-		if opts.Temperature > 0 {
+		if opts.Thinking != nil {
+			mode := "disabled"
+			if *opts.Thinking {
+				mode = "adaptive"
+			}
+			req.Thinking = map[string]string{"type": mode}
+		}
+		if c.reasoningEffort != "" && (opts.Thinking == nil || *opts.Thinking) {
+			req.OutputConfig = map[string]string{"effort": c.reasoningEffort}
+		}
+		if opts.Temperature >= 0 && (opts.Thinking == nil || !*opts.Thinking) {
 			temperature := opts.Temperature
 			req.Temperature = &temperature
 		}
-		if opts.TopP > 0 {
+		if opts.TopP > 0 && (opts.Thinking == nil || !*opts.Thinking) {
 			topP := opts.TopP
 			req.TopP = &topP
 		}

@@ -314,7 +314,11 @@ func (p *PluginSearch) searchByTargets(
 		if len(queries) == 1 {
 			query = queries[0]
 		}
-		return p.searchByTargetsForQuery(ctx, chatManage, query)
+		found := p.searchByTargetsForQuery(ctx, chatManage, query)
+		for _, item := range found {
+			item.MatchedQueries = []string{query}
+		}
+		return found
 	}
 
 	pipelineInfo(ctx, "Search", "compound_query_plan", map[string]interface{}{
@@ -329,13 +333,16 @@ func (p *PluginSearch) searchByTargets(
 		go func(query string) {
 			defer wg.Done()
 			found := p.searchByTargetsForQuery(ctx, chatManage, query)
+			for _, item := range found {
+				item.MatchedQueries = []string{query}
+			}
 			mu.Lock()
 			all = append(all, found...)
 			mu.Unlock()
 		}(query)
 	}
 	wg.Wait()
-	return removeDuplicateResults(all)
+	return chatretrieval.Deduplicate(all)
 }
 
 // searchByTargetsForQuery performs KB searches using pre-computed SearchTargets.
@@ -447,6 +454,7 @@ func (p *PluginSearch) searchByTargetsForQuery(
 						VectorThreshold:       chatManage.VectorThreshold,
 						KeywordThreshold:      chatManage.KeywordThreshold,
 						MatchCount:            chatManage.EmbeddingTopK,
+						CandidateCount:        chatretrieval.ResolveBudget(chatManage.EmbeddingTopK, chatManage.RerankTopK, chatManage.RetrievalBudget).Candidates,
 						SkipContextEnrichment: true,
 					}
 					res, err := p.knowledgeBaseService.HybridSearch(ctx, fullKBIDs[0], params)
@@ -534,6 +542,7 @@ func (p *PluginSearch) searchSingleTarget(
 		VectorThreshold:       chatManage.VectorThreshold,
 		KeywordThreshold:      chatManage.KeywordThreshold,
 		MatchCount:            chatManage.EmbeddingTopK,
+		CandidateCount:        chatretrieval.ResolveBudget(chatManage.EmbeddingTopK, chatManage.RerankTopK, chatManage.RetrievalBudget).Candidates,
 		TagIDs:                t.TagIDs,
 		SkipContextEnrichment: true,
 	}
@@ -573,52 +582,52 @@ func (p *PluginSearch) tryDirectChunkLoading(ctx context.Context, tenantID uint6
 
 	var allChunks []*types.Chunk
 	var skippedIDs []string
-	loadedKnowledgeIDs := make(map[string]bool)
+	knowledgeMap := make(map[string]*types.Knowledge)
+	knowledges, err := p.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, knowledgeIDs)
+	if err != nil {
+		logger.Warnf(ctx, "DirectLoad: Failed to authorize knowledge: %v", err)
+		return nil, knowledgeIDs
+	}
+	for _, k := range knowledges {
+		if k != nil && k.IsPublished() && k.EnableStatus == "enabled" {
+			knowledgeMap[k.ID] = k
+		}
+	}
 
 	for _, kid := range knowledgeIDs {
-		// Optimization: Check chunk count first if possible?
-		chunks, err := p.chunkService.ListChunksByKnowledgeID(ctx, kid)
+		k := knowledgeMap[kid]
+		if k == nil {
+			continue
+		}
+		// Query one bounded page before deciding whether direct loading fits;
+		// a large selected file must never be materialized just to count it.
+		chunks, total, err := p.chunkService.GetRepository().ListPagedChunksByKnowledgeID(types.WithPublishedChunks(ctx),
+			k.TenantID, kid, &types.Pagination{Page: 1, PageSize: maxTotalChunks + 1}, nil, "", "", "", "", "")
 		if err != nil {
 			logger.Warnf(ctx, "DirectLoad: Failed to list chunks for knowledge %s: %v", kid, err)
 			skippedIDs = append(skippedIDs, kid)
 			continue
 		}
 
-		if len(allChunks)+len(chunks) > maxTotalChunks {
+		if len(allChunks)+int(total) > maxTotalChunks {
 			logger.Infof(ctx, "DirectLoad: Skipped knowledge %s due to size limit (%d + %d > %d)",
 				kid, len(allChunks), len(chunks), maxTotalChunks)
 			skippedIDs = append(skippedIDs, kid)
 			continue
 		}
 		allChunks = append(allChunks, chunks...)
-		loadedKnowledgeIDs[kid] = true
 	}
 
 	if len(allChunks) == 0 {
 		return nil, skippedIDs
 	}
 
-	// Fetch Knowledge metadata
-	var uniqueKIDs []string
-	for kid := range loadedKnowledgeIDs {
-		uniqueKIDs = append(uniqueKIDs, kid)
-	}
-
-	knowledgeMap := make(map[string]*types.Knowledge)
-	if len(uniqueKIDs) > 0 {
-		knowledges, err := p.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, uniqueKIDs)
-		if err != nil {
-			logger.Warnf(ctx, "DirectLoad: Failed to fetch knowledge batch: %v", err)
-			// Continue without metadata
-		} else {
-			for _, k := range knowledges {
-				knowledgeMap[k.ID] = k
-			}
-		}
-	}
-
 	var results []*types.SearchResult
 	for _, chunk := range allChunks {
+		k := knowledgeMap[chunk.KnowledgeID]
+		if k == nil || !chunk.IsEnabled || chunk.ProcessingGeneration != k.PublishedGeneration {
+			continue
+		}
 		res := &types.SearchResult{
 			ID:            chunk.ID,
 			Content:       chunk.Content,

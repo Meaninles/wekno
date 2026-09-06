@@ -3,16 +3,19 @@ package kbmanager
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime/multipart"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
-	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -40,8 +43,7 @@ type Service struct {
 	schedulerMu     sync.Mutex
 	schedulerCancel context.CancelFunc
 	schedulerDone   chan struct{}
-	runningMu       sync.Mutex
-	running         map[string]bool
+	wake            chan struct{}
 }
 
 func NewService(
@@ -60,7 +62,7 @@ func NewService(
 		tenantService:    tenantService,
 		fileResolver:     fileResolver,
 		configurator:     NewConfigurator(kbService, knowledgeService, kbShareService),
-		running:          make(map[string]bool),
+		wake:             make(chan struct{}, 1),
 	}
 }
 
@@ -70,7 +72,10 @@ func (s *Service) Migrate(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.WithContext(ctx).AutoMigrate(&Operation{})
+	if err := s.db.WithContext(ctx).AutoMigrate(&Operation{}, &OperationInput{}); err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Exec("CREATE UNIQUE INDEX IF NOT EXISTS kbmanager_active_replacement ON custom_kbmanager_operations (source_tenant_id, old_knowledge_id) WHERE type = 'replace' AND state IN ('preparing','parsing','cleanup_pending')").Error
 }
 
 func (s *Service) Start() {
@@ -89,15 +94,17 @@ func (s *Service) Start() {
 	s.schedulerMu.Unlock()
 	go func() {
 		defer close(done)
-		s.resumePending()
-		ticker := time.NewTicker(15 * time.Second)
+		s.resumePending(ctx)
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.resumePending()
+				s.resumePending(ctx)
+			case <-s.wake:
+				s.resumePending(ctx)
 			}
 		}
 	}()
@@ -148,7 +155,7 @@ type ReplaceDocumentRequest struct {
 
 type DeleteDocumentRequest struct {
 	KnowledgeID      string `json:"knowledge_id" jsonschema:"document ID to delete"`
-	ExpectedFileHash string `json:"expected_file_hash,omitempty" jsonschema:"optional optimistic-concurrency hash returned by kb_list_documents"`
+	ExpectedFileHash string `json:"expected_file_hash" jsonschema:"optimistic-concurrency hash returned by kb_list_documents"`
 	Reason           string `json:"reason,omitempty"`
 }
 
@@ -207,9 +214,16 @@ func (s *Service) AddDocument(ctx context.Context, scope ToolScope, input AddDoc
 		return nil, err
 	}
 	operation := s.newOperation(actor, kb, OperationTypeAdd, input.Source, fileName, sha, input.Reason)
-	if err := s.db.WithContext(ctx).Create(operation).Error; err != nil {
+	operation.InputMetadata, _ = json.Marshal(input.Metadata)
+	operation.InputTagIDs = compactUnique(input.TagIDs)
+	reserved, fresh, err := s.reserve(ctx, operation, data)
+	if err != nil {
 		return nil, err
 	}
+	if !fresh {
+		return reserved, nil
+	}
+	operation = reserved
 	metadata := managedMetadata(input.Metadata, operation, "")
 	knowledge, createErr := s.createKnowledge(sourceCtx, kbID, data, fileName, metadata, compactUnique(input.TagIDs))
 	if duplicate := duplicateKnowledge(createErr); duplicate != nil {
@@ -219,9 +233,10 @@ func (s *Service) AddDocument(ctx context.Context, scope ToolScope, input AddDoc
 		if createErr == nil {
 			createErr = fmt.Errorf("native ingestion returned no document")
 		}
-		return s.failOperation(ctx, operation, fmt.Errorf("新增文档失败: %w", createErr))
+		return s.deferIngestionReceipt(ctx, operation, createErr)
 	}
 	operation.NewKnowledgeID = knowledge.ID
+	operation.NewGeneration = knowledge.ProcessingGeneration
 	operation.State = OperationStateParsing
 	operation.ResultMessage = "文档已添加到知识库，原生解析、索引和派生处理将在后台继续"
 	if err := s.saveOperation(ctx, operation); err != nil {
@@ -232,6 +247,39 @@ func (s *Service) AddDocument(ctx context.Context, scope ToolScope, input AddDoc
 }
 
 func (s *Service) ReplaceDocument(ctx context.Context, scope ToolScope, input ReplaceDocumentRequest) (*Operation, error) {
+	actor, actorErr := actorFromContext(ctx, scope)
+	if actorErr != nil {
+		return nil, actorErr
+	}
+	if strings.TrimSpace(input.ExpectedOldFileHash) == "" {
+		return nil, fmt.Errorf("expected_old_file_hash is required from the inspected document")
+	}
+	data, fileName, sha, err := s.resolveSource(ctx, actor.runID, input.Source)
+	if err != nil {
+		return nil, err
+	}
+	var prior Operation
+	priorErr := s.db.WithContext(ctx).Where("caller_tenant_id = ? AND user_id = ? AND agent_id = ? AND run_id = ? AND type = ? AND old_knowledge_id = ? AND old_file_hash = ? AND source_kind = ? AND source_id = ?", actor.callerTenantID, actor.userID, scope.AgentID, actor.runID, OperationTypeReplace, input.KnowledgeID, input.ExpectedOldFileHash, input.Source.SourceType, input.Source.SourceID).Order("created_at DESC").First(&prior).Error
+	if priorErr == nil {
+		if scope.Runtime == nil || !scope.Runtime.ContainsDocument(prior.OldKnowledgeID, prior.KnowledgeBaseID) || !scope.Runtime.PermissionsFor(prior.KnowledgeBaseID).Modify {
+			return nil, fmt.Errorf("replacement is outside the current mutation scope")
+		}
+		if _, _, err := s.authorizeMutation(ctx, prior.KnowledgeBaseID); err != nil {
+			return nil, err
+		}
+		var priorMetadata map[string]string
+		if err := json.Unmarshal(prior.InputMetadata, &priorMetadata); err != nil {
+			return nil, err
+		}
+		if prior.SourceSHA256 != sha || prior.FileName != fileName || !reflect.DeepEqual(priorMetadata, input.Metadata) ||
+			(len(input.TagIDs) > 0 && !reflect.DeepEqual([]string(prior.InputTagIDs), compactUnique(input.TagIDs))) {
+			return nil, fmt.Errorf("replacement retry changed its input; inspect the existing operation before issuing another mutation")
+		}
+		return &prior, nil
+	}
+	if !errors.Is(priorErr, gorm.ErrRecordNotFound) {
+		return nil, priorErr
+	}
 	old, err := s.knowledgeService.GetKnowledgeByIDOnly(ctx, strings.TrimSpace(input.KnowledgeID))
 	if err != nil || old == nil {
 		return nil, fmt.Errorf("old document does not exist")
@@ -245,24 +293,26 @@ func (s *Service) ReplaceDocument(ctx context.Context, scope ToolScope, input Re
 	if expected := strings.TrimSpace(input.ExpectedOldFileHash); expected != "" && expected != old.FileHash {
 		return nil, fmt.Errorf("old document changed after inspection; refresh inventory before replacing it")
 	}
-	actor, err := actorFromContext(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
 	kb, sourceCtx, err := s.authorizeMutation(ctx, old.KnowledgeBaseID)
-	if err != nil {
-		return nil, err
-	}
-	data, fileName, sha, err := s.resolveSource(ctx, actor.runID, input.Source)
 	if err != nil {
 		return nil, err
 	}
 	operation := s.newOperation(actor, kb, OperationTypeReplace, input.Source, fileName, sha, input.Reason)
 	operation.OldKnowledgeID = old.ID
 	operation.OldFileHash = old.FileHash
-	if err := s.db.WithContext(ctx).Create(operation).Error; err != nil {
+	operation.InputMetadata, _ = json.Marshal(input.Metadata)
+	operation.InputTagIDs = compactUnique(input.TagIDs)
+	if len(operation.InputTagIDs) == 0 {
+		operation.InputTagIDs = s.knowledgeTagIDs(sourceCtx, old.ID)
+	}
+	reserved, fresh, err := s.reserve(ctx, operation, data)
+	if err != nil {
 		return nil, err
 	}
+	if !fresh {
+		return reserved, nil
+	}
+	operation = reserved
 	tagIDs := compactUnique(input.TagIDs)
 	if len(tagIDs) == 0 {
 		tagIDs = s.knowledgeTagIDs(sourceCtx, old.ID)
@@ -284,11 +334,12 @@ func (s *Service) ReplaceDocument(ctx context.Context, scope ToolScope, input Re
 		if createErr == nil {
 			createErr = fmt.Errorf("native ingestion returned no document")
 		}
-		return s.failOperation(ctx, operation, fmt.Errorf("创建替换文档失败，旧文档已保留: %w", createErr))
+		return s.deferIngestionReceipt(ctx, operation, createErr)
 	}
 	operation.NewKnowledgeID = knowledge.ID
+	operation.NewGeneration = knowledge.ProcessingGeneration
 	operation.State = OperationStateParsing
-	operation.ResultMessage = "替换用的新文档已添加到知识库；此工具不会删除旧文档，智能体现在可以显式调用删除工具"
+	operation.ResultMessage = "替换操作已接收；新文档必要索引可用后由后台清理旧版本，失败保留旧版本"
 	if err := s.saveOperation(ctx, operation); err != nil {
 		return nil, err
 	}
@@ -297,6 +348,30 @@ func (s *Service) ReplaceDocument(ctx context.Context, scope ToolScope, input Re
 }
 
 func (s *Service) DeleteDocument(ctx context.Context, scope ToolScope, input DeleteDocumentRequest) (*Operation, error) {
+	if strings.TrimSpace(input.ExpectedFileHash) == "" {
+		return nil, fmt.Errorf("expected_file_hash is required from the inspected document")
+	}
+	actor, err := actorFromContext(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	var prior Operation
+	priorErr := s.db.WithContext(ctx).Where("caller_tenant_id = ? AND user_id = ? AND agent_id = ? AND run_id = ? AND type = ? AND old_knowledge_id = ? AND old_file_hash = ?", actor.callerTenantID, actor.userID, scope.AgentID, actor.runID, OperationTypeDelete, input.KnowledgeID, input.ExpectedFileHash).Order("created_at DESC").First(&prior).Error
+	if priorErr == nil {
+		if scope.Runtime == nil || !scope.Runtime.ContainsDocument(prior.OldKnowledgeID, prior.KnowledgeBaseID) || !scope.Runtime.PermissionsFor(prior.KnowledgeBaseID).Delete {
+			return nil, fmt.Errorf("deletion is outside the current mutation scope")
+		}
+		if _, _, err := s.authorizeMutation(ctx, prior.KnowledgeBaseID); err != nil {
+			return nil, err
+		}
+		return &prior, nil
+	}
+	if !errors.Is(priorErr, gorm.ErrRecordNotFound) {
+		return nil, priorErr
+	}
+	if err := s.protectReplacement(ctx, input.KnowledgeID); err != nil {
+		return nil, err
+	}
 	knowledge, err := s.knowledgeService.GetKnowledgeByIDOnly(ctx, strings.TrimSpace(input.KnowledgeID))
 	if err != nil || knowledge == nil {
 		return nil, fmt.Errorf("document does not exist")
@@ -310,10 +385,6 @@ func (s *Service) DeleteDocument(ctx context.Context, scope ToolScope, input Del
 	if expected := strings.TrimSpace(input.ExpectedFileHash); expected != "" && expected != knowledge.FileHash {
 		return nil, fmt.Errorf("document changed after inspection; refresh inventory before deleting it")
 	}
-	actor, err := actorFromContext(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
 	kb, sourceCtx, err := s.authorizeMutation(ctx, knowledge.KnowledgeBaseID)
 	if err != nil {
 		return nil, err
@@ -321,17 +392,22 @@ func (s *Service) DeleteDocument(ctx context.Context, scope ToolScope, input Del
 	operation := s.newOperation(actor, kb, OperationTypeDelete, FileSource{}, knowledge.FileName, "", input.Reason)
 	operation.OldKnowledgeID = knowledge.ID
 	operation.OldFileHash = knowledge.FileHash
-	if err := s.db.WithContext(ctx).Create(operation).Error; err != nil {
+	reserved, fresh, err := s.reserve(ctx, operation, nil)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.knowledgeService.DeleteKnowledge(sourceCtx, knowledge.ID); err != nil {
-		return s.failOperation(ctx, operation, fmt.Errorf("删除文档失败: %w", err))
+	if !fresh {
+		return reserved, nil
 	}
-	now := time.Now()
-	operation.State = OperationStateCompleted
-	operation.CompletedAt = &now
-	operation.ResultMessage = "文档及其派生索引、Wiki 来源引用和文档级知识图谱数据已删除"
-	return operation, s.saveOperation(ctx, operation)
+	operation = reserved
+	_ = sourceCtx
+	operation.State = OperationStateCleanup
+	operation.ResultMessage = "删除操作已接收，正在清理文档及派生资源"
+	if err := s.saveOperation(ctx, operation); err != nil {
+		return nil, err
+	}
+	s.kick(operation.ID)
+	return operation, nil
 }
 
 func (s *Service) resolveSource(ctx context.Context, runID string, source FileSource) ([]byte, string, string, error) {
@@ -366,7 +442,12 @@ func (s *Service) resolveSource(ctx context.Context, runID string, source FileSo
 	if err != nil {
 		return nil, "", "", err
 	}
-	return data, safeName, sha, nil
+	hash := sha256.Sum256(data)
+	actual := hex.EncodeToString(hash[:])
+	if sha != actual {
+		return nil, "", "", fmt.Errorf("resolved source bytes do not match their SHA-256")
+	}
+	return data, safeName, actual, nil
 }
 
 func (s *Service) createKnowledge(
@@ -382,6 +463,9 @@ func (s *Service) createKnowledge(
 		return nil, err
 	}
 	defer cleanup()
+	if metadata["management_action"] == OperationTypeReplace {
+		ctx = types.WithStagedKnowledge(ctx)
+	}
 	return s.knowledgeService.CreateKnowledgeFromFile(ctx, kbID, file, metadata, nil, fileName, tagIDs, managementChannel, nil)
 }
 
@@ -501,18 +585,28 @@ func (s *Service) saveOperation(ctx context.Context, operation *Operation) error
 		return fmt.Errorf("operation is nil")
 	}
 	operation.UpdatedAt = time.Now()
-	return s.db.WithContext(ctx).Save(operation).Error
+	if operation.LeaseOwner == "" {
+		operation.LeaseUntil = nil
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(operation).Error; err != nil {
+			return err
+		}
+		if operation.State != OperationStatePreparing {
+			return tx.Where("operation_id = ?", operation.ID).Delete(&OperationInput{}).Error
+		}
+		return nil
+	})
 }
 
-func (s *Service) failOperation(ctx context.Context, operation *Operation, err error) (*Operation, error) {
-	operation.State = OperationStateFailed
-	operation.ErrorMessage = err.Error()
-	now := time.Now()
-	operation.CompletedAt = &now
-	if saveErr := s.saveOperation(ctx, operation); saveErr != nil {
-		return operation, saveErr
+func (s *Service) deferIngestionReceipt(ctx context.Context, operation *Operation, cause error) (*Operation, error) {
+	operation.ErrorMessage = cause.Error()
+	operation.ResultMessage = "创建回执未确认，正在核对持久化文档身份；旧文档保留"
+	if err := s.saveOperation(ctx, operation); err != nil {
+		return operation, err
 	}
-	return operation, err
+	s.kick(operation.ID)
+	return operation, nil
 }
 
 func (s *Service) finishDuplicate(ctx context.Context, operation *Operation, duplicate *types.Knowledge, message string) (*Operation, error) {
@@ -524,74 +618,6 @@ func (s *Service) finishDuplicate(ctx context.Context, operation *Operation, dup
 	now := time.Now()
 	operation.CompletedAt = &now
 	return operation, s.saveOperation(ctx, operation)
-}
-
-func (s *Service) resumePending() {
-	var operations []Operation
-	if err := s.db.Where("state = ?", OperationStateParsing).Find(&operations).Error; err != nil {
-		logger.Warnf(context.Background(), "[kbmanager] resume pending operations failed: %v", err)
-		return
-	}
-	for i := range operations {
-		s.kick(operations[i].ID)
-	}
-}
-
-func (s *Service) kick(operationID string) {
-	operationID = strings.TrimSpace(operationID)
-	if operationID == "" {
-		return
-	}
-	s.runningMu.Lock()
-	if s.running[operationID] {
-		s.runningMu.Unlock()
-		return
-	}
-	s.running[operationID] = true
-	s.runningMu.Unlock()
-	go func() {
-		defer func() {
-			s.runningMu.Lock()
-			delete(s.running, operationID)
-			s.runningMu.Unlock()
-		}()
-		s.monitor(operationID)
-	}()
-}
-
-func (s *Service) monitor(operationID string) {
-	ctx := context.Background()
-	for {
-		var operation Operation
-		if err := s.db.WithContext(ctx).First(&operation, "id = ?", operationID).Error; err != nil {
-			return
-		}
-		if operation.Terminal() {
-			return
-		}
-		knowledge, err := s.knowledgeService.GetKnowledgeByIDOnly(ctx, operation.NewKnowledgeID)
-		if err != nil || knowledge == nil {
-			_, _ = s.failOperation(ctx, &operation, fmt.Errorf("new document disappeared before parsing completed"))
-			return
-		}
-		switch knowledge.ParseStatus {
-		case types.ParseStatusCompleted:
-			now := time.Now()
-			operation.State = OperationStateCompleted
-			operation.CompletedAt = &now
-			if operation.Type == OperationTypeReplace {
-				operation.ResultMessage = "替换用的新文档后台解析及派生处理已完成；旧文档删除只由智能体的独立删除调用决定"
-			} else {
-				operation.ResultMessage = "新文档解析、索引及已启用的派生知识处理均已完成"
-			}
-			_ = s.saveOperation(ctx, &operation)
-			return
-		case types.ParseStatusFailed, types.ParseStatusCancelled, types.ParseStatusDeleting:
-			_, _ = s.failOperation(ctx, &operation, fmt.Errorf("new document background parsing ended in state %s", knowledge.ParseStatus))
-			return
-		}
-		time.Sleep(3 * time.Second)
-	}
 }
 
 func (s *Service) GetOperation(ctx context.Context, scope ToolScope, operationID string, wait time.Duration) (*Operation, error) {

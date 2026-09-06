@@ -3,6 +3,7 @@ import { ref, onUnmounted } from 'vue';
 import { generateRandomString } from '@/utils/index';
 import i18n from '@/i18n';
 import { getApiBaseUrl } from '@/utils/api-base';
+import { synchronizeSessionTitle as synchronizeTitleMetadata } from '@/custom/modules/sessiontitle/client';
 import {
   sanitizeStreamRequestBody,
   type StreamRequestMeta,
@@ -37,13 +38,14 @@ export function useStream() {
   const lastStreamRequest = ref<StreamRequestMeta | null>(null)
   let controller = new AbortController()
   let streamGeneration = 0
+  let disposed = false
 
   // 流式渲染缓冲
   let buffer: string[] = []
   let renderTimer: number | null = null
 
   // 启动流式请求
-  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; skill_names?: string[]; professional_skill_names?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; images?: Array<{data: string}>; attachment_uploads?: Array<{data: string; file_name: string; file_size: number}>; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
+  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; skill_names?: string[]; professional_skill_names?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; upload_ids?: string[]; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
     const myGeneration = ++streamGeneration
     // 重置状态
     output.value = '';
@@ -74,6 +76,18 @@ export function useStream() {
     const tenantIdHeader: string | null = selectedTenantId || null;
 
     const requestID = generateRandomString(12);
+    let titleReceived = false
+    let titleSyncStarted = false
+    const synchronizeSessionTitle = () => {
+      if (titleReceived || titleSyncStarted) return
+      titleSyncStarted = true
+      const embeddedPrefix = embedToken ? params.url.replace(/\/(?:agent|knowledge)-chat$/, '') : '/api/v1/custom'
+      void synchronizeTitleMetadata(params.session_id, {
+        prefix: embeddedPrefix, embedToken, sessionSig: params.embed_session_sig,
+        visitorId: params.embed_visitor_id, active: () => !disposed,
+        onTitle: value => chunkHandler?.({ response_type: 'session_title', content: value.title, data: value }),
+      })
+    }
 
     try {
       let url =
@@ -132,14 +146,7 @@ export function useStream() {
       if (params.mentioned_items !== undefined && params.mentioned_items.length > 0) {
         postBody.mentioned_items = params.mentioned_items;
       }
-      // Include images if provided (base64 data URIs for multimodal chat)
-      if (params.images !== undefined && params.images.length > 0) {
-        postBody.images = params.images;
-      }
-      // Include attachment_uploads if provided (documents, audio, etc.)
-      if (params.attachment_uploads !== undefined && params.attachment_uploads.length > 0) {
-        postBody.attachment_uploads = params.attachment_uploads;
-      }
+      if (params.upload_ids?.length) postBody.upload_ids = params.upload_ids;
       postBody.channel = embedToken ? "embed" : "web";
 
       lastStreamRequest.value = {
@@ -180,6 +187,10 @@ export function useStream() {
         onmessage: (ev) => {
           if (myGeneration !== streamGeneration) return
           const parsed = JSON.parse(ev.data);
+          if (parsed.response_type === 'session_title') titleReceived = true
+          if (parsed.response_type === 'complete' || parsed.response_type === 'stop' || (parsed.response_type === 'error' && parsed.done)) {
+            synchronizeSessionTitle()
+          }
           buffer.push(parsed); // 数据存入缓冲
           // 执行自定义处理
           if (chunkHandler) {
@@ -224,7 +235,7 @@ export function useStream() {
   }
 
   // 组件卸载时自动清理
-  onUnmounted(stopStream)
+  onUnmounted(() => { disposed = true; stopStream() })
 
   return {
     output,          // 显示内容

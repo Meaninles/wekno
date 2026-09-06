@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -25,7 +26,7 @@ func NewWikiWritePageTool(wikiPageService interfaces.WikiPageService, kbIDs []st
 		BaseTool: NewBaseTool(
 			ToolWikiWritePage,
 			"Create a new Wiki page or completely overwrite an existing one. Automatically handles outbound links.",
-			json.RawMessage(`{
+			wikicontract.TargetSchema(json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
@@ -60,7 +61,7 @@ func NewWikiWritePageTool(wikiPageService interfaces.WikiPageService, kbIDs []st
 					}
 				},
 				"required": ["slug", "title", "summary", "content", "page_type"]
-			}`),
+			}`), true),
 		),
 		wikiPageService:  wikiPageService,
 		knowledgeService: knowledgeService,
@@ -70,6 +71,7 @@ func NewWikiWritePageTool(wikiPageService interfaces.WikiPageService, kbIDs []st
 
 func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
 	var params struct {
+		wikicontract.Target
 		Slug       string   `json:"slug"`
 		Title      string   `json:"title"`
 		Summary    string   `json:"summary"`
@@ -86,7 +88,10 @@ func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (
 	if len(t.kbIDs) == 0 {
 		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
-	kbID := t.kbIDs[0]
+	kbID, targetErr := params.Target.KnowledgeBase(t.kbIDs)
+	if targetErr != nil {
+		return &types.ToolResult{Success: false, Error: targetErr.Error()}, nil
+	}
 
 	if params.Title == "" || params.PageType == "" || params.Content == "" || params.Summary == "" {
 		return &types.ToolResult{Success: false, Error: "title, summary, content, and page_type are required for write action"}, nil
@@ -96,6 +101,13 @@ func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (
 	existingPage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, params.Slug)
 	if err != nil && !errors.Is(err, repository.ErrWikiPageNotFound) {
 		return &types.ToolResult{Success: false, Error: "Failed to check existing page: " + err.Error()}, nil
+	}
+	if existingPage != nil {
+		if err := params.Target.ValidatePage(existingPage, true); err != nil {
+			return &types.ToolResult{Success: false, Error: err.Error()}, nil
+		}
+	} else if params.PageID != "" || params.ExpectedVersion == nil || *params.ExpectedVersion != 0 {
+		return &types.ToolResult{Success: false, Error: "create requires expected_version=0 and no page_id"}, nil
 	}
 
 	resolvedRefs := resolveSourceRefs(ctx, t.knowledgeService, params.SourceRefs)

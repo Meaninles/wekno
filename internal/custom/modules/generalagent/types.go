@@ -25,7 +25,7 @@ const (
 type Artifact struct {
 	ID           string         `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID     uint64         `json:"tenant_id" gorm:"index;not null"`
-	UserID       string         `json:"user_id" gorm:"type:varchar(128);index;not null"`
+	UserID       string         `json:"user_id" gorm:"type:varchar(512);index;not null"`
 	RunID        string         `json:"run_id" gorm:"type:varchar(80);index;not null"`
 	SessionID    string         `json:"session_id" gorm:"type:varchar(36);index;not null"`
 	MessageID    string         `json:"message_id" gorm:"type:varchar(36);index"`
@@ -61,13 +61,15 @@ type ArtifactResult struct {
 }
 
 type LLMConfig struct {
-	SupportsVision bool   `json:"supports_vision"`
-	ModelName      string `json:"model_name"`
-	BaseURL        string `json:"base_url"`
-	APIKey         string `json:"api_key,omitempty"`
-	Provider       string `json:"provider,omitempty"`
-	AuthType       string `json:"auth_type,omitempty"`
-	APIKeyHelper   string `json:"api_key_helper,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	RuntimeAdapter  string `json:"runtime_adapter"`
+	SupportsVision  bool   `json:"supports_vision"`
+	ModelName       string `json:"model_name"`
+	BaseURL         string `json:"base_url"`
+	APIKey          string `json:"api_key,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	AuthType        string `json:"auth_type,omitempty"`
+	APIKeyHelper    string `json:"api_key_helper,omitempty"`
 }
 
 type RuntimeToolSpec struct {
@@ -78,6 +80,7 @@ type RuntimeToolSpec struct {
 }
 
 type RuntimeConfigSpec struct {
+	MaxCompletionTokens         int                                    `json:"max_completion_tokens"`
 	AgentID                     string                                 `json:"agent_id"`
 	AgentType                   string                                 `json:"agent_type"`
 	MaxIterations               int                                    `json:"max_iterations"`
@@ -109,7 +112,6 @@ type RuntimeConfigSpec struct {
 	RerankThreshold             float64                                `json:"rerank_threshold"`
 	FAQPriorityEnabled          bool                                   `json:"faq_priority_enabled"`
 	FAQDirectAnswerThreshold    float64                                `json:"faq_direct_answer_threshold"`
-	FAQScoreBoost               float64                                `json:"faq_score_boost"`
 	KnowledgeManagement         *types.KnowledgeManagementRuntimeScope `json:"knowledge_management,omitempty"`
 }
 
@@ -126,10 +128,11 @@ type ProfessionalSkillSpec struct {
 }
 
 type LightweightSkillSpec struct {
-	Key          string `json:"key"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Instructions string `json:"instructions"`
+	SelectedByUser bool   `json:"selected_by_user,omitempty"`
+	Key            string `json:"key"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	Instructions   string `json:"instructions"`
 }
 
 type AttachmentSpec struct {

@@ -246,9 +246,8 @@ func buildLangfuseModelParams(opts *ChatOptions) map[string]interface{} {
 		return nil
 	}
 	params := map[string]interface{}{}
-	if opts.Temperature != 0 {
-		params["temperature"] = opts.Temperature
-	}
+	params["temperature"] = opts.Temperature
+	params["thinking_requested"] = opts.Thinking
 	if opts.TopP != 0 {
 		params["top_p"] = opts.TopP
 	}

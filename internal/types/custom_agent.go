@@ -123,6 +123,7 @@ type CustomAgent struct {
 
 // CustomAgentConfig represents the configuration of a custom agent
 type CustomAgentConfig struct {
+	RetrievalBudget RetrievalBudget `json:"retrieval_budget" yaml:"retrieval_budget"`
 	// ===== Basic Settings =====
 	// Agent mode: "quick-answer" for RAG mode, "smart-reasoning" for ReAct agent mode
 	AgentMode string `yaml:"agent_mode" json:"agent_mode"`
@@ -240,8 +241,6 @@ type CustomAgentConfig struct {
 	FAQPriorityEnabled bool `yaml:"faq_priority_enabled" json:"faq_priority_enabled"`
 	// FAQ direct answer threshold - if similarity > this value, use FAQ answer directly
 	FAQDirectAnswerThreshold float64 `yaml:"faq_direct_answer_threshold" json:"faq_direct_answer_threshold"`
-	// FAQ score boost multiplier - FAQ results score multiplied by this factor
-	FAQScoreBoost float64 `yaml:"faq_score_boost" json:"faq_score_boost"`
 
 	// ===== Web Search Settings =====
 	// Whether web search is enabled
@@ -401,12 +400,8 @@ func (a *CustomAgent) EnsureDefaults() {
 	if a.Config.AgentMode == AgentModeSmartReasoning {
 		a.Config.MultiTurnEnabled = true
 	}
-	// Pin thinking to an explicit false when unset so provider-specific wire
-	// formats always receive a deterministic value.
-	if a.Config.Thinking == nil {
-		disabled := false
-		a.Config.Thinking = &disabled
-	}
+	// An unset capability defers to the model/provider default. Preserve an
+	// explicit user choice, including false, across every runtime adapter.
 	_ = NormalizeCustomAgentDocumentTemplateConfig(&a.Config)
 }
 

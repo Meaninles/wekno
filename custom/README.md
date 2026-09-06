@@ -19,3 +19,6 @@
 
 测试数据和模板不是普通说明文档，不能在全量文档更新时批量改写。独立服务的
 README 应明确其多副本、临时盘、对象存储和 Go 控制边界。
+
+[`services/llmgateway-agent-policy/`](services/llmgateway-agent-policy/README.md)
+负责明确模型路由的官方采样参数、两种 API 协议的控制传递及网关部署验证。

@@ -216,6 +216,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	// Prepare knowledge record
 	logger.Info(ctx, "Preparing knowledge record")
 	knowledge := &types.Knowledge{
+		PublicationState: types.KnowledgePublicationFromContext(ctx),
 		ID:               uuid.New().String(),
 		TenantID:         tenantID,
 		KnowledgeBaseID:  kbID,
@@ -1393,6 +1394,7 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 			parsed[i] = types.ParsedChunk{
 				Content:       c.Content,
 				ContextHeader: c.ContextHeader,
+				SourceLocator: c.SourceLocator,
 				Seq:           c.Seq,
 				Start:         c.Start,
 				End:           c.End,
@@ -1401,7 +1403,7 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 		}
 		parentChunks := make([]types.ParsedParentChunk, len(pcResult.Parents))
 		for i, p := range pcResult.Parents {
-			parentChunks[i] = types.ParsedParentChunk{Content: p.Content, Seq: p.Seq, Start: p.Start, End: p.End}
+			parentChunks[i] = types.ParsedParentChunk{Content: p.Content, ContextHeader: p.ContextHeader, SourceLocator: p.SourceLocator, Seq: p.Seq, Start: p.Start, End: p.End}
 		}
 		opts.ParentChunks = parentChunks
 	} else {
@@ -1411,6 +1413,7 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 			parsed[i] = types.ParsedChunk{
 				Content:       c.Content,
 				ContextHeader: c.ContextHeader,
+				SourceLocator: c.SourceLocator,
 				Seq:           c.Seq,
 				Start:         c.Start,
 				End:           c.End,

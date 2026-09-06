@@ -1,0 +1,29 @@
+package generalagent
+
+import (
+    "encoding/json"
+    "testing"
+
+    "github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
+    "github.com/Tencent/WeKnora/internal/types"
+)
+
+func TestRemainingCitationProjectionObservation(t *testing.T) {
+    refs := []*types.SearchResult{{ID:"fragment", KnowledgeID:"document", KnowledgeBaseID:"kb", ChunkType:"text", EvidenceContent:"The Cedar sensor is calibrated every 17 days.", Metadata:map[string]string{sourcerefs.MetadataCitationID:"S1", sourcerefs.MetadataChunkID:"fragment", "source_type":sourcerefs.SourceTypeKnowledge}}}
+    cases := []struct{name, body string}{
+        {"canonical", `The Cedar sensor is calibrated every 17 days.<src id="S1" />`},
+        {"known_alias", "The Cedar sensor is calibrated every 17 days.（S1）"},
+        {"no_handle", "The Cedar sensor is calibrated every 17 days."},
+        {"contradictory_claim_valid_handle", `The Cedar sensor never requires calibration.<src id="S1" />`},
+        {"unknown_handle", `An assertion.<src id="S99" />`},
+    }
+    for _, item := range cases {
+        stream := answerStream{refs:func() []*types.SearchResult{return refs}, emit:func(string){}}
+        stream.push(item.body, true)
+        _, actualRefs, report := sourcerefs.FilterAnswerCitations(stream.output.String(), refs)
+        old := sourcerefs.RepairAnswerCitations(item.body, refs)
+        _, oldRefs, _ := sourcerefs.FilterAnswerCitations(old, refs)
+        data, _ := json.Marshal(map[string]interface{}{"case":item.name,"current_stream_answer":stream.output.String(),"current_stream_cited":len(actualRefs),"unused_helper_cited":len(oldRefs),"report":report})
+        t.Log(string(data))
+    }
+}

@@ -8,7 +8,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/utils"
 )
 
 // Chunk represents a piece of split text with position tracking.
@@ -24,6 +25,7 @@ import (
 // position invariant while still letting embedding pipelines see the
 // section context.
 type Chunk struct {
+	SourceLocator types.JSON
 	Content       string
 	ContextHeader string
 	Seq           int
@@ -287,8 +289,17 @@ func SplitText(text string, cfg SplitterConfig) []Chunk {
 	// Step 1: Find protected spans
 	protected := protectedSpans(text)
 	maxUnitSize := 7500
-	if cfg.TokenLimit > 0 && chunkSize > 0 && chunkSize < maxUnitSize {
-		maxUnitSize = chunkSize
+	if cfg.TokenLimit > 0 {
+		lang := DetectLanguage(text)
+		if len(cfg.Languages) > 0 {
+			lang = cfg.Languages[0]
+		}
+		// ChunkSize is an aggregation target, not a semantic-unit limit.
+		// Keep a table row/code block intact until the model's hard budget.
+		maxUnitSize = CharsForTokenLimit(cfg.TokenLimit, lang)
+		if maxUnitSize < chunkSize {
+			chunkSize = maxUnitSize
+		}
 	}
 
 	// Step 2: Split non-protected regions by separators, keep protected as atomic units.
@@ -590,14 +601,20 @@ func headerColumnRow(header string) string {
 
 func buildChunk(units []splitUnit, seq int) Chunk {
 	var sb strings.Builder
+	var header strings.Builder
 	for _, u := range units {
-		sb.WriteString(u.text)
+		if u.start == u.end {
+			header.WriteString(u.text)
+		} else {
+			sb.WriteString(u.text)
+		}
 	}
 	return Chunk{
-		Content: sb.String(),
-		Seq:     seq,
-		Start:   units[0].start,
-		End:     units[len(units)-1].end,
+		Content:       sb.String(),
+		ContextHeader: header.String(),
+		Seq:           seq,
+		Start:         units[0].start,
+		End:           units[len(units)-1].end,
 	}
 }
 
@@ -716,7 +733,7 @@ func SplitTextParentChild(text string, parentCfg, childCfg SplitterConfig) Paren
 var imageRefPattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^()\s]*(?:\([^)]*\)[^()\s]*)*)\)`)
 
 func ExtractImageRefs(text string) []ImageRef {
-	text = docparser.UnwrapLinkedImages(text)
+	text = utils.UnwrapLinkedImages(text)
 	matches := imageRefPattern.FindAllStringSubmatchIndex(text, -1)
 	var refs []ImageRef
 	for _, m := range matches {

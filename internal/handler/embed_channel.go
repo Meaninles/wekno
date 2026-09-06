@@ -640,6 +640,30 @@ func (h *EmbedChannelHandler) ensureEmbedSession(c *gin.Context) error {
 	return nil
 }
 
+func (h *EmbedChannelHandler) RequireEmbedSession(c *gin.Context) {
+	if err := h.ensureEmbedSession(c); err != nil {
+		c.Abort()
+		return
+	}
+	c.Next()
+}
+
+// RequireEmbedUploadSession applies the same signed-session boundary as chat
+// before the multipart endpoint reads any original bytes.
+func (h *EmbedChannelHandler) RequireEmbedUploadSession(c *gin.Context) {
+	if err := h.ensureEmbedSession(c); err != nil {
+		c.Abort()
+		return
+	}
+	ch, ok := middleware.EmbedChannelFromContext(c.Request.Context())
+	if !ok || !ch.AllowFileUpload {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "file upload is disabled for this channel"})
+		return
+	}
+	c.Set("chat_upload_agent_id", ch.AgentID)
+	c.Next()
+}
+
 var (
 	errInvalidEmbedChatBody = errors.New("invalid embed chat request body")
 	errInvalidEmbedChatJSON = errors.New("invalid embed chat json")
@@ -673,6 +697,7 @@ func patchEmbedChatPayload(body io.Reader, ch *types.EmbedChannel, agentMode boo
 	if !ch.AllowFileUpload {
 		delete(payload, "images")
 		delete(payload, "attachment_uploads")
+		delete(payload, "upload_ids")
 	}
 	payload["mcp_service_ids"] = []string{}
 	if agentMode {

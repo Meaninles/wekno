@@ -90,7 +90,13 @@ func (s *wikiIngestService) loadWikiLogicalChunks(
 		if err != nil {
 			return nil, 0, err
 		}
-		filtered := filterTextChunks(chunks)
+		var generationChunks []*types.Chunk
+		for _, c := range chunks {
+			if c.ProcessingGeneration == generation {
+				generationChunks = append(generationChunks, c)
+			}
+		}
+		filtered := filterTextChunks(generationChunks)
 		return filtered, int64(len(filtered)), nil
 	}
 	if s.splitManager == nil || strings.TrimSpace(generation) == "" {

@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useChatUploads, chatImagePlaceholder, CHAT_UPLOAD_MAX_BYTES, CHAT_UPLOAD_MAX_MB } from '@/custom/modules/chatuploads/uploads'
+import ChatUploadProgress from '@/custom/modules/chatuploads/ChatUploadProgress.vue'
+const { rows: uploadRows, preparing: uploadsPreparing, prepare: prepareUploads, retry: retryUpload, cancel: cancelUploads, detach: detachUploads } = useChatUploads()
+
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
@@ -46,6 +50,7 @@ import { useSettingsStore } from "@/stores/settings";
 import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentPins";
 import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/custom/modules/sessionState/api";
 import { clearSessionDraftState, getSessionDraftState, saveSessionDraftState } from "@/custom/modules/sessionState/draftState";
+import { synchronizeSessionTitle } from "@/custom/modules/sessiontitle/client";
 import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
 import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
@@ -55,8 +60,6 @@ import type { ChatQueueRejection } from "@/custom/modules/chatqueue/types";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
   agentLabel,
-  fileToBase64,
-  fileToDataUrl,
   formatFileSize,
   modelLabel,
   skillLabel,
@@ -175,6 +178,7 @@ const saveCurrentMobileDraft = () => {
     settingsStore.captureConversationScopedState(),
     toDraftAttachments(),
     pendingImages.value,
+    inputValue.value,
   );
 };
 
@@ -755,7 +759,7 @@ const openSettings = () => {
 };
 
 const ensureDefaultModel = () => {
-  if (selectedModelId.value || !chatModels.value.length) return;
+  if (chatModels.value.some(model => model.id === selectedModelId.value) || !chatModels.value.length) return;
   const first = chatModels.value[0];
   settingsStore.updateConversationModels({
     summaryModelId: first.id || "",
@@ -767,6 +771,10 @@ const loadResources = async () => {
   resourcesLoading.value = true;
   try {
     await chatResources.prefetchChatInput();
+    if (!settingsStore.selectedAgentSourceTenantId && !agents.value.some(agent => agent.id === selectedAgentId.value)) {
+      const available = agents.value.find(agent => agent.id === BUILTIN_QUICK_ANSWER_ID) || agents.value[0];
+      if (available) selectAgent(available);
+    }
     ensureDefaultModel();
     const skillResponse = await listSkills().catch(() => null);
     skillsAvailable.value = skillResponse?.skills_available !== false;
@@ -979,7 +987,9 @@ const hydrateMobileConversationState = async (sessionId: string) => {
       console.warn("[mobile] failed to load session resource state", error);
     }
 
-    const draft = getSessionDraftState(sessionId);
+    const draft = await getSessionDraftState(sessionId);
+    if (sessionId !== currentSessionId.value) return;
+    inputValue.value = draft?.query || "";
     if (draft?.settings) {
       settingsStore.applyConversationResourceState(draft.settings);
     }
@@ -1023,6 +1033,7 @@ const ensureSession = async () => {
 
 const loadMessages = async () => {
   if (!currentSessionId.value) return;
+  const requestedSessionId = currentSessionId.value;
   isLoadingHistory.value = true;
   let shouldScrollToBottom = false;
   try {
@@ -1033,6 +1044,9 @@ const loadMessages = async () => {
     });
     messagesList.splice(0);
     await handleMsgList(res?.data || []);
+    if (res?.data?.at(-1)?.is_completed) void synchronizeSessionTitle(requestedSessionId, {
+      onTitle: value => { const row = sessions.value.find(item => item.id === value.session_id); if (row) row.title = value.title; },
+    });
     shouldScrollToBottom = true;
   } finally {
     isLoadingHistory.value = false;
@@ -1135,6 +1149,7 @@ async function resumeTrailingIncompleteReply() {
 
 const resetToNewChat = async (preserveCurrentDraft = true) => {
   if (preserveCurrentDraft) saveCurrentMobileDraft();
+  detachUploads();
   clearRecoverPoll();
   stopStream();
   messagesList.splice(0);
@@ -1159,6 +1174,7 @@ const startNewChat = async () => {
 const switchMobileSession = async (id: string, options: { updateRoute?: boolean; preserveCurrentDraft?: boolean } = {}) => {
   const nextId = String(id || "");
   if (!nextId) return;
+  if (nextId !== currentSessionId.value) detachUploads();
   if (options.preserveCurrentDraft !== false && nextId !== currentSessionId.value) {
     saveCurrentMobileDraft();
   }
@@ -1533,27 +1549,23 @@ const sendMessage = async () => {
       return;
     }
     const agentEnabled = settingsStore.isAgentStreamMode;
-    const effectiveProfessionalSkillNames = agentEnabled ? selectedProfessionalSkillNames.value : [];
-
-    const imageAttachments = [];
-    const userImages = [];
-    for (const file of pendingImages.value) {
-      const dataUri = await fileToDataUrl(file);
-      imageAttachments.push({ data: dataUri });
-      userImages.push({ url: dataUri, name: file.name });
-    }
-
-    const attachmentUploads = [];
-    for (const attachment of pendingAttachments.value) {
-      attachmentUploads.push({
-        data: await fileToBase64(attachment.file),
-        file_name: attachment.name,
-        file_size: attachment.size,
-      });
-    }
+    const effectiveProfessionalSkillNames = agentEnabled ? [...selectedProfessionalSkillNames.value] : [];
+    const requestSettings = settingsStore.captureConversationScopedState();
+    const requestDraftAttachments = toDraftAttachments();
+    const requestAgentId = selectedAgentId.value;
+    const requestModelId = selectedModel.value?.id || selectedModelId.value || "";
+    const requestWebSearch = canUseWebSearch.value;
+    const requestSkills = agentEnabled ? [...selectedSkillNames.value] : [];
+    const requestKBs = [...selectedKbIds.value];
+    const requestFiles = [...selectedAllowedFileIds.value];
+    const mentionedItems = buildMentionedItems();
 
     const sessionId = await ensureSession();
     outgoingSessionId = sessionId;
+    saveSessionDraftState(sessionId, requestSettings, requestDraftAttachments, composerSnapshot.images, composerSnapshot.query);
+    const uploadIds = await prepareUploads([...composerSnapshot.images, ...composerSnapshot.attachments.map(a => a.file)], { sessionId, agentId: requestAgentId });
+    if (sessionId !== currentSessionId.value) return;
+    const userImages = composerSnapshot.images.map(file => ({ url: chatImagePlaceholder(), name: file.name }));
     clearRecoverPoll();
     isResumingStream.value = false;
     markSessionStarted(sessionId);
@@ -1565,14 +1577,12 @@ const sendMessage = async () => {
       ? `使用${effectiveProfessionalSkillNames.map((name) => `${name}技能`).join("、")}完成以下工作\n`
       : "";
     const requestQuery = `${professionalPrefix}${value}`;
-    const mentionedItems = buildMentionedItems();
-
     const optimisticUserMessage = {
       role: "user",
       content: requestQuery,
       mentioned_items: mentionedItems,
       images: userImages,
-      attachments: pendingAttachments.value.map((item) => ({
+      attachments: composerSnapshot.attachments.map((item) => ({
         file_name: item.name,
         file_size: item.size,
         file_type: `.${item.name.split(".").pop()?.toLowerCase() || ""}`,
@@ -1588,18 +1598,19 @@ const sendMessage = async () => {
     await clearComposerInput();
     saveSessionDraftState(
       sessionId,
-      settingsStore.captureConversationScopedState(),
-      toDraftAttachments(),
-      pendingImages.value,
+      requestSettings,
+      requestDraftAttachments,
+      composerSnapshot.images,
+      "",
     );
     await scrollToBottom(true);
     void loadSessions();
 
-    const kbIdSet = new Set(selectedKbIds.value);
-    const fileIdSet = new Set(selectedAllowedFileIds.value);
+    const kbIdSet = new Set(requestKBs);
+    const fileIdSet = new Set(requestFiles);
 
     const endpoint = agentEnabled ? "/api/v1/agent-chat" : "/api/v1/knowledge-chat";
-    const modelId = selectedModel.value?.id || selectedModelId.value || "";
+    const modelId = requestModelId;
 
     await startStream({
       session_id: sessionId,
@@ -1607,15 +1618,14 @@ const sendMessage = async () => {
       knowledge_ids: [...fileIdSet],
       tag_ids: [],
       agent_enabled: agentEnabled,
-      agent_id: selectedAgentId.value,
-      web_search_enabled: canUseWebSearch.value,
+      agent_id: requestAgentId,
+      web_search_enabled: requestWebSearch,
       summary_model_id: modelId,
       mcp_service_ids: [],
-      skill_names: agentEnabled ? selectedSkillNames.value : [],
+      skill_names: requestSkills,
       professional_skill_names: effectiveProfessionalSkillNames,
       mentioned_items: mentionedItems,
-      images: imageAttachments.length ? imageAttachments : undefined,
-      attachment_uploads: attachmentUploads.length ? attachmentUploads : undefined,
+      upload_ids: uploadIds,
       query: requestQuery,
       method: "POST",
       url: endpoint,
@@ -1623,14 +1633,18 @@ const sendMessage = async () => {
     void markSessionAsRead(sessionId);
     void loadSessions();
   } catch (err: any) {
-    console.error("[mobile] send failed", err);
-    MessagePlugin.error(err?.message || "发送失败");
+    if (outgoingSessionId && outgoingSessionId !== currentSessionId.value) return;
+    inputValue.value = composerSnapshot.query;
+    pendingImages.value = composerSnapshot.images;
+    pendingAttachments.value = composerSnapshot.attachments;
+    if (err?.name !== "AbortError") MessagePlugin.error(err?.message || "发送失败");
     loading.value = false;
     isReplying.value = false;
   }
 };
 
 const stopGenerating = async () => {
+  void cancelUploads();
   const messageId = currentAssistantMessageId.value;
   stopStream();
   markInFlightAssistantStopped(messageId);
@@ -1642,11 +1656,17 @@ const stopGenerating = async () => {
   void loadSessions({ silent: true });
 };
 
+const checkUploadSize = (file: File) => {
+  if (file.size > 0 && file.size <= CHAT_UPLOAD_MAX_BYTES) return true;
+  MessagePlugin.warning(`${file.name}：文件和图片每个最大 ${CHAT_UPLOAD_MAX_MB} MiB，且不能为空`);
+  return false;
+};
+
 const handleImageFiles = (event: Event) => {
   const files = Array.from((event.target as HTMLInputElement).files || []);
   pendingImages.value = uniqueFilesByIdentity([
     ...pendingImages.value,
-    ...files.filter((file) => file.type.startsWith("image/")),
+    ...files.filter((file) => file.type.startsWith("image/") && checkUploadSize(file)),
   ]).slice(0, 6);
   (event.target as HTMLInputElement).value = "";
 };
@@ -1654,6 +1674,7 @@ const handleImageFiles = (event: Event) => {
 const handleAttachmentFiles = (event: Event) => {
   const files = Array.from((event.target as HTMLInputElement).files || []);
   const acceptedFiles = files.filter((file) => {
+    if (!checkUploadSize(file)) return false;
     if (isAttachmentAllowedByAgent(file)) return true;
     MessagePlugin.warning(`当前智能体不支持该文件类型：${file.name}`);
     return false;
@@ -1861,13 +1882,15 @@ onBeforeUnmount(() => {
     </section>
 
     <footer class="mobile-composer">
+      <ChatUploadProgress :rows="uploadRows" :preparing="uploadsPreparing" @retry="retryUpload" @cancel="cancelUploads" />
+
       <ChatQueueRejectionBanner
         :rejection="queueRejectionNotice"
         @close="queueRejectionNotice = null"
       />
-      <MobileResourceRail :items="selectedResourceChips" @remove="removeChip" @clear="clearSelectedResources" />
+      <MobileResourceRail :inert="uploadsPreparing || undefined" :items="selectedResourceChips" @remove="removeChip" @clear="clearSelectedResources" />
 
-      <div class="config-rail">
+      <div class="config-rail" :inert="uploadsPreparing || undefined">
         <button type="button" class="config-pill" @click="openSheet('agent')">
           <MobileIcon name="user-talk" />
           <span>{{ agentLabel(selectedAgent) }}</span>
@@ -1908,7 +1931,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div class="input-row">
+      <div class="input-row" :inert="uploadsPreparing || undefined">
         <textarea
           ref="textareaRef"
           v-model="inputValue"
@@ -1916,10 +1939,10 @@ onBeforeUnmount(() => {
           placeholder="向智汇提问..."
           @keydown.enter.exact.prevent="sendMessage"
         />
-        <button v-if="isReplying" type="button" class="send-button stop" aria-label="停止" @click="stopGenerating">
+        <button v-if="isReplying && !uploadsPreparing" type="button" class="send-button stop" aria-label="停止" @click="stopGenerating">
           <MobileIcon name="stop-circle" />
         </button>
-        <button v-else type="button" class="send-button" :disabled="!inputValue.trim()" aria-label="发送" @click="sendMessage">
+        <button v-else type="button" class="send-button" :disabled="uploadsPreparing || !inputValue.trim()" aria-label="发送" @click="sendMessage">
           <MobileIcon name="send" />
         </button>
       </div>

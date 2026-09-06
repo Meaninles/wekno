@@ -2,14 +2,11 @@ package types
 
 import "testing"
 
-func TestEnsureDefaults_ThinkingExplicitFalse(t *testing.T) {
+func TestEnsureDefaults_ThinkingPreservesProviderDefault(t *testing.T) {
 	agent := &CustomAgent{Config: CustomAgentConfig{}}
 	agent.EnsureDefaults()
-	if agent.Config.Thinking == nil {
-		t.Fatal("EnsureDefaults should set Thinking to explicit false when unset")
-	}
-	if *agent.Config.Thinking {
-		t.Fatal("default Thinking should be false")
+	if agent.Config.Thinking != nil {
+		t.Fatal("EnsureDefaults must leave an unset model capability unset")
 	}
 }
 

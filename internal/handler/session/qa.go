@@ -128,6 +128,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	}
 
 	// Parse request body
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 	var request CreateKnowledgeQARequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		logger.Error(ctx, "Failed to parse request data", err)
@@ -139,12 +140,8 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		logger.Error(ctx, "Query content is empty")
 		return nil, nil, errors.NewBadRequestError("Query content cannot be empty")
 	}
-	// SSRF protection: strip client-supplied URL/Caption fields from image attachments.
-	// The URL field must only be populated server-side by saveImageAttachments; an
-	// attacker could inject internal network URLs to trigger SSRF via the LLM provider.
-	for i := range request.Images {
-		request.Images[i].URL = ""
-		request.Images[i].Caption = ""
+	if len(request.Images) > 0 || len(request.AttachmentUploads) > 0 {
+		return nil, nil, errors.NewBadRequestError("Upload files and images through the session upload endpoint, then submit upload_ids")
 	}
 
 	// Log request details
@@ -162,7 +159,6 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 
 	// Get custom agent if agent_id is provided. Backend resolves shared agent from share relation (no client-provided tenant).
 	customAgent, effectiveTenantID := h.resolveAgent(ctx, c, request.AgentID)
-	isClaudeSDKAgent := customAgent != nil && types.IsClaudeSDKAgentType(customAgent.Config.AgentType)
 
 	// Merge @mentioned items into knowledge_base_ids and knowledge_ids
 	kbIDs, knowledgeIDs := mergeKnowledgeTargets(request.KnowledgeBaseIDs, request.KnowledgeIds, request.MentionedItems)
@@ -188,152 +184,28 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	logger.Infof(ctx, "[%s] @mention merge: request.KnowledgeBaseIDs=%v, request.MentionedItems=%d, merged kbIDs=%v, merged knowledgeIDs=%v",
 		logPrefix, request.KnowledgeBaseIDs, len(request.MentionedItems), kbIDs, knowledgeIDs)
 
-	// Process inline base64 images: decode and save to storage.
-	// VLM analysis for RAG paths is deferred to the pipeline rewrite step.
-	// For pure chat paths with non-vision models, VLM analysis runs here as fallback.
-	if len(request.Images) > 0 {
-		if customAgent == nil || !customAgent.Config.ImageUploadEnabled {
-			logger.Warnf(ctx, "[%s] Image upload is not enabled for this agent, rejecting %d images", logPrefix, len(request.Images))
-			return nil, nil, errors.NewBadRequestError("Image upload is not enabled for this agent")
+	// Manual originals are accepted by the session upload endpoint before chat.
+	// The request contains stable handles, never a synchronous document parse.
+	var processedAttachments types.MessageAttachments
+	// Staged sources use the same retrieval and paged tools as knowledge files.
+	if len(request.UploadIDs) > 0 {
+		if h.uploadResolver == nil {
+			return nil, nil, errors.NewInternalServerError("chat uploads are unavailable")
 		}
-		if types.IsClaudeSDKAgentType(customAgent.Config.AgentType) && strings.TrimSpace(customAgent.Config.VLMModelID) == "" {
-			logger.Warnf(ctx, "[%s] General agent image upload requires a configured VLM model, rejecting %d images", logPrefix, len(request.Images))
-			return nil, nil, errors.NewBadRequestError("General agent image upload requires a configured VLM model")
+		attachments, targets, err := h.uploadResolver.Resolve(ctx, sessionID, request.UploadIDs)
+		if err != nil {
+			return nil, nil, errors.NewBadRequestError(err.Error())
 		}
-		tenantID := c.GetUint64(types.TenantIDContextKey.String())
-		agentStorageProvider := customAgent.Config.ImageStorageProvider
-		if err := h.saveImageAttachments(ctx, request.Images, tenantID, agentStorageProvider); err != nil {
-			logger.Errorf(ctx, "[%s] Failed to save images: %v", logPrefix, err)
-			return nil, nil, errors.NewBadRequestError(fmt.Sprintf("Image save failed: %v", err))
-		}
-		if isClaudeSDKAgent {
-			for i, image := range request.Images {
-				if strings.TrimSpace(image.Data) == "" {
-					continue
-				}
-				imgBytes, ext, err := decodeDataURI(image.Data)
-				if err != nil {
-					logger.Warnf(ctx, "[%s] image %d original file decode failed, falling back to previous image context path: %v", logPrefix, i+1, err)
-					continue
-				}
-				fileName := fmt.Sprintf("uploaded_image_%02d%s", i+1, ext)
-				original, err := h.createClaudeOriginalInputFromBytes(
-					ctx,
-					imgBytes,
-					fileName,
-					tenantID,
-					types.OriginalInputSourceChatImage,
-					types.OriginalInputRoleUserUploadedOriginal,
-				)
-				if err != nil {
-					logger.Warnf(ctx, "[%s] image original file transfer failed, falling back to previous image context path: %v", logPrefix, err)
-					continue
-				}
-				originalInputFiles = append(originalInputFiles, *original)
-			}
-		}
-
-		// VLM analysis is always deferred to after SSE stream is up:
-		// - Agent mode: runs in async execution flow with tool_call/tool_result events
-		// - Normal RAG mode: runs in the pipeline rewrite step with progress events
-		// - Normal pure-chat mode: runs in the async goroutine with progress events
+		processedAttachments = append(processedAttachments, attachments...)
+		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, targets...))
 	}
 
-	// Process file attachments: decode and save to storage, extract content
-	var processedAttachments types.MessageAttachments
-	if len(request.AttachmentUploads) > 0 {
-		logger.Infof(ctx, "[%s] processing %d attachment(s)", logPrefix, len(request.AttachmentUploads))
-
-		// MAX_FILE_SIZE_MB env (50MB default). See utils/filesize.go for
-		// why this is deploy-time-only rather than a runtime setting.
-		maxSizeMB := secutils.GetMaxFileSizeMB()
-		maxSize := maxSizeMB * 1024 * 1024
-		for i, upload := range request.AttachmentUploads {
-			if upload.FileSize > maxSize {
-				return nil, nil, errors.NewBadRequestError(
-					fmt.Sprintf("attachment %d exceeds size limit of %dMB", i+1, maxSizeMB))
-			}
-			if customAgent != nil && !attachmentFileTypeAllowed(upload.FileName, customAgent.Config.SupportedFileTypes) {
-				return nil, nil, errors.NewBadRequestError(
-					fmt.Sprintf("attachment %d file type is not supported by the selected agent", i+1))
-			}
+	if h.uploadResolver != nil && customAgent != nil && customAgent.Config.MultiTurnEnabled {
+		historyTargets, err := h.uploadResolver.HistoryTargets(ctx, sessionID)
+		if err != nil {
+			return nil, nil, errors.NewBadRequestError(err.Error())
 		}
-
-		tenantID := c.GetUint64(types.TenantIDContextKey.String())
-
-		// Use ASR only when the agent has audio upload enabled.
-		asrModelID := ""
-		if customAgent != nil && customAgent.Config.AudioUploadEnabled && customAgent.Config.ASRModelID != "" {
-			asrModelID = customAgent.Config.ASRModelID
-		}
-
-		// Process all attachments concurrently.
-		processedAttachments = make(types.MessageAttachments, len(request.AttachmentUploads))
-		var originalAttachmentFiles []types.OriginalInputFile
-		if isClaudeSDKAgent {
-			originalAttachmentFiles = make([]types.OriginalInputFile, len(request.AttachmentUploads))
-		}
-		var wg sync.WaitGroup
-		errChan := make(chan error, len(request.AttachmentUploads))
-
-		for i, upload := range request.AttachmentUploads {
-			wg.Add(1)
-			go func(idx int, att AttachmentUpload) {
-				defer wg.Done()
-
-				data, err := DecodeBase64Attachment(att.Data)
-				if err != nil {
-					errChan <- fmt.Errorf("attachment %d decode failed: %w", idx+1, err)
-					return
-				}
-
-				if isClaudeSDKAgent {
-					original, err := h.createClaudeOriginalInputFromBytes(
-						ctx,
-						data,
-						att.FileName,
-						tenantID,
-						types.OriginalInputSourceChatUpload,
-						types.OriginalInputRoleUserUploadedOriginal,
-					)
-					if err != nil {
-						logger.Warnf(ctx, "[%s] attachment %d original file transfer failed, falling back to extracted attachment context: %v", logPrefix, idx+1, err)
-					} else {
-						originalAttachmentFiles[idx] = *original
-					}
-				}
-
-				processed, err := h.attachmentProcessor.ProcessAttachment(
-					ctx, data, att.FileName, att.FileSize, tenantID, asrModelID,
-				)
-				if err != nil {
-					errChan <- fmt.Errorf("attachment %d processing failed: %w", idx+1, err)
-					return
-				}
-
-				processedAttachments[idx] = *processed
-			}(i, upload)
-		}
-
-		wg.Wait()
-		close(errChan)
-
-		// Preserve every successfully staged transfer object before checking
-		// attachment processing errors. A sibling attachment may fail after
-		// this object was already uploaded, and the parse-error defer must
-		// still be able to remove it.
-		for _, original := range originalAttachmentFiles {
-			if original.ID != "" {
-				originalInputFiles = append(originalInputFiles, original)
-			}
-		}
-		if len(errChan) > 0 {
-			err := <-errChan
-			logger.Errorf(ctx, "[%s] attachment processing failed: %v", logPrefix, err)
-			return nil, nil, errors.NewBadRequestError(fmt.Sprintf("attachment processing failed: %v", err))
-		}
-
-		logger.Infof(ctx, "[%s] all attachments processed", logPrefix)
+		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, historyTargets...))
 	}
 
 	// Resolve enable_memory:
@@ -776,7 +648,7 @@ func (h *Handler) AgentQA(c *gin.Context) {
 
 	// Route to appropriate handler based on agent mode
 	if agentModeEnabled {
-		h.executeQA(reqCtx, qaModeAgent, true)
+		h.executeQA(reqCtx, qaModeAgent, !request.DisableTitle)
 	} else {
 		logger.Infof(reqCtx.ctx, "Agent mode disabled, delegating to normal mode for session: %s", reqCtx.sessionID)
 		h.executeQA(reqCtx, qaModeNormal, !request.DisableTitle)

@@ -433,7 +433,7 @@ func TestSplitText_TableHeaderPrependedToChunks(t *testing.T) {
 			if !strings.Contains(c.Content, "| 张三") {
 				// This is a chunk with table rows but not the first row;
 				// it should have the header prepended.
-				if !strings.HasPrefix(c.Content, tableHeader) {
+				if !strings.HasPrefix(c.EmbeddingContent(), tableHeader) {
 					t.Errorf("chunk (seq=%d) has table rows but is missing prepended header:\n%s",
 						c.Seq, c.Content)
 				} else {
@@ -531,56 +531,12 @@ func TestHeaderTracker_BasicLifecycle(t *testing.T) {
 	}
 }
 
-func TestHeaderTracker_EmptyHeaderRowRewrite(t *testing.T) {
-	// Some converters (e.g., MarkItDown) produce tables with empty header rows:
-	//   ||
-	//   | --- | --- |
-	//   | real col A | real col B |
-	// The tracker should rewrite the header to be a proper Markdown table header:
-	//   | real col A | real col B |
-	//   | --- | --- |
+func TestHeaderTrackerDoesNotPromoteDataIntoEmptyHeader(t *testing.T) {
 	ht := newHeaderTracker()
-
-	// Empty header row + separator
-	ht.update("||\n| --- | --- | --- |\n")
-	h := ht.getHeaders()
-	if h == "" {
-		t.Fatal("expected active header after empty header unit")
-	}
-	t.Logf("after empty header unit (pending): %q", h)
-
-	// First data row → becomes the real column names
-	ht.update("| 测试用例 ID | 测试模块 | 备注 |\n")
-	h = ht.getHeaders()
-	t.Logf("after rewrite: %q", h)
-
-	if !strings.Contains(h, "测试用例 ID") {
-		t.Errorf("rewritten header should contain column names, got:\n%s", h)
-	}
-	if strings.Contains(h, "||") {
-		t.Errorf("rewritten header should NOT contain empty '||' row, got:\n%s", h)
-	}
-	if !strings.Contains(h, "---") {
-		t.Errorf("rewritten header should contain separator, got:\n%s", h)
-	}
-	// Column names should come BEFORE the separator
-	colIdx := strings.Index(h, "测试用例 ID")
-	sepIdx := strings.Index(h, "---")
-	if colIdx > sepIdx {
-		t.Errorf("column names should appear before separator in rewritten header:\n%s", h)
-	}
-
-	// Subsequent data rows should NOT be absorbed
-	ht.update("| TC-001 | 模块A | 备注1 |\n")
-	h2 := ht.getHeaders()
-	if strings.Contains(h2, "TC-001") {
-		t.Errorf("header should NOT include subsequent data rows, got:\n%s", h2)
-	}
-
-	// Table end
-	ht.update("\n")
-	if ht.getHeaders() != "" {
-		t.Error("header should be cleared after empty line")
+	ht.update("| | |\n| --- | --- |\n")
+	ht.update("| 271 | blue |\n")
+	if strings.Contains(ht.getHeaders(), "271") {
+		t.Fatal("a data row was promoted into column names")
 	}
 }
 
@@ -602,75 +558,16 @@ func TestHeaderTracker_NormalHeaderNoExtension(t *testing.T) {
 	}
 }
 
-func TestSplitText_EmptyHeaderRowPrepend(t *testing.T) {
-	// Simulate MarkItDown output: empty header row, real column names in first data row.
-	text := "" +
-		"前言\n\n" +
-		"||\n" +
-		"| --- | --- | --- |\n" +
-		"| 用例ID | 模块 | 步骤 |\n" +
-		"| TC-001 | A | 步骤1 |\n" +
-		"| TC-002 | B | 步骤2 |\n" +
-		"| TC-003 | C | 步骤3 |\n" +
-		"| TC-004 | D | 步骤4 |\n" +
-		"\n" +
-		"结尾"
-
-	cfg := SplitterConfig{ChunkSize: 80, ChunkOverlap: 5, Separators: []string{"\n\n", "\n"}}
-	chunks := SplitText(text, cfg)
-
-	t.Logf("total chunks: %d", len(chunks))
-	for i, c := range chunks {
-		t.Logf("chunk[%d] seq=%d start=%d end=%d:\n%s", i, c.Seq, c.Start, c.End, c.Content)
-	}
-
+func TestSplitTextEmptyHeaderKeepsLiteralRows(t *testing.T) {
+	text := "| | |\n| --- | --- |\n| 271 | blue |\n" + strings.Repeat("| 392 | green |\n", 30)
+	chunks := SplitText(text, SplitterConfig{ChunkSize: 80, ChunkOverlap: 5, Separators: []string{"\n\n", "\n"}})
 	for _, c := range chunks {
-		hasLaterRow := strings.Contains(c.Content, "TC-002") ||
-			strings.Contains(c.Content, "TC-003") ||
-			strings.Contains(c.Content, "TC-004")
-		if hasLaterRow && !strings.Contains(c.Content, "TC-001") {
-			// Should have column names prepended
-			if !strings.Contains(c.Content, "用例ID") {
-				t.Errorf("chunk with data rows should have real column names prepended:\n%s", c.Content)
-			}
-			// Should NOT have the empty || row
-			lines := strings.Split(c.Content, "\n")
-			for _, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				isOnlyPipes := trimmed != "" && func() bool {
-					for _, r := range trimmed {
-						if r != '|' && r != ' ' {
-							return false
-						}
-					}
-					return true
-				}()
-				if isOnlyPipes {
-					t.Errorf("chunk should NOT contain empty pipe row %q:\n%s", trimmed, c.Content)
-					break
-				}
-			}
-		}
-
-		// No line should appear as a duplicate in any chunk
-		lines := strings.Split(strings.TrimRight(c.Content, "\n"), "\n")
-		seen := make(map[string]int)
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.Contains(trimmed, "---") {
-				continue
-			}
-			seen[trimmed]++
-			if seen[trimmed] > 1 {
-				t.Errorf("line appears %d times in chunk (seq=%d): %q", seen[trimmed], c.Seq, trimmed)
-			}
+		if strings.Contains(c.ContextHeader, "271") {
+			t.Fatal("invented column header", c.ContextHeader)
 		}
 	}
-
-	// Verify restoration still works
-	restored := restoreTextFromChunks(chunks)
-	if restored != text {
-		t.Errorf("restoration failed for empty-header table\n  original: %q\n  restored: %q", text, restored)
+	if restoreTextFromChunks(chunks) != text {
+		t.Fatal("source text was changed")
 	}
 }
 
@@ -758,10 +655,10 @@ func TestSplitText_MultipleTablesInDocument(t *testing.T) {
 	// Verify that if a chunk has rows from table 2, it has table 2's header, not table 1's.
 	for _, c := range chunks {
 		if strings.Contains(c.Content, "| Y |") && !strings.Contains(c.Content, "| X |") {
-			if !strings.Contains(c.Content, "| 项目 | 状态 |") {
+			if !strings.Contains(c.EmbeddingContent(), "| 项目 | 状态 |") {
 				t.Errorf("chunk with table-2 rows should have table-2 header:\n%s", c.Content)
 			}
-			if strings.Contains(c.Content, "| 名称 | 值 |") {
+			if strings.Contains(c.EmbeddingContent(), "| 名称 | 值 |") {
 				t.Errorf("chunk with table-2 rows should NOT have table-1 header:\n%s", c.Content)
 			}
 		}

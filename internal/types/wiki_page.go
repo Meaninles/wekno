@@ -149,7 +149,7 @@ type WikiPage struct {
 	// Tenant ID for multi-tenant isolation
 	TenantID uint64 `json:"tenant_id" gorm:"index"`
 	// Knowledge base this page belongs to
-	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
+	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36);index;uniqueIndex:idx_kb_slug,priority:1"`
 	// URL-friendly slug for addressing, e.g. "entity/acme-corp", "concept/rag"
 	// Unique within a knowledge base
 	Slug string `json:"slug" gorm:"type:varchar(255);uniqueIndex:idx_kb_slug"`

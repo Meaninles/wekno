@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
@@ -282,26 +283,31 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 
 	output := t.formatOutput(ctx, finalResults, queries, compiled)
 
-	return &types.ToolResult{
+	result := &types.ToolResult{
 		Success:          true,
 		Output:           output,
 		SourceReferences: buildGrepSourceReferences(finalResults, compiled),
 		Data: map[string]interface{}{
-			"query":              query,
-			"queries":            queries, // legacy alias for older frontends
-			"patterns":           queries, // legacy alias for older frontends
-			"chunk_results":      chunkResults,
-			"knowledge_results":  knowledgeResultsForUI,
-			"result_count":       len(chunkResults),
-			"document_count":     documentCount,
-			"total_matches":      len(finalResults),
-			"knowledge_base_ids": kbIDsForMeta,
-			"limit":              limit,
-			"max_results":        limit, // legacy alias
-			"ranking_patterns":   rankingPatterns,
-			"display_type":       "grep_results",
+			"query":                   query,
+			"count":                   len(chunkResults),
+			"search_targets":          t.searchTargets,
+			"candidate_limit_reached": len(results) >= 500,
+			"queries":                 queries, // legacy alias for older frontends
+			"patterns":                queries, // legacy alias for older frontends
+			"chunk_results":           chunkResults,
+			"knowledge_results":       knowledgeResultsForUI,
+			"result_count":            len(chunkResults),
+			"document_count":          documentCount,
+			"total_matches":           len(finalResults),
+			"knowledge_base_ids":      kbIDsForMeta,
+			"limit":                   limit,
+			"max_results":             limit, // legacy alias
+			"ranking_patterns":        rankingPatterns,
+			"display_type":            "grep_results",
 		},
-	}, nil
+	}
+	chatretrieval.Receipt(result, "document_chunks", kbIDsForMeta, kbIDsForMeta, queries, len(deduplicatedResults), nil)
+	return result, nil
 }
 
 // buildGrepSourceReferences keeps the display/model payload compact while
@@ -515,7 +521,7 @@ func (t *GrepChunksTool) searchChunks(
 		// or intermittently create uncitable grep results.
 		Where("chunks.chunk_type <> ?", types.ChunkTypeSummary).
 		Where("chunks.deleted_at IS NULL").
-		Where("knowledges.deleted_at IS NULL")
+		Where("knowledges.deleted_at IS NULL").Where("knowledges.publication_state = ?", "published")
 
 	// Combine specific knowledge IDs, tag scopes, and full-KB scopes with OR so
 	// that mixing @KB with @tag/@file searches BOTH, mirroring knowledge_search's

@@ -287,29 +287,6 @@ func TestInferChartSpecContractPreservesMultiMetricFields(t *testing.T) {
 	}
 }
 
-func TestFormatAnalysisOutputProvidesChartAnchorWithoutTableSuppressionRule(t *testing.T) {
-	output := formatAnalysisOutput(map[string]any{
-		"query":           `SELECT day, revenue FROM orders_v`,
-		"display_mode":    "chart_only",
-		"chart_requested": true,
-		"chart": map[string]any{
-			"eligible":     true,
-			"id":           "chart_abc123",
-			"default_type": "line",
-			"x":            "day",
-			"y":            []string{"revenue"},
-		},
-		"rows": []map[string]any{{"day": "2026-06-25", "revenue": 42.5}},
-	})
-
-	if !strings.Contains(output, "{{chart:chart_abc123}}") {
-		t.Fatalf("analysis output missing explicit chart anchor: %s", output)
-	}
-	if strings.Contains(output, "do not render these rows as a Markdown table") {
-		t.Fatalf("analysis output should not include no-table rule: %s", output)
-	}
-}
-
 func TestDBSchemaSemanticContextStrippedFromClientPayload(t *testing.T) {
 	result := &wktypes.ToolResult{
 		Success: true,
@@ -327,10 +304,6 @@ func TestDBSchemaSemanticContextStrippedFromClientPayload(t *testing.T) {
 	}
 	if _, ok := clientMeta["output"]; ok {
 		t.Fatalf("raw schema tool output leaked to client metadata: %#v", clientMeta)
-	}
-	persisted := agenttools.SanitizeToolDataForPersist(result.Data)
-	if _, ok := persisted["semantic_context"]; ok {
-		t.Fatalf("semantic_context leaked to persisted tool data: %#v", persisted)
 	}
 }
 
@@ -563,5 +536,29 @@ func TestDBQueryReportsSourceFailureWithoutSchemaPrecondition(t *testing.T) {
 	}, QueryInput{SQL: "SELECT 1"}, true)
 	if err == nil || strings.Contains(err.Error(), "db_schema") || !strings.Contains(err.Error(), "no active database sources") {
 		t.Fatalf("ExecuteQuery error = %v, want actual source availability failure", err)
+	}
+}
+
+func TestSchemaReturnsConfiguredMetadataWithoutInventedBusinessRelationships(t *testing.T) {
+	svc, ctx := newDBAnalyticsSharingTestService(t)
+	source := &Source{ID: "schema-source", TenantID: 1, Type: SourceTypePostgres, Status: SourceStatusActive}
+	table := &SourceTable{ID: "schema-table", TenantID: 1, SourceID: source.ID, SchemaName: "public", PhysicalName: "customer_daily_orders", VirtualName: "schema_table", Enabled: true}
+	column := &SourceColumn{ID: "schema-column", TenantID: 1, SourceID: source.ID, TableID: table.ID, ColumnName: "customer_id", DataType: "bigint", Nullable: true, Description: "External identifier; duplicates are allowed", SemanticType: "dimension"}
+	for _, row := range []any{source, table, column} {
+		if err := svc.db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := NewSchemaTool(svc, ToolScope{TenantID: 1, SourceTenantID: 1, SourceIDs: []string{source.ID}}).Execute(ctx, []byte(`{"table_names":["schema_table"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := result.Data["semantic_context"]; exists {
+		t.Fatal("schema metadata must not invent grain, joins or business meaning from names")
+	}
+	tables := result.Data["tables"].([]map[string]any)
+	cols := tables[0]["columns"].([]map[string]any)
+	if cols[0]["description"] != column.Description || cols[0]["nullable"] != true || !strings.Contains(result.Output, column.Description) {
+		t.Fatalf("declared metadata lost: %#v", result)
 	}
 }

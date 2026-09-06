@@ -31,6 +31,12 @@ func (s *knowledgeBaseService) processSearchResults(ctx context.Context,
 		return nil, err
 	}
 
+	for id, knowledge := range knowledgeMap {
+		if !knowledge.IsPublished() {
+			delete(knowledgeMap, id)
+		}
+	}
+
 	// Batch fetch chunks (include shared KB chunks)
 	logger.Infof(ctx, "Fetching chunk data for %d IDs", len(index.chunkIDs))
 	allChunks, err := s.listChunksByIDWithShared(ctx, tenantID, index.chunkIDs)
@@ -243,7 +249,7 @@ func (s *knowledgeBaseService) assembleSearchResults(
 		}
 
 		score := idx.scores[chunk.ID]
-		if knowledge, ok := knowledgeMap[chunk.KnowledgeID]; ok {
+		if knowledge, ok := knowledgeMap[chunk.KnowledgeID]; ok && knowledge.IsPublishedChunk(chunk) {
 			matchType := idx.matchTypes[chunk.ID]
 			matchedContent := idx.matchedContents[chunk.ID]
 			searchResults = append(searchResults, s.buildSearchResult(
@@ -273,7 +279,7 @@ func (s *knowledgeBaseService) assembleSearchResults(
 				score = 0.0
 			}
 
-			if knowledge, ok := knowledgeMap[chunk.KnowledgeID]; ok {
+			if knowledge, ok := knowledgeMap[chunk.KnowledgeID]; ok && knowledge.IsPublishedChunk(chunk) {
 				matchType := types.MatchTypeParentChunk
 				if specificType, exists := idx.matchTypes[chunkID]; exists {
 					matchType = specificType
@@ -369,7 +375,7 @@ func retrievalMatchOrigin(chunk *types.Chunk, matchedSourceID string) string {
 
 // isSearchableChunk checks if a chunk type should be included in search results.
 func (s *knowledgeBaseService) isSearchableChunk(chunk *types.Chunk) bool {
-	return slices.Contains([]types.ChunkType{
+	return chunk != nil && chunk.IsEnabled && slices.Contains([]types.ChunkType{
 		types.ChunkTypeText, types.ChunkTypeSummary,
 		types.ChunkTypeTableColumn, types.ChunkTypeTableSummary,
 		types.ChunkTypeFAQ,

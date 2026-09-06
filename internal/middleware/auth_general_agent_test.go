@@ -5,6 +5,7 @@ import "testing"
 func TestGeneralAgentInternalToolCallbackBypassesGlobalAuth(t *testing.T) {
 	paths := []string{
 		"/api/v1/custom/general-agent/internal/tools/call",
+		"/api/v1/custom/general-agent/internal/model/call",
 		"/api/v1/custom/general-agent/internal/artifacts/upload",
 	}
 

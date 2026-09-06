@@ -25,10 +25,10 @@ builtin_agents:
     config:
       agent_mode: "quick-answer"
       system_prompt_id: "default_kb"
-      # Quick Answer already has a separate query-understanding and retrieval
-      # pipeline. A second free-form reasoning stream increased latency and
-      # transport exposure without adding source evidence.
-      thinking: false
+      max_iterations: 10
+      # Retrieval and tool orchestration do not replace model reasoning.
+      # The model adapter maps this through its declared provider capability.
+      thinking: true
       context_template_id: "default_context"
       # Factual answers should be stable across repeated runs. Retrieval and
       # answer selection remain semantic/model-owned; lower sampling only
@@ -44,7 +44,6 @@ builtin_agents:
       retrieve_kb_only_when_mentioned: false
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
@@ -82,7 +81,7 @@ builtin_agents:
       context_template_id: "default_context"
       temperature: 0.7
       max_completion_tokens: 4096
-      max_iterations: 1
+      max_iterations: 10
       web_search_enabled: false
       web_search_max_results: 5
       multi_turn_enabled: true
@@ -91,7 +90,6 @@ builtin_agents:
       retrieve_kb_only_when_mentioned: false
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
@@ -128,7 +126,7 @@ builtin_agents:
     config:
       agent_mode: "smart-reasoning"
       agent_type: "rag-qa"
-      system_prompt: ""
+      system_prompt_id: "progressive_rag_agent"
       thinking: true
       # Factual RAG synthesis should be deterministic. Tool choice and retrieval
       # remain model-owned; lower sampling only reduces evidence-external prose.
@@ -150,7 +148,6 @@ builtin_agents:
       history_turns: 10
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
@@ -296,10 +293,7 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "general-agent"
       system_prompt_id: "general_claude_agent"
-      # The Claude-SDK loop already provides multi-step tool planning. Adaptive
-      # extended thinking on every step inflated latency and encouraged extra
-      # tool cycles for ordinary RAG questions without improving evidence.
-      thinking: false
+      thinking: true
       temperature: 0.0
       max_completion_tokens: 8192
       max_iterations: 18
@@ -336,7 +330,6 @@ builtin_agents:
       retain_retrieval_history: true
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
@@ -436,7 +429,6 @@ builtin_agents:
       retain_retrieval_history: true
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
@@ -509,6 +501,7 @@ builtin_agents:
         description: "검사 문제를 기반으로 Wiki 페이지를 修復하고 最適化하는 전용 에이전트"
     config:
       agent_type: "custom"
+      agent_mode: "smart-reasoning"
       system_prompt_id: "wiki_fixer"
       thinking: false
       temperature: 0.7

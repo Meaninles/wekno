@@ -136,6 +136,9 @@ func ConfigFromModel(m *types.Model, appID, appSecret string) *ChatConfig {
 
 // NewChat 创建聊天实例
 func NewChat(config *ChatConfig, ollamaService *ollama.OllamaService) (Chat, error) {
+	if err := types.ValidateThinkingControl(config.ExtraConfig); err != nil {
+		return nil, err
+	}
 	var c Chat
 	var err error
 	switch strings.ToLower(string(config.Source)) {

@@ -1,14 +1,11 @@
 package service
 
 import (
-	"encoding/json"
+	"strings"
 	"testing"
 
-	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // Request-local evidence envelopes must not be replayed into later turns.
@@ -115,7 +112,7 @@ func TestBuildAssistantHistoryMessages_NaturalFinishEmitsSingleAnswer(t *testing
 	got := buildAssistantHistoryMessages(msg)
 	if assert.Len(t, got, 1) {
 		assert.Equal(t, "assistant", got[0].Role)
-		assert.Contains(t, got[0].Content, `authority="non_source"`)
+		assert.Contains(t, got[0].Content, `authority="model_output_not_evidence"`)
 		assert.Contains(t, got[0].Content, "Hello, nice to meet you!")
 		assert.Empty(t, got[0].ToolCalls)
 	}
@@ -141,154 +138,14 @@ func TestBuildAssistantHistoryMessages_StripsThinkBlocks(t *testing.T) {
 // assistant_with_tool_calls + tool messages, and the canonical final answer is
 // appended last. final_answer entries are filtered because they're terminal
 // signals — the trailing assistant message already carries the answer.
-func TestBuildAssistantHistoryMessages_ToolCallsExpandIntoOpenAIShape(t *testing.T) {
-	msg := &types.Message{
-		Role:    "assistant",
-		Content: "Found 3 matches in the docs.",
-		AgentSteps: types.AgentSteps{
-			{
-				Iteration: 0,
-				Thought:   "Let me search.",
-				ToolCalls: []types.ToolCall{
-					{
-						ID:   "call_1",
-						Name: agenttools.ToolKnowledgeSearch,
-						Args: map[string]interface{}{"query": "foo"},
-						Result: &types.ToolResult{
-							Success: true,
-							Output:  "doc A, doc B, doc C",
-						},
-					},
-				},
-			},
-			{
-				Iteration: 1,
-				Thought:   "",
-				ToolCalls: []types.ToolCall{
-					{
-						// Legacy persisted data: old conversations recorded a
-						// final_answer terminal tool call. The filter still drops it.
-						ID:     "call_2",
-						Name:   "final_answer",
-						Args:   map[string]interface{}{"answer": "Found 3 matches in the docs."},
-						Result: &types.ToolResult{Success: true},
-					},
-				},
-			},
-		},
-	}
-	got := buildAssistantHistoryMessages(msg)
-	if !assert.Len(t, got, 3) {
-		return
-	}
-	// 1. assistant message announcing the tool call
-	assert.Equal(t, "assistant", got[0].Role)
-	assert.Equal(t, "Let me search.", got[0].Content)
-	if assert.Len(t, got[0].ToolCalls, 1) {
-		assert.Equal(t, "call_1", got[0].ToolCalls[0].ID)
-		assert.Equal(t, agenttools.ToolKnowledgeSearch, got[0].ToolCalls[0].Function.Name)
-		assert.Contains(t, got[0].ToolCalls[0].Function.Arguments, "foo")
-	}
-	// 2. tool result paired with the call ID
-	assert.Equal(t, "tool", got[1].Role)
-	assert.Equal(t, "call_1", got[1].ToolCallID)
-	assert.Equal(t, "doc A, doc B, doc C", got[1].Content)
-	// 3. canonical final answer (final_answer tool call itself was filtered)
-	assert.Equal(t, "assistant", got[2].Role)
-	assert.Contains(t, got[2].Content, "Found 3 matches in the docs.")
-	assert.Contains(t, got[2].Content, `authority="non_source"`)
-	assert.Empty(t, got[2].ToolCalls)
-}
 
-// TestBuildAssistantHistoryMessages_ToolFailureSurfacesAsError ensures a
-// historical failed tool call is replayed as an "Error: …" tool message so the
-// model can see (and avoid retrying) the same failure path.
-func TestBuildAssistantHistoryMessages_ToolFailureSurfacesAsError(t *testing.T) {
-	msg := &types.Message{
-		Role:    "assistant",
-		Content: "Sorry, I could not complete the search.",
-		AgentSteps: types.AgentSteps{
-			{
-				Iteration: 0,
-				Thought:   "Trying search.",
-				ToolCalls: []types.ToolCall{
-					{
-						ID:   "call_err",
-						Name: agenttools.ToolKnowledgeSearch,
-						Args: map[string]interface{}{"query": "x"},
-						Result: &types.ToolResult{
-							Success: false,
-							Error:   "kb unreachable",
-						},
-					},
-				},
-			},
-		},
+func TestRepairHistoryDoesNotReplayTools(t *testing.T) {
+	m := &types.Message{ID: "answer-1", Content: "final response", AgentSteps: types.AgentSteps{{Thought: "old private thought", ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read_file", Result: &types.ToolResult{Success: true, Output: "old full file"}}}}}}
+	messages := buildAssistantHistoryMessages(m)
+	if len(messages) != 1 || len(messages[0].ToolCalls) != 0 || strings.Contains(messages[0].Content, "old full file") || !strings.Contains(messages[0].Content, "assistant_message_answer-1") {
+		t.Fatal(messages)
 	}
-	got := buildAssistantHistoryMessages(msg)
-	if !assert.Len(t, got, 3) {
-		return
+	if len(m.AgentSteps) != 1 {
+		t.Fatal("persisted record mutated")
 	}
-	assert.Equal(t, chat.Message{
-		Role:       "tool",
-		Content:    "Error: kb unreachable",
-		ToolCallID: "call_err",
-		Name:       agenttools.ToolKnowledgeSearch,
-	}, got[1])
-}
-
-// TestFilterNonTerminalToolCalls confirms a legacy final_answer entry is
-// dropped — every other tool (KB search, web search, MCP tools…) must survive.
-func TestFilterNonTerminalToolCalls(t *testing.T) {
-	in := []types.ToolCall{
-		{Name: agenttools.ToolKnowledgeSearch},
-		{Name: "final_answer"},
-		{Name: agenttools.ToolWebSearch},
-	}
-	out := filterNonTerminalToolCalls(in)
-	if assert.Len(t, out, 2) {
-		assert.Equal(t, agenttools.ToolKnowledgeSearch, out[0].Name)
-		assert.Equal(t, agenttools.ToolWebSearch, out[1].Name)
-	}
-}
-
-// TestBuildAssistantHistoryMessages_ReplaysReasoningContent guards the
-// cross-turn replay path: AgentStep.ReasoningContent persisted on a prior turn
-// must be re-attached to the rebuilt assistant message, otherwise MiMo and
-// DeepSeek thinking-mode reject the next turn with HTTP 400 (issue #1302).
-func TestBuildAssistantHistoryMessages_ReplaysReasoningContent(t *testing.T) {
-	msg := &types.Message{
-		Role:    "assistant",
-		Content: "Found 3 matches in the docs.",
-		AgentSteps: types.AgentSteps{
-			{
-				Iteration:        0,
-				Thought:          "Let me search.",
-				ReasoningContent: "model's chain of thought",
-				ToolCalls: []types.ToolCall{{
-					ID:               "call_1",
-					Name:             agenttools.ToolKnowledgeSearch,
-					Args:             map[string]interface{}{"query": "foo"},
-					ProviderMetadata: types.ToolCallMetadata{"google": json.RawMessage(`{"thought_signature":"gemini-history-signature"}`)},
-					Result: &types.ToolResult{
-						Success: true,
-						Output:  "doc A",
-					},
-				}},
-			},
-		},
-	}
-	got := buildAssistantHistoryMessages(msg)
-	if !assert.Len(t, got, 3) {
-		return
-	}
-	assert.Equal(t, "model's chain of thought", got[0].ReasoningContent,
-		"reasoning_content from AgentStep must be replayed onto the rebuilt assistant message "+
-			"so MiMo/DeepSeek thinking-mode does not 400 on multi-turn (issue #1302)")
-	require.Len(t, got[0].ToolCalls, 1)
-	assert.JSONEq(t, `{"thought_signature":"gemini-history-signature"}`,
-		string(got[0].ToolCalls[0].ProviderMetadata["google"]))
-	// Tool message and final answer message must NOT carry reasoning_content.
-	assert.Empty(t, got[1].ReasoningContent)
-	assert.Empty(t, got[2].ReasoningContent)
 }

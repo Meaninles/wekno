@@ -218,6 +218,8 @@ function convertToLegacyFormat(model: ModelConfig) {
     baseUrl: model.parameters.base_url || '',
     apiKey: '',
     provider: model.parameters.provider || '',
+    rerankMaxInputTokens: model.parameters.rerank_parameters?.max_input_tokens,
+    runtimeAdapter: model.parameters.extra_config?.agent_runtime_adapter || 'platform',
     dimension: model.parameters.embedding_parameters?.dimension,
     supportsDimensionOverride: model.parameters.embedding_parameters?.supports_dimension_override || false,
     isBuiltin: model.is_builtin || false,
@@ -474,12 +476,10 @@ const handleModelSave = async (modelData: any) => {
     } else {
       delete extraConfig.thinking_control
     }
-    const generalAgentClaudeBaseUrl = (modelData.generalAgentClaudeBaseUrl || '').trim()
-    if ((saveType === 'chat' || saveType === 'vllm') && generalAgentClaudeBaseUrl) {
-      extraConfig.general_agent_claude_base_url = generalAgentClaudeBaseUrl
-    } else {
-      delete extraConfig.general_agent_claude_base_url
+    if (saveType === 'chat' || saveType === 'vllm') {
+      extraConfig.agent_runtime_adapter = modelData.runtimeAdapter || 'platform'
     }
+    delete extraConfig.general_agent_claude_base_url
     if (saveType === 'asr') {
       extraConfig.asr_response_format = modelData.asrResponseFormat || 'verbose_json'
     } else {
@@ -502,6 +502,7 @@ const handleModelSave = async (modelData: any) => {
         ...appSecretFields,
         provider: modelData.provider || '',
         ...extraConfigFields,
+        ...(saveType === 'rerank' ? { rerank_parameters: { max_input_tokens: modelData.rerankMaxInputTokens || 0 } } : {}),
         ...(Object.keys(customHeadersMap).length > 0 ? { custom_headers: customHeadersMap } : {}),
         ...(saveType === 'embedding' && modelData.dimension ? {
           embedding_parameters: {

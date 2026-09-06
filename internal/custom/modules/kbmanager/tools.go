@@ -82,7 +82,7 @@ func NewReplaceDocumentTool(service *Service, scope ToolScope) *ReplaceDocumentT
 	return &ReplaceDocumentTool{
 		BaseTool: agenttools.NewBaseTool(
 			ToolReplaceDocument,
-			"Write the replacement document to the old document's knowledge base. This tool ONLY adds the new document and NEVER deletes the old one. Modify is a composite of add+delete permission. After this tool confirms the new document was added, immediately call kb_delete_document for the inspected old document without waiting for parsing. If add fails, never delete the old document; if delete fails, report that both documents remain.",
+			"Replace a document using one durable operation. The server waits for the new document’s required indexes before cleaning up the inspected old version. A parse failure preserves the old document. Returns acceptance and separate searchable/enrichment/cleanup states; use kb_mutation_status to inspect completion.",
 			utils.GenerateSchema[ReplaceDocumentRequest](),
 		),
 		service: service,

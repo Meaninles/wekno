@@ -194,6 +194,7 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 	}
 
 	// Override retrieval strategy settings
+	cm.RetrievalBudget = customAgent.Config.RetrievalBudget
 	if customAgent.Config.EmbeddingTopK > 0 {
 		cm.EmbeddingTopK = customAgent.Config.EmbeddingTopK
 	}
@@ -255,10 +256,9 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 	// FAQ strategy settings
 	cm.FAQPriorityEnabled = customAgent.Config.FAQPriorityEnabled
 	cm.FAQDirectAnswerThreshold = customAgent.Config.FAQDirectAnswerThreshold
-	cm.FAQScoreBoost = customAgent.Config.FAQScoreBoost
 	if cm.FAQPriorityEnabled {
-		logger.Infof(ctx, "FAQ priority enabled: threshold=%.2f, boost=%.2f",
-			cm.FAQDirectAnswerThreshold, cm.FAQScoreBoost)
+		logger.Infof(ctx, "FAQ priority enabled: threshold=%.2f",
+			cm.FAQDirectAnswerThreshold)
 	}
 
 	// Data analysis pipeline stage (opt-in, default off).

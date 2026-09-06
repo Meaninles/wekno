@@ -1,5 +1,16 @@
 # WeKnora 智能体 Eval 框架
 
+## 本地前端常驻服务
+
+`stack.ps1 -Target eval -Action up/rebuild` 会在后端就绪后启动当前工作树的
+前端，固定为 `http://localhost:5177`，移动端为同一服务的 `/mobile/`。
+前端通过 Windows 独立后台进程启动，不依赖发起命令的临时终端存活。
+单独管理前端使用 `frontend.ps1 -Action start|restart|stop|status`；启动与重启
+检查“新对话”页面模块实际返回 HTTP 200，日志保存在工作树
+`.local-data/frontend/vite.stdout.log` 和 `vite.stderr.log`。
+不要用临时前台命令代替此入口后就结束命令会话，否则浏览器已打开的页面
+仍可见，但后续懒加载页面会报 `Failed to fetch dynamically imported module`。
+
 这套框架只评测本项目内的 WeKnora 智能体，覆盖 RAG 召回与引用、文档处理、工具安全和超多轮长上下文。它不把 WeKnora 变成“裁判”：WeKnora 只作为被测系统（SUT）、记录器和隔离实验环境；数据集策划、运行、分析、改进决策和 sealed holdout 由 Codex 执行。
 
 > 当前新实验与发布结论使用 [ANTI-OVERFITTING-AUDIT-v2.md](ANTI-OVERFITTING-AUDIT-v2.md)

@@ -47,6 +47,8 @@ type WikiPageService interface {
 
 	// DeletePage soft-deletes a wiki page and removes its chunk sync.
 	DeletePage(ctx context.Context, kbID string, slug string) error
+	DeletePageVersion(ctx context.Context, page *types.WikiPage) error
+	RenamePage(ctx context.Context, page *types.WikiPage, newSlug string) (*types.WikiPage, error)
 
 	// GetIndex returns the index page for a knowledge base.
 	// Creates a default one if it doesn't exist.
@@ -404,6 +406,7 @@ type WikiPageRepository interface {
 
 	// Delete soft-deletes a wiki page by knowledge base ID and slug.
 	Delete(ctx context.Context, kbID string, slug string) error
+	MutateIdentity(ctx context.Context, page *types.WikiPage, newSlug *string) error
 
 	// DeleteByID soft-deletes a wiki page by ID.
 	DeleteByID(ctx context.Context, id string) error

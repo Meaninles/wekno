@@ -24,11 +24,16 @@ CREATE TABLE IF NOT EXISTS knowledges (
     id VARCHAR(36) PRIMARY KEY,
     tenant_id INTEGER NOT NULL,
     knowledge_base_id VARCHAR(36) NOT NULL,
+    folder_id VARCHAR(36) NOT NULL DEFAULT '',
     type VARCHAR(50) NOT NULL DEFAULT '',
     title VARCHAR(255) NOT NULL DEFAULT '',
     description TEXT,
     source VARCHAR(2048) NOT NULL DEFAULT '',
     parse_status VARCHAR(50) NOT NULL DEFAULT 'unprocessed',
+    publication_state VARCHAR(16) NOT NULL DEFAULT 'published',
+    processing_workflow_id VARCHAR(36) NOT NULL DEFAULT '',
+    published_generation VARCHAR(36) NOT NULL DEFAULT '',
+    published_embedding_model_id VARCHAR(64) NOT NULL DEFAULT '',
     processing_generation VARCHAR(36) NOT NULL DEFAULT '',
     processing_owner VARCHAR(160) NOT NULL DEFAULT '',
     processing_fanout TEXT,
@@ -76,6 +81,7 @@ func setupKnowledgeTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, db.Exec(knowledgesTestDDL).Error)
+	require.NoError(t, db.AutoMigrate(&types.Chunk{}, &types.TaskPendingOp{}))
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }

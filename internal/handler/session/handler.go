@@ -29,6 +29,7 @@ type Handler struct {
 	modelService         interfaces.ModelService         // Service for model management (VLM access)
 	userService          interfaces.UserService          // Service for resolving per-user preferences (e.g. enable_memory default)
 	attachmentProcessor  *AttachmentProcessor            // Processor for file attachments
+	uploadResolver       UploadResolver
 }
 
 // NewHandler creates a new instance of Handler with all necessary dependencies

@@ -47,6 +47,10 @@ type KnowledgeBase struct {
 	Type string `yaml:"type"                    json:"type"                    gorm:"type:varchar(32);default:'document'"`
 	// Whether this knowledge base is temporary (ephemeral) and should be hidden from UI
 	IsTemporary bool `yaml:"is_temporary"            json:"is_temporary"            gorm:"default:false"`
+	// Chat sources are private to the session principal. These fields are
+	// server-owned and cannot be supplied or changed through public KB DTOs.
+	ChatSessionID string `yaml:"-" json:"-" gorm:"type:varchar(36);not null;default:''"`
+	ChatOwnerID   string `yaml:"-" json:"-" gorm:"type:varchar(512);not null;default:''"`
 	// Description of the knowledge base
 	Description string `yaml:"description"             json:"description"`
 	// Tenant ID

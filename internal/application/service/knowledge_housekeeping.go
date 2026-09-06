@@ -51,8 +51,13 @@ type HousekeepingService struct {
 	inspector interfaces.TaskInspector
 	cache     *contentcache.Store
 
-	mu      sync.Mutex
-	started bool
+	mu           sync.Mutex
+	started      bool
+	indexCleanup func(context.Context) error
+}
+
+func (h *HousekeepingService) SetIndexCleanup(cleanup func(context.Context) error) {
+	h.indexCleanup = cleanup
 }
 
 // NewHousekeepingService constructs a HousekeepingService. It does NOT start
@@ -71,6 +76,7 @@ func NewHousekeepingService(
 		cache:     cache,
 		cron: cron.New(cron.WithSeconds(), cron.WithChain(
 			cron.Recover(cron.DefaultLogger),
+			cron.SkipIfStillRunning(cron.DefaultLogger),
 		)),
 	}
 }
@@ -87,6 +93,17 @@ func (h *HousekeepingService) Start(ctx context.Context) error {
 	if !housekeepingEnabled() {
 		logger.Infof(ctx, "[Housekeeping] disabled via WEKNORA_HOUSEKEEPING_ENABLED=false")
 		return nil
+	}
+	if h.indexCleanup != nil {
+		if _, err := h.cron.AddFunc("*/15 * * * * *", func() {
+			work, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			if err := h.indexCleanup(work); err != nil {
+				logger.Warnf(work, "[Housekeeping] index retirement: %v", err)
+			}
+		}); err != nil {
+			return err
+		}
 	}
 	// Every 5 minutes — frequent enough that user-visible recovery latency
 	// is acceptable, infrequent enough that the SQL sweep is invisible to

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T23:55:00+08:00",
+  "source_environment": "codex-authored-unseen-final-cross-document-regression",
+  "target_environment": "local-production-mode",
+  "purpose": "final bounded production-path regression for cross-document compound recall, exact citations, hypothetical isolation, model-owned tool restraint, and protocol hygiene",
+  "required_model_id": "prod-deepseek-v4-flash-int8-chat",
+  "source_answers_in_sut_input": false,
+  "source_references_in_sut_input": false,
+  "reference_answers_in_sut_input": false,
+  "required_claims_in_sut_input": false,
+  "judge_feedback_in_sut_input": false,
+  "sealed_holdout_accessed": false,
+  "eval_assistance_enabled": false,
+  "profiles": ["quick-answer", "rag-reasoning", "general-agent"],
+  "repetitions": 3,
+  "concurrency": 8,
+  "cases": [
+    {
+      "case_id": "final-cross-document-policy-and-epistemic-isolation",
+      "source_session_alias": "codex-final-cross-document-policy",
+      "source_agent_kind": "new-generic-regression",
+      "kb_slug": "company-policies",
+      "family": "compound-cross-document-recall-plus-hypothetical-and-real-state-separation",
+      "high_usage_user": false,
+      "turns": [
+        {
+          "source_ordinal": 1,
+          "query": "请在制度库同时核实两个互不相关的事项：P1级信息系统故障的响应和恢复时限，以及品评培训结束后重点归档哪些材料。分成两段，各段把依据放在结论旁；不要把两份制度混成一份。"
+        },
+        {
+          "source_ordinal": 2,
+          "query": "只做逻辑推演，不查资料也不记录真实状态：假设 Lumen 已提交评审、结果未知，分析为什么不能把它写成已通过，也不能写成未通过。"
+        },
+        {
+          "source_ordinal": 3,
+          "query": "另起真实事项 Kestrel：窗口是9月18日，协调人是 Omar，评审结果没有提供。严格用三句中文分别写这三个事实；不要提 Lumen，不要检索，不要创建文件或执行命令。"
+        },
+        {
+          "source_ordinal": 4,
+          "query": "回到制度库重新取证：第一段只写 P1 响应时限和恢复时限并逐项引用；第二段只写品评培训的重点归档材料并引用；最后另起一行写 Kestrel 的三个用户事实且不加制度引用。不要调用与聊天回答无关的文件或制品工具。"
+        }
+      ]
+    }
+  ]
+}

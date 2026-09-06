@@ -2,6 +2,7 @@ package chatpipeline
 
 import (
 	"context"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -37,15 +38,9 @@ func (p *PluginFilterTopK) OnEvent(ctx context.Context,
 		"search_cnt": len(chatManage.SearchResult),
 	})
 
-	filterTopK := func(searchResult []*types.SearchResult, topK int) []*types.SearchResult {
-		if topK > 0 && len(searchResult) > topK {
-			pipelineInfo(ctx, "FilterTopK", "filter", map[string]interface{}{
-				"before": len(searchResult),
-				"after":  topK,
-			})
-			searchResult = searchResult[:topK]
-		}
-		return searchResult
+	filterTopK := func(results []*types.SearchResult, topK int) []*types.SearchResult {
+		budget := chatretrieval.ResolveBudget(chatManage.EmbeddingTopK, topK, chatManage.RetrievalBudget)
+		return chatretrieval.Select(results, budget.EvidenceCount, budget.EvidenceTokens)
 	}
 
 	if len(chatManage.MergeResult) > 0 {

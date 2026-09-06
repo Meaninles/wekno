@@ -32,6 +32,7 @@ func CollectImageInfoByChunkIDs(
 		return nil
 	}
 
+	ctx = types.WithPublishedChunks(ctx)
 	children, err := chunkRepo.ListChunksByParentIDs(ctx, tenantID, chunkIDs)
 	if err != nil || len(children) == 0 {
 		return nil

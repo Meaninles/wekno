@@ -1,0 +1,2 @@
+export const CHAT_UPLOAD_MAX_MB = 128
+export const CHAT_UPLOAD_MAX_BYTES = CHAT_UPLOAD_MAX_MB * 1024 * 1024

@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 
 	"github.com/Tencent/WeKnora/internal/agent/skills"
@@ -22,7 +19,6 @@ import (
 
 const (
 	DefaultPreloadedSkillsDir = "skills/preloaded"
-	DefaultRuntimeSkillsDir   = ".local-data/runtime-skills"
 	shareTypeOrganization     = "organization"
 	shareTypeUser             = "user"
 
@@ -30,8 +26,6 @@ const (
 	maxLightweightSkillDescriptionRunes  = 1024
 	maxLightweightSkillInstructionsRunes = 20000
 )
-
-var safePathPartPattern = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 type Service struct {
 	db                   *gorm.DB
@@ -500,67 +494,35 @@ func (s *Service) AdditionalMetadata(ctx context.Context) ([]*skills.SkillMetada
 }
 
 func (s *Service) ConfigureRuntimeSkills(ctx context.Context, req *types.QARequest, agentConfig *types.AgentConfig, customAgent *types.CustomAgent) error {
-	if !agentConfig.SkillsEnabled {
-		return nil
-	}
-	names := customAgent.Config.SelectedSkills
-	all := customAgent.Config.SkillsSelectionMode == "all"
-	dir, materializedNames, err := s.MaterializeAccessible(ctx, names, all)
+	mode := customAgent.Config.LightweightSkillsSelectionMode
+	names := customAgent.Config.SelectedLightweightSkills
+	packages, dropped, err := s.LightweightPackages(ctx, mode, names, req.SkillNames)
 	if err != nil {
 		return err
 	}
-	if dir == "" {
-		return nil
+	for _, drop := range dropped {
+		s.DebugLog(ctx, "unavailable selected skill: %s", drop.Name)
 	}
-	agentConfig.SkillDirs = appendUnique(agentConfig.SkillDirs, dir)
-	if !all && len(agentConfig.AllowedSkills) == 0 {
-		agentConfig.AllowedSkills = materializedNames
-	}
-	_ = req
-	return nil
-}
-
-func (s *Service) MaterializeAccessible(ctx context.Context, names []string, all bool) (string, []string, error) {
-	accessible, err := s.accessibleByName(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	names = normalizeNames(names)
-	selected := make([]Skill, 0)
-	if all {
-		for _, skill := range accessible {
-			selected = append(selected, skill)
-		}
-		sort.Slice(selected, func(i, j int) bool { return selected[i].Name < selected[j].Name })
-	} else {
-		for _, name := range names {
-			if skill, ok := accessible[name]; ok {
-				selected = append(selected, skill)
+	agentConfig.SkillsEnabled = false
+	agentConfig.SkillDirs = nil
+	agentConfig.AllowedSkills = nil
+	agentConfig.RuntimeLightweightSkills = nil
+	agentConfig.PinnedSkillNames = nil
+	for _, pkg := range packages {
+		selected := false
+		for _, name := range req.SkillNames {
+			if name == pkg.Name {
+				selected = true
+				break
 			}
 		}
-	}
-	if len(selected) == 0 {
-		return "", nil, nil
-	}
-	base := runtimeSkillsDir(ctx)
-	if err := os.RemoveAll(base); err != nil {
-		return "", nil, err
-	}
-	if err := os.MkdirAll(base, 0755); err != nil {
-		return "", nil, err
-	}
-	outNames := make([]string, 0, len(selected))
-	for _, skill := range selected {
-		dir := filepath.Join(base, safePathPart(skill.Name))
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return "", nil, err
+		agentConfig.RuntimeLightweightSkills = append(agentConfig.RuntimeLightweightSkills, types.RuntimeLightweightSkill{Key: pkg.Key, Name: pkg.Name, Description: pkg.Description, Instructions: pkg.Instructions, SelectedByUser: selected})
+		if selected {
+			agentConfig.PinnedSkillNames = append(agentConfig.PinnedSkillNames, pkg.Name)
 		}
-		if err := os.WriteFile(filepath.Join(dir, skills.SkillFileName), []byte(renderSkillFile(skill.Name, skill.Description, skill.Instructions)), 0644); err != nil {
-			return "", nil, err
-		}
-		outNames = append(outNames, skill.Name)
 	}
-	return base, outNames, nil
+	agentConfig.LightweightSkillContext = renderLightweightPackages("Available skills (load relevant instructions with read_skill):", packages)
+	return nil
 }
 
 func (s *Service) accessibleByName(ctx context.Context) (map[string]Skill, error) {
@@ -738,14 +700,6 @@ func appendUnique(base []string, values ...string) []string {
 	return out
 }
 
-func renderSkillFile(name, description, instructions string) string {
-	frontmatter, _ := yaml.Marshal(map[string]string{
-		"name":        strings.TrimSpace(name),
-		"description": strings.TrimSpace(description),
-	})
-	return "---\n" + string(frontmatter) + "---\n\n" + strings.TrimSpace(instructions) + "\n"
-}
-
 func renderContextSection(name, description, instructions string) string {
 	return fmt.Sprintf("## Skill: %s\n\n%s\n\n%s", strings.TrimSpace(name), strings.TrimSpace(description), strings.TrimSpace(instructions))
 }
@@ -773,32 +727,6 @@ func getPreloadedSkillsDir() string {
 		}
 	}
 	return DefaultPreloadedSkillsDir
-}
-
-func runtimeSkillsDir(ctx context.Context) string {
-	root := strings.TrimSpace(os.Getenv("WEKNORA_RUNTIME_SKILLS_DIR"))
-	if root == "" {
-		root = DefaultRuntimeSkillsDir
-	}
-	tenantID, _ := types.TenantIDFromContext(ctx)
-	userID, _ := types.UserIDFromContext(ctx)
-	return filepath.Join(root, fmt.Sprintf("%d-%s", tenantID, safePathPart(userID)))
-}
-
-func safePathPart(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		value = "skill"
-	}
-	value = safePathPartPattern.ReplaceAllString(value, "-")
-	value = strings.Trim(value, ".-")
-	if value == "" {
-		value = "skill"
-	}
-	if len(value) > 80 {
-		value = value[:80]
-	}
-	return value
 }
 
 func (s *Service) DebugLog(ctx context.Context, msg string, args ...any) {

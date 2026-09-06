@@ -2,7 +2,6 @@ package chatpipeline
 
 import (
 	"context"
-	"regexp"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -16,8 +15,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
-
-var regThinkTags = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 // pipelineInfo logs pipeline info level entries.
 func pipelineInfo(ctx context.Context, stage, action string, fields map[string]interface{}) {
@@ -120,9 +117,6 @@ func effectiveTemperature(chatManage *types.ChatManage) float64 {
 		return 0
 	}
 	configured := chatManage.SummaryConfig.Temperature
-	if chatManage.Intent == types.IntentConversation && !chatManage.NeedsRetrieval() && configured > 0.2 {
-		return 0.2
-	}
 	return configured
 }
 
@@ -132,10 +126,6 @@ func effectiveTemperature(chatManage *types.ChatManage) float64 {
 // in user-authored text, and disabling thinking reduces latency and the chance
 // that internal state-selection narration leaks into the user-visible answer.
 func effectiveThinkingOption(chatManage *types.ChatManage) *bool {
-	if chatManage != nil && chatManage.Intent == types.IntentConversation && !chatManage.NeedsRetrieval() {
-		disabled := false
-		return &disabled
-	}
 	if chatManage == nil {
 		return nil
 	}
@@ -173,16 +163,9 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 	// Add current user message. Only include images when the chat model supports
 	// vision; non-vision models rely on the text description in UserContent.
 	currentContent := chatManage.UserContent
-	currentContent = conversationmemory.AppendCurrentTurnDirective(
-		currentContent,
-		chatManage.Query,
-	)
 	// Keep the citation-use block terminal after the current-turn semantic
 	// directive. This preserves the established citation salience rule.
 	currentContent = sourcerefs.PlaceTerminalCitationInstruction(currentContent, chatManage.CitationResult)
-	if outputDirective := conversationmemory.TerminalGenerationDirective(); outputDirective != "" {
-		currentContent += "\n\n" + outputDirective
-	}
 	userMsg := chat.Message{
 		Role:    "user",
 		Content: currentContent,
@@ -250,7 +233,7 @@ func loadAndProcessHistory(
 		}
 		h.Query += h.SupplementalContext
 		if turn.Assistant != nil {
-			h.Answer = sourcerefs.StripCitationProtocol(regThinkTags.ReplaceAllString(turn.Assistant.Content, ""))
+			h.Answer = conversationmemory.AssistantRecord(turn.Assistant)
 			h.KnowledgeReferences = turn.Assistant.KnowledgeReferences
 		}
 		historyList = append(historyList, h)

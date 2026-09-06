@@ -17,11 +17,6 @@ type CreateSessionRequest struct {
 	LastRequestState *types.SessionLastRequestState `json:"last_request_state,omitempty"`
 }
 
-// GenerateTitleRequest defines the request structure for generating a session title
-type GenerateTitleRequest struct {
-	Messages []types.Message `json:"messages" binding:"required"` // Messages to use as context for title generation
-}
-
 // MentionedItemRequest represents a mentioned item in the request
 type MentionedItemRequest struct {
 	ID        string `json:"id"`
@@ -72,6 +67,7 @@ type CreateKnowledgeQARequest struct {
 	EnableMemory      *bool              `json:"enable_memory,omitempty"`
 	Images            []ImageAttachment  `json:"images"`                       // Attached images for multimodal chat
 	AttachmentUploads []AttachmentUpload `json:"attachment_uploads,omitempty"` // Attached files (documents, audio, etc.)
+	UploadIDs         []string           `json:"upload_ids,omitempty"`         // Ready session-bound files, sent without original bytes.
 	Channel           string             `json:"channel"`                      // Source channel: "web", "api", "im", etc.
 }
 

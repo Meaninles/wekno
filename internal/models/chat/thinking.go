@@ -119,8 +119,7 @@ func (chatTemplateKwargs) Apply(req *openai.ChatCompletionRequest, opts *ChatOpt
 
 // parseThinkingOverride reads extra_config.thinking_control and returns the
 // strategy it selects, or nil when unset (the provider adapter's default
-// strategy then applies). An unrecognized non-empty value falls back to
-// chat_template_kwargs, preserving the legacy default-mode behavior.
+// strategy then applies). Configuration validation rejects unknown values.
 func parseThinkingOverride(extraConfig map[string]string) ThinkingStrategy {
 	if extraConfig == nil {
 		return nil
@@ -134,9 +133,10 @@ func parseThinkingOverride(extraConfig map[string]string) ThinkingStrategy {
 		return enableThinking{}
 	case "thinking_type":
 		return thinkingTypeField{}
-	default:
-		// "chat_template_kwargs" and any unknown non-empty value.
+	case "chat_template_kwargs":
 		return chatTemplateKwargs{}
+	default:
+		return nil
 	}
 }
 

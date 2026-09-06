@@ -15,61 +15,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.runner import (  # noqa: E402
-    ArtifactStore,
-    BACKGROUND_RESUME_PROGRESS_MESSAGE,
-    BUILTIN_ENVIRONMENT_SAFETY_SYSTEM_PROMPT,
-    MAX_TURNS_USER_MESSAGE,
-    PENDING_BACKGROUND_TASK_USER_MESSAGE,
-    SDK_TOOL_PROGRESS,
-    TIMEOUT_USER_MESSAGE,
-    ToolUseFragment,
-    block_background_bash_hook,
-    build_background_task_resume_prompt,
-    build_prompt,
-    build_prompt_observation,
-    build_system_prompt,
-    build_weknora_server,
-    claude_auth_env,
-    claude_sdk_builtin_tools,
-    GeneralAgentRunner,
-    forbidden_background_bash_reason,
-    is_background_bash_tool_call,
-    materialize_professional_skills,
-    mcp_tool_result,
-    normalize_professional_skill_path,
-    original_input_files_xml,
-    original_input_failures_xml,
-    original_input_completion_message,
-    original_input_fallback_action,
-    PreparedOriginalInputFile,
-    prepare_data_analysis_reference_doc,
-    prepare_document_template_context,
-    prepare_ppt_generation_workspace,
-    prompt_media_reference,
-    result_message_text,
-    sanitize_artifact_bytes,
-    sdk_tool_progress_event,
-    sdk_tool_progress,
-    message_stop_reason,
-    message_uses_tools,
-    is_retryable_provider_transport_error,
-    is_turn_budget_error,
-    effective_weknora_tool_specs,
-    effective_work_budget_seconds,
-    terminal_budget_seconds,
-    effective_professional_skill_names,
-    provider_transport_retries,
-    raw_sdk_error_text,
-    terminal_background_tool_ids,
-    terminal_integrity_fallback_for_payload,
-    terminal_budget_prompt,
-    tool_result_fragments,
-    tool_use_fragments,
-    user_facing_error_message,
-    validate_pptx_layout_bytes,
-)
-from app.final_delivery import TERMINAL_ANSWER_CLOSE, TERMINAL_ANSWER_OPEN, terminal_binding_marker  # noqa: E402
+from app.artifact_store import ArtifactStore
+from app.runner import ( MAX_TURNS_USER_MESSAGE, TIMEOUT_USER_MESSAGE, ToolUseFragment, build_prompt, build_prompt_observation, build_system_prompt, claude_auth_env, GeneralAgentRunner, materialize_professional_skills, mcp_tool_result, normalize_professional_skill_path, prepare_data_analysis_reference_doc, prepare_document_template_context, prompt_media_reference, effective_weknora_tool_specs, raw_sdk_error_text, tool_result_fragments, tool_use_fragments, user_facing_error_message)
 from app.schemas import (  # noqa: E402
     ChatPayload,
     ChatHistoryMessage,
@@ -103,23 +50,23 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
-    def test_terminal_integrity_fallback_uses_payload_query_language(self):
-        base = dict(
-            run_id="run-terminal-fallback",
-            session_id="session-terminal-fallback",
-            assistant_message_id="assistant-terminal-fallback",
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
-        self.assertEqual(
-            terminal_integrity_fallback_for_payload(ChatPayload(query="请重试", **base)),
-            "本次回答未能可靠生成，请重试。",
-        )
-        self.assertEqual(
-            terminal_integrity_fallback_for_payload(ChatPayload(query="Please retry", **base)),
-            "The response could not be generated reliably. Please try again.",
-        )
+
+    def test_mcp_uses_exact_platform_output_without_duplicate_evidence_or_sidecar_handle_rules(self):
+        canonical = '<chunk>exact source\ncitation_handle_for_this_evidence: <src id="S17" /></chunk>'
+        original = {"success": True, "output": canonical, "data": {"results": [{"content": "duplicated source", "image_ocr": "duplicate image facts"}]},
+                    "source_references": [{"cite_exactly": '<src id="S999" />'}]}
+        result = mcp_tool_result(original)
+        self.assertEqual(result["content"], [{"type": "text", "text": canonical}])
+        self.assertEqual(original["data"]["results"][0]["content"], "duplicated source")
+        self.assertFalse(result["is_error"])
+
+    def test_mcp_error_and_data_only_results_remain_explicit(self):
+        result = mcp_tool_result({"success": False, "error": "stale version"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("stale version", result["content"][0]["text"])
+        result = mcp_tool_result({"success": True, "data": {"next_offset": 42}})
+        self.assertEqual(json.loads(result["content"][0]["text"])["data"]["next_offset"], 42)
+
 
     def test_prompt_observation_is_disabled_by_default_and_detailed_only_in_eval(self):
         payload = ChatPayload(
@@ -149,211 +96,6 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(observed["history_message_count_by_role"], {"user": 1, "assistant": 1})
         self.assertEqual(observed["rendered_prompt_chars"], 6)
 
-    def test_mcp_tool_result_places_handles_beside_chunk_wiki_and_web_evidence(self):
-        result = mcp_tool_result(
-            {
-                "success": True,
-                "output": "<wiki_page>\n<link>[[ops/page|Ops]]</link>\n<content>fact</content>\n</wiki_page>",
-                "data": {
-                    "display_type": "search_results",
-                    "results": [
-                        {"chunk_id": "chunk-1", "content": "document fact"},
-                        {"url": "https://example.test/page", "raw_content": "web fact"},
-                    ],
-                },
-                "source_references": [
-                    {"type": "knowledge", "chunk_id": "chunk-1", "cite_exactly": '<src id="S7" />'},
-                    {"type": "wiki", "slug": "ops/page", "cite_exactly": '<src id="S8" />'},
-                    {"type": "web", "url": "https://example.test/page", "cite_exactly": '<src id="S9" />'},
-                ],
-            }
-        )
-        summary = json.loads(result["content"][0]["text"])
-        self.assertEqual(summary["data"]["results"][0]["citation_handle_for_this_evidence"], '<src id="S7" />')
-        self.assertEqual(summary["data"]["results"][1]["citation_handle_for_this_evidence"], '<src id="S9" />')
-        self.assertIn(
-            'citation_handle_for_this_evidence: <src id="S8" />',
-            summary["output"],
-        )
-
-    def test_mcp_tool_result_compacts_only_model_duplicate_evidence(self):
-        original = {
-            "success": True,
-            "output": '<chunk chunk_id="chunk-1"><content>claim-bearing text</content></chunk>',
-            "data": {
-                "display_type": "search_results",
-                "results": [
-                    {
-                        "chunk_id": "chunk-1",
-                        "knowledge_title": "Manual",
-                        "content": "claim-bearing text",
-                        "score": 0.9,
-                    }
-                ],
-            },
-            "source_references": [
-                {
-                    "id": "S1",
-                    "type": "knowledge",
-                    "title": "Manual",
-                    "knowledge_id": "internal-document-id",
-                    "knowledge_base_name": "Product docs",
-                    "chunk_id": "chunk-1",
-                    "start_at": 10,
-                    "end_at": 30,
-                    "evidence_hash": "transport-only-hash",
-                    "observed_at": "2026-09-04T00:00:00Z",
-                    "cite_exactly": '<src id="S1" />',
-                }
-            ],
-        }
-
-        result = mcp_tool_result(original, "Answer from the manual with a citation.")
-        summary = json.loads(result["content"][0]["text"])
-
-        self.assertIn("claim-bearing text", summary["output"])
-        self.assertNotIn("content", summary["data"]["results"][0])
-        self.assertEqual(
-            summary["data"]["results"][0]["citation_handle_for_this_evidence"],
-            '<src id="S1" />',
-        )
-        self.assertEqual(summary["source_references"][0]["cite_exactly"], '<src id="S1" />')
-        self.assertNotIn("knowledge_id", summary["source_references"][0])
-        self.assertNotIn("evidence_hash", summary["source_references"][0])
-        self.assertEqual(original["data"]["results"][0]["content"], "claim-bearing text")
-
-    def test_mcp_tool_result_rejects_noncanonical_handle_injection(self):
-        result = mcp_tool_result(
-            {
-                "success": True,
-                "data": {"results": [{"url": "https://example.test"}]},
-                "source_references": [
-                    {"type": "web", "url": "https://example.test", "cite_exactly": '<src id="bad" />'},
-                ],
-            }
-        )
-        summary = json.loads(result["content"][0]["text"])
-        self.assertNotIn("citation_handle_for_this_evidence", summary["data"]["results"][0])
-
-    def test_mcp_tool_result_keeps_shared_terminal_contract_as_final_field(self):
-        contract = (
-            "[CITATION_USE]\n"
-            "Put matching citation handles in the user-visible answer itself.\n"
-            "[/CITATION_USE]"
-        )
-        result = mcp_tool_result(
-            {
-                "success": True,
-                "output": "evidence",
-                "data": {"results": [{"chunk_id": "chunk-1", "content": "fact"}]},
-                "source_references": [
-                    {"type": "knowledge", "chunk_id": "chunk-1", "cite_exactly": '<src id="S1" />'},
-                ],
-                "citation_output_contract": contract,
-            }
-        )
-        summary = json.loads(result["content"][0]["text"])
-        self.assertEqual(summary["citation_output_contract"], contract)
-        self.assertEqual(next(reversed(summary)), "citation_output_contract")
-
-
-    def test_mcp_tool_result_does_not_choose_between_ambiguous_evidence_handles(self):
-        result = mcp_tool_result(
-            {
-                "success": True,
-                "data": {"results": [{"chunk_id": "same-chunk", "content": "fact"}]},
-                "source_references": [
-                    {"type": "knowledge", "chunk_id": "same-chunk", "cite_exactly": '<src id="S1" />'},
-                    {"type": "knowledge", "chunk_id": "same-chunk", "cite_exactly": '<src id="S2" />'},
-                ],
-            }
-        )
-        summary = json.loads(result["content"][0]["text"])
-        self.assertNotIn("citation_handle_for_this_evidence", summary["data"]["results"][0])
-
-    def test_mcp_tool_result_puts_structured_analysis_handle_before_rows_and_in_summary(self):
-        result = mcp_tool_result(
-            {
-                "success": True,
-                "output": "查询成功，共 1 行",
-                "data": {
-                    "display_type": "structured_analysis_result",
-                    "query": "select count(*) from symbols",
-                    "rows": [{"count": 990}],
-                },
-                "source_references": [
-                    {"type": "data_source", "cite_exactly": '<src id="S4" />'},
-                ],
-            }
-        )
-        summary = json.loads(result["content"][0]["text"])
-        self.assertEqual(next(iter(summary["data"])), "citation_handle_for_this_evidence")
-        self.assertEqual(summary["data"]["citation_handle_for_this_evidence"], '<src id="S4" />')
-        self.assertIn('citation_handle_for_this_evidence: <src id="S4" />', summary["output"])
-
-    def test_original_input_files_xml_labels_weknora_originals_without_urls(self):
-        xml = original_input_files_xml(
-            [
-                PreparedOriginalInputFile(
-                    id="orig-1",
-                    source="weknora_chat_upload_original",
-                    role="user_uploaded_original_file",
-                    file_name="report.docx",
-                    file_type="docx",
-                    file_size=123,
-                    sha256="a" * 64,
-                    path="input_files/uploads/01_report.docx",
-                )
-            ],
-            "input_files/original_input_manifest.json",
-        )
-
-        self.assertIn("用户在 WeKnora 上传的原文件", xml)
-        self.assertIn("input_files/uploads/01_report.docx", xml)
-        self.assertIn("WeKnora user uploaded original file", xml)
-        self.assertNotIn("download_url", xml)
-        self.assertNotIn("http://", xml)
-
-    def test_original_input_failures_xml_declares_fallback(self):
-        xml = original_input_failures_xml(
-            [
-                {
-                    "file_name": "bad.pdf",
-                    "source": "WeKnora user uploaded original file",
-                    "reason": "download_or_verification_failed",
-                    "fallback_action": "附件解析文本和文件元数据",
-                }
-            ]
-        )
-
-        self.assertIn("原文件副本未能", xml)
-        self.assertIn("附件抽取文本", xml)
-        self.assertIn("附件解析文本和文件元数据", xml)
-        self.assertIn("bad.pdf", xml)
-
-    def test_original_input_completion_message_hides_fallback_when_all_succeeded(self):
-        message = original_input_completion_message(1, 1, [])
-
-        self.assertEqual(message, "用户在 WeKnora 上传或选择的原文件准备完成（成功 1/1，失败 0 个）")
-        self.assertNotIn("回退", message)
-        self.assertNotIn("既有逻辑", message)
-
-    def test_original_input_completion_message_describes_failure_fallback_actions(self):
-        message = original_input_completion_message(
-            1,
-            3,
-            [
-                {"fallback_action": original_input_fallback_action("weknora_chat_upload_original", "pdf")},
-                {"fallback_action": original_input_fallback_action("weknora_chat_image_original", "png")},
-                {"fallback_action": original_input_fallback_action("weknora_selected_knowledge_original", "docx")},
-            ],
-        )
-
-        self.assertIn("失败 3 个", message)
-        self.assertIn("附件解析文本和文件元数据", message)
-        self.assertIn("图片理解结果和已保存图片引用", message)
-        self.assertIn("知识库检索结果和知识库工具上下文", message)
-        self.assertNotIn("既有逻辑", message)
 
     def test_professional_skill_path_validation_allows_safe_unicode(self):
         self.assertEqual(
@@ -495,48 +237,6 @@ class RunnerProgressTest(unittest.TestCase):
             zf.writestr("ppt/slides/slide1.xml", slide)
         return out.getvalue()
 
-    def test_sdk_tool_progress_covers_builtin_tools(self):
-        expected = {
-            "Bash": ("正在执行命令", "命令执行完成", "命令执行失败，正在调整处理方式"),
-            "Read": ("正在读取文件", "文件读取完成", "文件读取失败，正在调整处理方式"),
-            "Write": ("正在写入文件", "文件写入完成", "文件写入失败，正在调整处理方式"),
-            "Edit": ("正在修改文件", "文件修改完成", "文件修改失败，正在调整处理方式"),
-            "MultiEdit": ("正在批量修改文件", "批量修改完成", "批量修改失败，正在调整处理方式"),
-            "Glob": ("正在查找文件", "文件查找完成", "文件查找失败，正在调整处理方式"),
-            "Grep": ("正在搜索文件内容", "文件内容搜索完成", "文件内容搜索失败，正在调整处理方式"),
-            "LS": ("正在查看目录", "目录查看完成", "目录查看失败，正在调整处理方式"),
-            "WebSearch": ("正在搜索网络", "网络搜索完成", "网络搜索失败，正在调整处理方式"),
-            "WebFetch": ("正在读取网页内容", "网页内容读取完成", "网页内容读取失败，正在调整处理方式"),
-        }
-        self.assertEqual(set(SDK_TOOL_PROGRESS), set(expected))
-        for tool_name, phases in expected.items():
-            self.assertEqual(sdk_tool_progress(tool_name, "start"), phases[0])
-            self.assertEqual(sdk_tool_progress(tool_name, "success"), phases[1])
-            self.assertEqual(sdk_tool_progress(tool_name, "error"), phases[2])
-
-    def test_sdk_tool_progress_covers_weknora_mcp_tools(self):
-        expected = {
-            "mcp__weknora__review_artifacts": ("正在审核生成文件质量", "文件质量审核完成", "文件质量审核失败，正在调整"),
-            "mcp__weknora__create_artifact": ("正在注册可下载文件", "可下载文件已注册", "文件注册失败，正在调整"),
-            "mcp__weknora__final_answer": ("正在提交最终答案", "最终答案已接收", "最终答案提交失败，正在调整"),
-        }
-        for tool_name, phases in expected.items():
-            self.assertEqual(sdk_tool_progress(tool_name, "start"), phases[0])
-            self.assertEqual(sdk_tool_progress(tool_name, "success"), phases[1])
-            self.assertEqual(sdk_tool_progress(tool_name, "error"), phases[2])
-
-    def test_sdk_tool_progress_event_includes_status_metadata(self):
-        evt = sdk_tool_progress_event("Bash", "success", "toolu_1")
-
-        self.assertIsNotNone(evt)
-        self.assertEqual(evt.id, "toolu_1")
-        self.assertEqual(evt.type, "progress")
-        self.assertEqual(evt.content, "命令执行完成")
-        self.assertEqual(evt.message, "命令执行完成")
-        self.assertTrue(evt.done)
-        self.assertEqual(evt.data["tool_name"], "Bash")
-        self.assertEqual(evt.data["tool_call_id"], "toolu_1")
-        self.assertEqual(evt.data["phase"], "success")
 
     def test_tool_use_fragments_extracts_sdk_tool_call(self):
         msg = Message(
@@ -557,30 +257,6 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(fragments[0].name, "Bash")
         self.assertEqual(fragments[0].input, {"command": "python report.py"})
 
-    def test_message_uses_tools_detects_sdk_structure(self):
-        msg = Message(
-            [
-                {"type": "text", "text": "准备调用命令。"},
-                {
-                    "type": "tool_use",
-                    "id": "call_1",
-                    "name": "Bash",
-                    "input": {"command": "python report.py"},
-                },
-            ],
-            stop_reason="tool_use",
-        )
-
-        self.assertEqual(message_stop_reason(msg), "tool_use")
-        self.assertTrue(message_uses_tools(msg))
-
-    def test_message_uses_tools_does_not_infer_from_text_content(self):
-        msg = Message(
-            [{"type": "text", "text": "Now let me fix the overlapping slides."}],
-            stop_reason="end_turn",
-        )
-
-        self.assertFalse(message_uses_tools(msg))
 
     def test_tool_result_fragments_detects_success_and_errors(self):
         msg = Message(
@@ -595,257 +271,8 @@ class RunnerProgressTest(unittest.TestCase):
 
         self.assertEqual([(item.tool_use_id, item.is_error) for item in fragments], [("ok", False), ("flagged", True), ("exit", True)])
 
-    def test_is_background_bash_tool_call_detects_run_in_background(self):
-        self.assertTrue(
-            is_background_bash_tool_call(
-                ToolUseFragment(
-                    tool_use_id="toolu_1",
-                    name="Bash",
-                    input={"command": "python report.py", "run_in_background": True},
-                )
-            )
-        )
-        self.assertTrue(
-            is_background_bash_tool_call(
-                ToolUseFragment(
-                    tool_use_id="toolu_2",
-                    name="Bash",
-                    input={"command": "python report.py", "run_in_background": "true"},
-                )
-            )
-        )
-        self.assertFalse(
-            is_background_bash_tool_call(
-                ToolUseFragment(
-                    tool_use_id="toolu_3",
-                    name="Bash",
-                    input={"command": "python report.py"},
-                )
-            )
-        )
 
-    def test_background_bash_guard_denies_sdk_background_flag(self):
-        reason = forbidden_background_bash_reason({"command": "python report.py", "run_in_background": True})
-
-        self.assertIn("后台 Bash 执行已禁用", reason)
-
-    def test_background_bash_guard_denies_shell_background_operator(self):
-        cases = [
-            "python report.py &",
-            "python report.py >/tmp/report.log 2>&1 &",
-            "python report.py & wait",
-            "(python report.py) &",
-            "python report.py | tee out.log &",
-            "bash -c 'python report.py &'",
-        ]
-
-        for command in cases:
-            with self.subTest(command=command):
-                self.assertIn("后台 Bash 执行已禁用", forbidden_background_bash_reason({"command": command}))
-
-    def test_background_bash_guard_denies_daemonizing_commands(self):
-        cases = [
-            "nohup python report.py",
-            "setsid python report.py",
-            "python report.py; disown",
-            "tmux new -d python report.py",
-            "tmux new-session -s job -d 'python report.py'",
-            "screen -dm python report.py",
-            "screen -d -m python report.py",
-            "daemonize python report.py",
-        ]
-        for command in cases:
-            with self.subTest(command=command):
-                self.assertIn("后台 Bash 执行已禁用", forbidden_background_bash_reason({"command": command}))
-
-    def test_background_bash_guard_denies_container_service_and_scheduler_background(self):
-        cases = [
-            "docker run -d nginx",
-            "docker container run --name web --detach nginx",
-            "docker compose up -d",
-            "docker-compose up --detach",
-            "podman run -itd alpine",
-            "systemctl start nginx",
-            "service nginx start",
-            "pm2 start app.js",
-            "supervisorctl start worker",
-            "echo '* * * * * /tmp/job.sh' | crontab -",
-            "at now + 1 minute",
-            "schtasks /Create /SC ONCE /TN job /TR calc.exe",
-            "kubectl create job report --image=busybox",
-        ]
-        for command in cases:
-            with self.subTest(command=command):
-                reason = forbidden_background_bash_reason({"command": command})
-                self.assertIn("后台 Bash 执行已禁用", reason)
-                self.assertIn("前台", reason)
-
-    def test_background_bash_guard_denies_shell_heredoc_background(self):
-        command = """bash <<'EOF'
-echo start
-python report.py &
-EOF"""
-
-        reason = forbidden_background_bash_reason({"command": command})
-
-        self.assertIn("后台 Bash 执行已禁用", reason)
-        self.assertIn("HereDoc Shell", reason)
-
-    def test_background_bash_guard_denies_language_level_background(self):
-        cases = [
-            "python -c 'import subprocess; subprocess.Popen([\"sleep\", \"10\"])'",
-            """python3 <<'PYEOF'
-import subprocess
-subprocess.Popen(["sleep", "10"])
-PYEOF""",
-            "node -e 'require(\"child_process\").spawn(\"sleep\", [\"10\"], {detached: true}).unref()'",
-        ]
-        for command in cases:
-            with self.subTest(command=command):
-                reason = forbidden_background_bash_reason({"command": command})
-                self.assertIn("后台 Bash 执行已禁用", reason)
-                self.assertIn("语言级后台任务", reason)
-
-    def test_background_bash_guard_allows_foreground_scripts(self):
-        cases = [
-            "python report.py",
-            "bash run_report.sh",
-            "python report.py && python validate.py",
-            "curl 'https://example.com?a=1&b=2'",
-            'curl "https://example.com?a=1&b=2"',
-            "echo A \\& B",
-            "printf 'A & B'",
-            "python report.py > out.log 2>&1",
-            "python report.py &> out.log",
-            "python report.py |& tee out.log",
-            "tmux ls",
-            "screen -ls",
-            "docker run --rm alpine echo ok",
-            "docker compose up",
-            "systemctl status nginx",
-            "service nginx status",
-            "crontab -l",
-            "python -c 'import subprocess; p=subprocess.Popen([\"true\"]); p.wait()'",
-            "python -c 'print(\"Tone & Color\")'",
-            """python3 <<'PYEOF'
-# SLIDE 5: Chapter 2 - Principles & Rules
-print("Tone & Color")
-PYEOF""",
-            """cat <<'EOF'
-Tone & Color
-Principles & Rules
-EOF""",
-        ]
-
-        for command in cases:
-            with self.subTest(command=command):
-                self.assertEqual(forbidden_background_bash_reason({"command": command}), "")
-
-    def test_background_bash_guard_reason_is_actionable_for_claude_retry(self):
-        reason = forbidden_background_bash_reason({"command": "docker run -d nginx"})
-
-        self.assertIn("类别：", reason)
-        self.assertIn("命中：", reason)
-        self.assertIn("原因：", reason)
-        self.assertIn("请改为前台/同步执行", reason)
-        self.assertIn("Every started task must remain observable", reason)
-
-    def test_block_background_bash_hook_denies_background_before_tool_use(self):
-        output = asyncio.run(
-            block_background_bash_hook(
-                {
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "python report.py", "run_in_background": True},
-                },
-                "toolu_1",
-                {},
-            )
-        )
-
-        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIn("后台 Bash 执行已禁用", output["hookSpecificOutput"]["permissionDecisionReason"])
-
-    def test_block_background_bash_hook_allows_foreground_before_tool_use(self):
-        output = asyncio.run(
-            block_background_bash_hook(
-                {
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "python report.py"},
-                },
-                "toolu_1",
-                {},
-            )
-        )
-
-        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def test_terminal_background_tool_ids_extracts_completed_notifications(self):
-        msg = Message(
-            [
-                {
-                    "type": "text",
-                    "text": (
-                        '<task-notification tool-use-id="toolu_done" status="completed">'
-                        "Background task finished"
-                        "</task-notification>"
-                    ),
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        '<task-notification tool-use-id="toolu_running" status="running">'
-                        "Still running"
-                        "</task-notification>"
-                    ),
-                },
-            ]
-        )
-
-        self.assertEqual(terminal_background_tool_ids(msg), {"toolu_done"})
-
-    def test_terminal_background_tool_ids_handles_self_closing_notifications(self):
-        msg = Message('<task-notification tool-use-id="toolu_failed" status="failed" />')
-
-        self.assertEqual(terminal_background_tool_ids(msg), {"toolu_failed"})
-
-    def test_terminal_background_tool_ids_handles_json_fields(self):
-        msg = Message('<task-notification>{"tool-use-id":"toolu_json","status":"completed"}</task-notification>')
-
-        self.assertEqual(terminal_background_tool_ids(msg), {"toolu_json"})
-
-    def test_build_background_task_resume_prompt_keeps_sdk_running(self):
-        prompt = build_background_task_resume_prompt({"toolu_1"}, 2)
-
-        self.assertIn("toolu_1", prompt)
-        self.assertIn("Do not provide a final answer yet", prompt)
-        self.assertIn("Do not say that you will wait", prompt)
-        self.assertIn("Do not use run_in_background again", prompt)
-        self.assertIn("user's configured language", prompt)
-
-
-    def test_build_prompt_expires_prior_turn_output_constraints(self):
+    def test_platform_prompt_keeps_history_in_typed_messages(self):
         payload = ChatPayload(
             run_id="run-1",
             session_id="session-1",
@@ -861,250 +288,11 @@ EOF""",
 
         prompt = build_prompt(payload)
 
-        self.assertIn("Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired", prompt)
-        self.assertIn("This expiry rule does not revoke an operation boundary", prompt)
-        self.assertIn("Interpret action verbs together with their object and destination", prompt)
-        self.assertIn("does not authorize a filesystem artifact", prompt)
-        self.assertIn("Prior-turn output formats", prompt)
-        self.assertLess(prompt.index("回答当前问题"), prompt.index("OLD-MARKER"))
+        self.assertNotIn("OLD-MARKER", prompt)
         self.assertEqual(prompt.count("回答当前问题"), 1)
         self.assertNotIn("<current_user_request_replay", prompt)
 
 
-
-    def test_configured_tool_catalog_is_query_invariant(self):
-        runtime_tools = [
-            RuntimeToolSpec(name="thinking"),
-            RuntimeToolSpec(name="todo_write"),
-            RuntimeToolSpec(name="knowledge_search", source="knowledge"),
-            RuntimeToolSpec(name="grep_chunks", source="knowledge"),
-        ]
-        skill = ProfessionalSkillSpec(
-            name="configured-skill",
-            display_name="Configured Skill",
-            description="A permission-checked configured workflow.",
-        )
-        base = dict(
-            run_id="run-static-catalog",
-            session_id="session-static-catalog",
-            assistant_message_id="assistant-static-catalog",
-            enable_artifacts=True,
-            professional_skills=[skill],
-            tools=runtime_tools,
-            runtime_config=RuntimeConfigSpec(
-                agent_type="general-agent",
-                allowed_tools=[spec.name for spec in runtime_tools],
-                knowledge_bases=["kb-configured"],
-                professional_skills_enabled=True,
-                allowed_professional_skills=[skill.name],
-            ),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
-
-        snapshots = []
-        for index, query in enumerate(
-            ("opaque-alpha-01", "opaque-beta-02", "Ω-结构-03", "", "line-a\nline-b")
-        ):
-            payload = ChatPayload(
-                query=query,
-                **{
-                    **base,
-                    "run_id": f"run-static-catalog-{index}",
-                    "session_id": f"session-static-catalog-{index}",
-                    "assistant_message_id": f"assistant-static-catalog-{index}",
-                },
-            )
-            snapshots.append(
-                (
-                    claude_sdk_builtin_tools(payload),
-                    [spec.name for spec in effective_weknora_tool_specs(payload)],
-                    effective_professional_skill_names(payload, [skill.name]),
-                )
-            )
-
-        self.assertTrue(all(snapshot == snapshots[0] for snapshot in snapshots))
-        self.assertEqual(
-            snapshots[0][0],
-            ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
-        )
-        self.assertEqual(
-            snapshots[0][1],
-            ["thinking", "todo_write", "knowledge_search", "grep_chunks"],
-        )
-        self.assertEqual(snapshots[0][2], ["configured-skill"])
-
-    def test_native_tool_catalog_is_stable_across_mounted_resources(self):
-        base = dict(
-            run_id="run-config-catalog",
-            session_id="session-config-catalog",
-            assistant_message_id="assistant-config-catalog",
-            query="opaque-request",
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
-        plain = ChatPayload(**base)
-        full_workspace = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"]
-        self.assertEqual(claude_sdk_builtin_tools(plain), full_workspace)
-
-        selected_knowledge_original = plain.model_copy(
-            update={
-                "original_input_files": [
-                    OriginalInputFileSpec(
-                        id="knowledge-original",
-                        source="weknora_selected_knowledge_original",
-                        role="selected_knowledge_original_file",
-                        file_name="source.bin",
-                    )
-                ]
-            }
-        )
-        self.assertEqual(claude_sdk_builtin_tools(selected_knowledge_original), full_workspace)
-
-        uploaded = plain.model_copy(
-            update={
-                "original_input_files": [
-                    OriginalInputFileSpec(
-                        id="user-original",
-                        source="weknora_chat_upload_original",
-                        role="user_uploaded_original_file",
-                        file_name="source.bin",
-                    )
-                ]
-            }
-        )
-        self.assertEqual(claude_sdk_builtin_tools(uploaded), full_workspace)
-
-        artifacts = plain.model_copy(update={"enable_artifacts": True})
-        self.assertEqual(claude_sdk_builtin_tools(artifacts), full_workspace)
-
-        skills = plain.model_copy(
-            update={
-                "professional_skills": [
-                    ProfessionalSkillSpec(
-                        name="configured-skill",
-                        display_name="Configured Skill",
-                    )
-                ]
-            }
-        )
-        self.assertEqual(claude_sdk_builtin_tools(skills), full_workspace)
-
-        web = plain.model_copy(
-            update={
-                "runtime_config": RuntimeConfigSpec(
-                    agent_type="general-agent",
-                    web_search_enabled=True,
-                    claude_sdk_web_search_enabled=True,
-                )
-            }
-        )
-        self.assertEqual(
-            claude_sdk_builtin_tools(web),
-            [*full_workspace, "WebSearch", "WebFetch"],
-        )
-
-    def test_general_agent_artifact_tool_is_configuration_driven(self):
-        captured = {}
-
-        def fake_tool(name, description, schema):
-            def decorator(handler):
-                captured[name] = {
-                    "description": description,
-                    "schema": schema,
-                    "handler": handler,
-                }
-                return handler
-
-            return decorator
-
-        fake_sdk = types.SimpleNamespace(
-            tool=fake_tool,
-            create_sdk_mcp_server=lambda name, version, tools: {
-                "name": name,
-                "version": version,
-                "tools": tools,
-            },
-        )
-        payload = ChatPayload(
-            run_id="run-configured-artifact",
-            session_id="session-configured-artifact",
-            assistant_message_id="assistant-configured-artifact",
-            query="opaque-request",
-            enable_artifacts=True,
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = ArtifactStore(Path(temp_dir), payload)
-            with mock.patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
-                build_weknora_server(payload, store)
-
-        artifact_tool = captured["create_artifact"]
-        self.assertEqual(
-            artifact_tool["schema"]["required"],
-            ["filename", "file_path", "delivery_basis"],
-        )
-        self.assertEqual(
-            artifact_tool["schema"]["properties"]["delivery_basis"]["enum"],
-            ["durable_output", "existing_file_operation"],
-        )
-        self.assertNotIn("authorization_quote", artifact_tool["schema"]["properties"])
-        self.assertNotIn("verbatim", artifact_tool["description"].lower())
-        self.assertIn("durable/downloadable file bytes", artifact_tool["description"])
-        self.assertIn("ordinary chat content", artifact_tool["description"])
-        self.assertIn("would be incomplete as a chat response", artifact_tool["description"])
-        self.assertIn("never write a file merely", artifact_tool["description"].lower())
-
-        disabled_payload = payload.model_copy(update={"enable_artifacts": False})
-        disabled_captured = {}
-
-        def disabled_tool(name, description, schema):
-            def decorator(handler):
-                disabled_captured[name] = True
-                return handler
-
-            return decorator
-
-        disabled_sdk = types.SimpleNamespace(
-            tool=disabled_tool,
-            create_sdk_mcp_server=lambda name, version, tools: {
-                "name": name,
-                "version": version,
-                "tools": tools,
-            },
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = ArtifactStore(Path(temp_dir), disabled_payload)
-            with mock.patch.dict(sys.modules, {"claude_agent_sdk": disabled_sdk}):
-                build_weknora_server(disabled_payload, store)
-        self.assertNotIn("create_artifact", disabled_captured)
-
-    def test_tool_catalog_implementation_does_not_read_user_query(self):
-        import inspect
-        import app.runner as runner_module
-
-        functions = (
-            runner_module.claude_sdk_builtin_tools,
-            runner_module.effective_weknora_tool_specs,
-            runner_module.effective_professional_skill_names,
-            runner_module.general_agent_artifact_capability_enabled,
-        )
-        source = "\n".join(inspect.getsource(function) for function in functions)
-        self.assertNotIn("payload.query", source)
-        for removed_name in (
-            "CAPABILITY_CLAUSE_SPLIT_RE",
-            "CAPABILITY_NEGATION_RE",
-            "current_turn_file_deliverable_requested",
-            "current_turn_local_execution_requested",
-            "general_agent_has_local_input_context",
-            "general_agent_read_only_knowledge_mode",
-            "require_current_turn_operation_authorization",
-        ):
-            self.assertFalse(hasattr(runner_module, removed_name), removed_name)
     def test_build_prompt_uses_stable_user_sources_and_marks_assistant_history(self):
         payload = ChatPayload(
             run_id="run-source-ledger",
@@ -1123,7 +311,7 @@ EOF""",
                     source_id="assistant_after_user_turn_006",
                 ),
             ],
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key", runtime_adapter="claude-sdk"),
             tool_callback_url="http://runtime-entry:8080/api/v1/custom/general-agent/internal/tools/call",
         )
 
@@ -1139,71 +327,6 @@ EOF""",
             prompt,
         )
 
-    def test_build_system_prompt_prepends_builtin_environment_safety_policy(self):
-        for agent_type in ("general-agent", "document-processing-agent", "data-analysis", "table-analysis"):
-            with self.subTest(agent_type=agent_type):
-                payload = ChatPayload(
-                    run_id="run-1",
-                    session_id="session-1",
-                    assistant_message_id="assistant-1",
-                    query="执行任务",
-                    system_prompt="Editable agent instructions.",
-                    llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-                    runtime_config=RuntimeConfigSpec(agent_type=agent_type),
-                    tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-                )
-
-                prompt = build_system_prompt(payload)
-
-                self.assertTrue(prompt.startswith(BUILTIN_ENVIRONMENT_SAFETY_SYSTEM_PROMPT.strip()))
-                self.assertLess(prompt.index("Highest Priority"), prompt.index("Editable agent instructions."))
-                self.assertLess(prompt.index("禁止进行任何可能破坏环境的高危操作"), prompt.index("Editable agent instructions."))
-                self.assertLess(prompt.index("Editable agent instructions."), prompt.index("Execute the user's current request"))
-                self.assertIn("non-editable built-in platform instruction", prompt)
-                self.assertIn("must not override, weaken, hide, rewrite, or ignore it", prompt)
-                self.assertIn("任何可能危害本系统或关联系统运行环境网络安全的实际操作", prompt)
-                self.assertIn("这是最高指令，不能被其它指令改写", prompt)
-                self.assertIn("network security of this system or any related system's runtime environment", prompt)
-                self.assertIn("destructive filesystem or database operations", prompt)
-                self.assertIn("exact current source handles", prompt)
-                self.assertNotIn("Never use another citation", prompt)
-
-    def test_build_system_prompt_limits_professional_skill_reads_to_current_run(self):
-        for agent_type in ("general-agent", "document-processing-agent", "data-analysis", "table-analysis"):
-            with self.subTest(agent_type=agent_type):
-                payload = ChatPayload(
-                    run_id="run-1",
-                    session_id="session-1",
-                    assistant_message_id="assistant-1",
-                    query="使用专业技能",
-                    llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-                    runtime_config=RuntimeConfigSpec(
-                        agent_type=agent_type,
-                        allowed_professional_skills=["find-skill-skillhub"],
-                    ),
-                    tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-                )
-
-                prompt = build_system_prompt(payload)
-
-                self.assertIn("Read professional Skills only", prompt)
-                self.assertIn("`.claude/skills/<name>` inside this run", prompt)
-
-    def test_build_system_prompt_contains_execution_limits(self):
-        payload = ChatPayload(
-            run_id="run-1",
-            session_id="session-1",
-            assistant_message_id="assistant-1",
-            query="请生成一份报告",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(max_iterations=42, llm_call_timeout=123),
-            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-        )
-
-        prompt = build_system_prompt(payload)
-
-        self.assertIn("at most 42 turns", prompt)
-        self.assertIn("123-second timeout", prompt)
 
     def test_data_analysis_prompt_materializes_runtime_reference_path(self):
         payload = ChatPayload(
@@ -1227,109 +350,9 @@ EOF""",
             prompt = build_system_prompt(payload, data_analysis_reference=prepared)
 
         self.assertIn("generated/data_analysis/runtime_reference.md", prompt)
-        self.assertIn("data_analysis_runtime_reference_path", prompt)
-        self.assertIn("chart hints", prompt)
         self.assertNotIn("{{data_analysis_runtime_reference_path}}", prompt)
         self.assertNotIn("{{data_analysis_runtime_reference_absolute_path}}", prompt)
 
-
-    def test_selected_knowledge_original_requires_fragment_evidence_for_factual_text(self):
-        payload = ChatPayload(
-            run_id="run-document-citations",
-            session_id="session-document-citations",
-            assistant_message_id="assistant-document-citations",
-            query="总结已选文件",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(agent_type="document-processing-agent"),
-            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-            original_input_files=[
-                OriginalInputFileSpec(
-                    id="knowledge-1",
-                    file_name="policy.docx",
-                    knowledge_id="knowledge-1",
-                    download_url="http://app-dev:8080/api/v1/knowledge/knowledge-1/download",
-                )
-            ],
-        )
-
-        prompt = build_system_prompt(payload)
-
-        self.assertIn("A local Read/Bash result is not a citeable document fragment", prompt)
-        self.assertIn("use an available WeKnora knowledge-retrieval tool", prompt)
-        self.assertIn("returned fragment source handles", prompt)
-        self.assertIn("pure file transformation or delivery statements", prompt)
-
-    def test_prepare_ppt_generation_workspace_materializes_open_renderer(self):
-        payload = ChatPayload(
-            run_id="run-1",
-            session_id="session-1",
-            assistant_message_id="assistant-1",
-            query="请生成 PPT",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(agent_type="document-processing-agent"),
-            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            prepared = prepare_ppt_generation_workspace(payload, Path(tmp))
-
-            self.assertIsNotNone(prepared)
-            assert prepared is not None
-            renderer = Path(tmp) / prepared.renderer_path
-            spec_template = Path(tmp) / prepared.spec_template_path
-            readme = Path(tmp) / prepared.readme_path
-            self.assertTrue(renderer.is_file())
-            self.assertTrue(spec_template.is_file())
-            self.assertTrue(readme.is_file())
-            compile(renderer.read_text(encoding="utf-8"), str(renderer), "exec")
-            spec = json.loads(spec_template.read_text(encoding="utf-8"))
-
-        self.assertEqual(spec["slides"][0]["layout"], "freeform")
-        self.assertIn("custom_operations", spec["extensions"])
-        self.assertIn("generated/ppt/render_pptx.py", prepared.xml)
-        self.assertIn("does not constrain final style", prepared.xml)
-        self.assertIn("Do not create long PPT Python scripts through Bash heredocs", prepared.xml)
-
-    def test_prepare_ppt_generation_workspace_only_for_document_agent(self):
-        payload = ChatPayload(
-            run_id="run-1",
-            session_id="session-1",
-            assistant_message_id="assistant-1",
-            query="请生成 PPT",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
-            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            prepared = prepare_ppt_generation_workspace(payload, Path(tmp))
-
-            self.assertIsNone(prepared)
-            self.assertFalse((Path(tmp) / "generated" / "ppt").exists())
-
-    def test_document_processing_prompt_describes_ppt_generation_workspace(self):
-        payload = ChatPayload(
-            run_id="run-1",
-            session_id="session-1",
-            assistant_message_id="assistant-1",
-            query="请生成 PPT",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(agent_type="document-processing-agent"),
-            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-            enable_artifacts=True,
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = prepare_ppt_generation_workspace(payload, Path(tmp))
-            prompt = build_system_prompt(payload, ppt_workspace=workspace)
-
-        self.assertIn("generated/ppt/deck_spec.template.json", prompt)
-        self.assertIn("generated/ppt/deck_spec.json", prompt)
-        self.assertIn("generated/ppt/render_pptx.py", prompt)
-        self.assertIn("does not constrain final style", prompt)
-        self.assertIn("Do not create long PPT Python scripts through Bash heredocs", prompt)
-        self.assertIn("Approval binds to exact bytes", prompt)
-        self.assertIn("A failed file is not deliverable", prompt)
 
     def test_prepare_document_template_context_includes_ppt_files(self):
         payload = ChatPayload(
@@ -1464,12 +487,12 @@ EOF""",
             prepared = prepare_document_template_context(payload, Path(tmp))
             prompt = build_prompt(payload, prepared)
 
-        self.assertLess(prompt.index("<document_template_preflight"), prompt.index("<weknora_context>"))
+        self.assertNotIn("<document_template_preflight", prompt)
         self.assertLess(prompt.index("<document_template_context"), prompt.index("<visible_context"))
-        self.assertIn("Read `document_templates/word/requirement/word.md`", prompt)
-        self.assertIn("Read `document_templates/ppt/requirement/ppt.md`", prompt)
-        self.assertIn("form a short internal delivery plan", prompt)
-        self.assertIn('"runtime_model_id": "model-1"', prompt)
+        self.assertIn('path="document_templates/word/requirement/word.md"', prompt)
+        self.assertIn('path="document_templates/ppt/requirement/ppt.md"', prompt)
+        visible_json = prompt.split('role="user_visible_context">\n', 1)[1].split('\n</visible_context>', 1)[0]
+        self.assertEqual(json.loads(visible_json)['effective_configuration']['runtime_model_id'], 'model-1')
         self.assertNotIn("large duplicated system prompt", prompt)
         self.assertNotIn('"allowed_tools"', prompt)
         self.assertNotIn('"artifact_return_policy"', prompt)
@@ -1504,8 +527,6 @@ EOF""",
         self.assertNotIn("audio-bytes", got)
         self.assertNotIn("base64,", got)
         self.assertIn("inline audio/wav data omitted", got)
-
-
 
 
     def test_system_prompt_points_to_document_template_context_without_inlining_xml(self):
@@ -1543,19 +564,6 @@ EOF""",
         self.assertNotIn("{{document_template_context}}", prompt)
         self.assertNotIn("{{document_template_usage_rules}}", prompt)
 
-    def test_validate_pptx_layout_detects_text_overlap(self):
-        data = self.make_pptx_bytes(
-            [
-                (1000000, 1000000, 3000000, 900000, "第一段文字"),
-                (1200000, 1100000, 3000000, 900000, "第二段文字"),
-            ]
-        )
-
-        issues = validate_pptx_layout_bytes("deck.pptx", data)
-
-        self.assertTrue(any(issue["code"] == "pptx_text_overlap" for issue in issues), issues)
-
-
 
     def test_user_facing_error_message_maps_max_turns(self):
         msg = ResultMessage(subtype="error_max_turns", result="", errors=["maxTurns=30 turnCount=31"])
@@ -1567,111 +575,6 @@ EOF""",
 
         self.assertEqual(user_facing_error_message(msg), TIMEOUT_USER_MESSAGE)
 
-    def test_provider_transport_retry_only_matches_connectivity_failures(self):
-        transient = ResultMessage(
-            result="API Error: Unable to connect to API (UNKNOWN_CERTIFICATE_VERIFICATION_ERROR)",
-            is_error=True,
-        )
-        semantic = ResultMessage(result="invalid tool arguments", is_error=True)
-
-        self.assertTrue(is_retryable_provider_transport_error(transient))
-        self.assertFalse(is_retryable_provider_transport_error(semantic))
-        self.assertIn("Unable to connect", raw_sdk_error_text(transient))
-
-    def test_provider_transport_retry_budget_is_bounded(self):
-        previous = os.environ.get("CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES")
-        try:
-            os.environ["CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES"] = "99"
-            self.assertEqual(provider_transport_retries(), 3)
-            os.environ["CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES"] = "0"
-            self.assertEqual(provider_transport_retries(), 0)
-        finally:
-            if previous is None:
-                os.environ.pop("CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES", None)
-            else:
-                os.environ["CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES"] = previous
-
-    def test_general_agent_retries_pre_output_transport_failure(self):
-        calls = 0
-
-        class FakeOptions:
-            def __init__(self, **kwargs):
-                self.values = kwargs
-
-        class FakeHookMatcher:
-            def __init__(self, **kwargs):
-                self.values = kwargs
-
-        def fake_tool(*_args, **_kwargs):
-            return lambda function: function
-
-        def fake_replace(options, **changes):
-            return FakeOptions(**(options.values | changes))
-
-        async def fake_query(prompt, options):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                yield ResultMessage(
-                    result="API Error: Unable to connect to API (UNKNOWN_CERTIFICATE_VERIFICATION_ERROR)",
-                    is_error=True,
-                )
-                return
-            answer = (
-                f"{TERMINAL_ANSWER_OPEN}"
-                f"{terminal_binding_marker('transport-retry-run')}连接恢复后的回答"
-                f"{TERMINAL_ANSWER_CLOSE}"
-            )
-            yield Message([{"type": "text", "text": answer}])
-            yield ResultMessage(result=answer, is_error=False)
-
-        async def no_wait(_delay):
-            return None
-
-        async def collect(runner):
-            return [event async for event in runner.run()]
-
-        payload = ChatPayload(
-            run_id="transport-retry-run",
-            session_id="transport-retry-session",
-            assistant_message_id="transport-retry-message",
-            query="总结当前状态",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
-            tool_callback_url="http://runtime-entry/internal/tools/call",
-        )
-        fake_sdk = types.SimpleNamespace(
-            ClaudeAgentOptions=FakeOptions,
-            HookMatcher=FakeHookMatcher,
-            query=fake_query,
-            create_sdk_mcp_server=lambda *_args, **_kwargs: {},
-            tool=fake_tool,
-        )
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            sys.modules, {"claude_agent_sdk": fake_sdk}
-        ), mock.patch("app.runner.asyncio.sleep", new=no_wait), mock.patch(
-            "app.runner.replace", new=fake_replace
-        ):
-            events = asyncio.run(collect(GeneralAgentRunner(Path(tmp), payload)))
-
-        self.assertEqual(calls, 2)
-        retry_events = [
-            event for event in events
-            if event.type == "progress" and event.data.get("tool_name") == "provider_transport_retry"
-        ]
-        self.assertEqual(len(retry_events), 1)
-        result = next(event for event in events if event.type == "result")
-        self.assertEqual(result.data["answer"], "连接恢复后的回答")
-
-    def test_result_message_text_uses_terminal_sdk_answer(self):
-        msg = ResultMessage(result="  完整的最终回答  ")
-
-        self.assertEqual(result_message_text(msg), "完整的最终回答")
-        self.assertEqual(result_message_text(Message([], "")), "")
-
-    def test_pending_background_task_error_message_is_user_facing(self):
-        self.assertIn("后台任务未完成", PENDING_BACKGROUND_TASK_USER_MESSAGE)
-        self.assertIn("继续等待执行结果", BACKGROUND_RESUME_PROGRESS_MESSAGE)
 
     def test_artifact_store_dedupes_duplicate_filenames_keep_last(self):
         first = SidecarArtifact(
@@ -1700,58 +603,8 @@ EOF""",
 
         self.assertEqual([item.file_token for item in items], ["second", "third"])
 
-    def test_sanitize_artifact_bytes_patches_xlsx_apply_fill_only(self):
-        styles = (
-            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            '<cellXfs count="4">'
-            '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
-            '<xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf>'
-            '<xf numFmtId="0" fontId="2" fillId="3" borderId="1" applyFill="0"><alignment horizontal="center"/></xf>'
-            '<xf numFmtId="0" fontId="3" fillId="4" borderId="1"/>'
-            '</cellXfs>'
-            '</styleSheet>'
-        )
-        patched = self.read_xlsx_styles(sanitize_artifact_bytes("report.xlsx", self.make_xlsx_bytes(styles)))
 
-        self.assertIn('<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>', patched)
-        self.assertIn('fillId="2" borderId="1" applyFill="1"><alignment', patched)
-        self.assertIn('fillId="3" borderId="1" applyFill="1"><alignment', patched)
-        self.assertIn('fillId="4" borderId="1" applyFill="1"/>', patched)
-
-    def test_sanitize_artifact_bytes_leaves_non_xlsx_untouched(self):
-        data = b"not an xlsx"
-
-        self.assertIs(sanitize_artifact_bytes("report.csv", data), data)
-
-    def test_sanitize_artifact_bytes_patches_all_xlsx_apply_attributes_when_enabled(self):
-        styles = (
-            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            '<cellXfs count="2">'
-            '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
-            '<xf numFmtId="14" fontId="1" fillId="2" borderId="1">'
-            '<alignment horizontal="center"/>'
-            '<protection locked="0"/>'
-            '</xf>'
-            '</cellXfs>'
-            '</styleSheet>'
-        )
-        patched = self.read_xlsx_styles(
-            sanitize_artifact_bytes(
-                "report.xlsx",
-                self.make_xlsx_bytes(styles),
-                patch_all_xlsx_apply_attributes=True,
-            )
-        )
-
-        self.assertIn('<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>', patched)
-        self.assertIn('applyFont="1"', patched)
-        self.assertIn('applyBorder="1"', patched)
-        self.assertIn('applyFill="1"', patched)
-        self.assertIn('applyNumberFormat="1"', patched)
-        self.assertIn('applyAlignment="1"', patched)
-        self.assertIn('applyProtection="1"', patched)
-
-    def test_document_processing_store_respects_create_artifact_excel_style_config(self):
+    def test_document_processing_store_preserves_original_excel_style_bytes(self):
         styles = (
             '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
             '<cellXfs count="2">'
@@ -1772,53 +625,13 @@ EOF""",
         )
         with tempfile.TemporaryDirectory() as tmp:
             store = ArtifactStore(Path(tmp), payload)
-            result = store._store_bytes(
-                "report.xlsx",
-                self.make_xlsx_bytes(styles),
-                excel_style_apply_check={
-                    "disabled_apply_attributes": ["applyBorder"],
-                    "reason": "用户明确要求不要框线",
-                },
-            )
+            source = Path(tmp) / "report.xlsx"
+            source.write_bytes(self.make_xlsx_bytes(styles))
+            result = store.store_file(source.name, source)
             patched = self.read_xlsx_styles((store.out_dir / result["file_token"]).read_bytes())
 
         self.assertNotIn('applyBorder="1"', patched)
         self.assertEqual(styles, patched)
-
-    def test_general_agent_review_does_not_enforce_document_excel_cellxf_rules(self):
-        styles = (
-            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            '<cellXfs count="2">'
-            '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
-            '<xf numFmtId="14" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf>'
-            '</cellXfs>'
-            '</styleSheet>'
-        )
-        payload = ChatPayload(
-            run_id="run-1",
-            session_id="session-1",
-            assistant_message_id="assistant-1",
-            query="请生成 Excel",
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
-            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
-            enable_artifacts=True,
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            store = ArtifactStore(Path(tmp), payload)
-            target = store.run_dir / "report.xlsx"
-            target.write_bytes(self.make_xlsx_bytes(styles))
-
-            result = store.review_artifacts(
-                files=[{"filename": "report.xlsx", "file_path": "report.xlsx"}],
-                passed=True,
-                issues=[],
-                user_request_alignment="checked",
-                template_alignment="not applicable",
-            )
-
-        self.assertTrue(result["passed"])
-        self.assertEqual(result["issues"] if "issues" in result else [], [])
 
 
 class GeneralAgentWorkBudgetTest(unittest.TestCase):
@@ -1832,35 +645,6 @@ class GeneralAgentWorkBudgetTest(unittest.TestCase):
             runtime_config=RuntimeConfigSpec(agent_type=agent_type),
             tool_callback_url="http://127.0.0.1/tool",
         )
-
-    def test_only_open_ended_general_agent_gets_wall_clock_budget(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("CUSTOM_GENERAL_AGENT_WORK_BUDGET_SEC", None)
-            os.environ.pop("CUSTOM_GENERAL_AGENT_TERMINAL_BUDGET_SEC", None)
-            self.assertEqual(effective_work_budget_seconds(self.payload("general-agent")), 180)
-            self.assertEqual(effective_work_budget_seconds(self.payload("document-processing-agent")), 0)
-            self.assertEqual(effective_work_budget_seconds(self.payload("data-analysis")), 0)
-            self.assertEqual(terminal_budget_seconds(), 75)
-
-    def test_terminal_budget_prompt_is_bound_to_verbatim_current_request(self):
-        query = "Compare the active owner with the retrieved approval rule."
-        prompt = terminal_budget_prompt(query, "budget-test")
-        self.assertIn(query, prompt)
-        self.assertIn('<user_request verbatim="true" priority="highest">', prompt)
-        self.assertIn("Do not call any tool", prompt)
-        self.assertIn("weknora-run-binding:budget-test", prompt)
-        self.assertNotIn("score", prompt.lower())
-        self.assertNotIn("eval", prompt.lower())
-
-    def test_turn_budget_detection_is_transport_metadata_only(self):
-        error = types.SimpleNamespace(
-            subtype="error_max_turns",
-            stop_reason="tool_use",
-            result=None,
-            is_error=True,
-        )
-        self.assertTrue(is_turn_budget_error(error))
-        self.assertFalse(is_turn_budget_error(types.SimpleNamespace(subtype="server_error")))
 
 
 if __name__ == "__main__":

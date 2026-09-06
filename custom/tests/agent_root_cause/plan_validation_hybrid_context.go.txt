@@ -1,0 +1,48 @@
+package agent
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+
+    agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+    "github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
+    "github.com/Tencent/WeKnora/internal/types"
+    "github.com/stretchr/testify/require"
+    "gopkg.in/yaml.v3"
+)
+
+// Export the real shared builders and current tool definitions for an isolated
+// next-action comparison. This is not presented as a complete HTTP replay.
+func TestPlanValidationExportHybridContext(t *testing.T) {
+    raw, err := os.ReadFile("../../config/prompt_templates/agent_system_prompt.yaml")
+    require.NoError(t, err)
+    var templates struct { Templates []struct { ID string `yaml:"id"`; Content string `yaml:"content"` } `yaml:"templates"` }
+    require.NoError(t, yaml.Unmarshal(raw, &templates))
+    var prompt string
+    for _, p := range templates.Templates { if p.ID == "hybrid_rag_wiki_agent" { prompt = p.Content } }
+    require.NotEmpty(t, prompt)
+    const kbID = "2f825a41-bf7d-4156-b904-6b15327df36b"
+    e := newTestEngine(t, &mockChat{})
+    e.systemPromptTemplate = prompt
+    e.knowledgeBasesInfo = []*KnowledgeBaseInfo{{ID: kbID, Name: "人工回归隔离库-20260905", Type: "document", DocCount: 0, Capabilities: []string{"wiki", "chunks"}, Description: "智能体修复验证专用，仅包含新建测试资料"}}
+    registry := agenttools.NewToolRegistry()
+    scopes := agenttools.NewWikiScopesFromKBIDs([]string{kbID})
+    entries := []types.Tool{
+        agenttools.NewKnowledgeSearchTool(nil,nil,nil,nil,nil,nil,e.config,nil),
+        agenttools.NewGrepChunksTool(nil,nil),
+        agenttools.NewWikiSearchTool(nil,nil,scopes),
+        agenttools.NewWikiReadPageTool(nil,nil,scopes),
+        agenttools.NewGetDocumentInfoTool(nil,nil,nil),
+        agenttools.NewListKnowledgeChunksTool(nil,nil,nil),
+        agenttools.NewWikiFlagIssueTool(nil,[]string{kbID}),
+        &conversationmemory.ReadTool{},
+    }
+    for _, tool := range entries { registry.RegisterTool(tool) }
+    messages := e.buildMessagesWithLLMContext(e.buildSystemPrompt(context.Background()), "白鹭培训预算是否已经确认？请说明依据。", "diagnostic-stage", nil, nil)
+    exported := map[string]interface{}{"messages": messages, "post_tool_reminder": buildPostToolCurrentTaskReminder("白鹭培训预算是否已经确认？请说明依据。"), "functions": registry.GetFunctionDefinitions(), "fidelity": "real prompt/message builders and tool definitions; stage replay, no original request timestamp or opaque session state"}
+    out, err := json.MarshalIndent(exported,"","  ")
+    require.NoError(t,err)
+    require.NoError(t,os.WriteFile("/out/hybrid-stage-context.json",out,0600))
+}

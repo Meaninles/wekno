@@ -561,6 +561,7 @@ import { getKnowledgeChunksSummaryHtml } from '@/utils/knowledgeChunksDisplay';
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
 import { getChunkByIdOnly } from '@/api/knowledge-base';
 import { getWikiPage, type WikiPage } from '@/api/wiki';
+import { withWikiDirectoryEvidence } from '@/custom/modules/sourceReferences/wikiCitation';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useUIStore } from '@/stores/ui';
 import { useSettingsStore } from '@/stores/settings';
@@ -911,7 +912,7 @@ const openWikiDrawer = async (kbId: string, slug: string) => {
     window.dispatchEvent(new CustomEvent('weknora:wiki-drawer-open'));
     const page = await resolveWikiPage(kbId, slug);
     currentWikiKbId.value = page.knowledge_base_id || kbId;
-    wikiDrawerPage.value = page;
+    wikiDrawerPage.value = withWikiDirectoryEvidence(page, sourceReferenceItems.value);
     wikiDrawerVisible.value = true;
   } catch (e) {
     console.error(`Failed to load page ${slug}:`, e);
@@ -1042,9 +1043,9 @@ configureMarkedForChatMarkdown();
 
 // Event stream
 const eventStream = computed(() => props.session?.agentEventStream || []);
-const usesClaudeSDKTerminalDelivery = computed(
+const usesRuntimeTerminalDelivery = computed(
   () =>
-    (props.session as unknown as Record<string, unknown>)?._usesClaudeSDKTerminalDelivery ===
+    (props.session as unknown as Record<string, unknown>)?._usesRuntimeTerminalDelivery ===
     true,
 );
 const liveProjection = computed<LiveAgentProjection | null>(() =>
@@ -1168,7 +1169,7 @@ const showIntermediateSteps = ref(false);
 const hasAnswerStarted = computed(() => {
   const projectedAnswer = liveProjection.value?.activeAnswer;
   if (
-    usesClaudeSDKTerminalDelivery.value &&
+    usesRuntimeTerminalDelivery.value &&
     !props.session?.is_completed &&
     liveProjection.value
   ) {
@@ -1191,7 +1192,7 @@ const hasAnswerStarted = computed(() => {
 // model starts producing answer-style text, give it full height to breathe.
 const answerEverStarted = computed(() => {
   if (
-    usesClaudeSDKTerminalDelivery.value &&
+    usesRuntimeTerminalDelivery.value &&
     !props.session?.is_completed &&
     liveProjection.value
   ) {
@@ -1219,7 +1220,7 @@ watch(eventStream, (stream) => {
 // Check if conversation is done (based on answer event with done=true or stop event)
 const isConversationDone = computed(() => {
   if (props.session?.is_completed) return true;
-  const projection = usesClaudeSDKTerminalDelivery.value ? liveProjection.value : null;
+  const projection = usesRuntimeTerminalDelivery.value ? liveProjection.value : null;
   if (projection?.terminalEvent) return true;
   if (projection?.activeAnswer?.done === true && projection.activeAnswer.superseded !== true) {
     return true;
@@ -1260,7 +1261,7 @@ let streamingMermaidRenderId = 0;
 
 const activeAnswerMarkdown = computed(() => {
   if (
-    usesClaudeSDKTerminalDelivery.value &&
+    usesRuntimeTerminalDelivery.value &&
     !isConversationDone.value &&
     liveProjection.value?.activeAnswer
   ) {
@@ -1280,7 +1281,7 @@ const activeAnswerMarkdown = computed(() => {
 // smoothed typewriter text for this event and the raw content for any others.
 const activeAnswerEventRef = computed(() => {
   if (
-    usesClaudeSDKTerminalDelivery.value &&
+    usesRuntimeTerminalDelivery.value &&
     !isConversationDone.value &&
     liveProjection.value?.activeAnswer
   ) {
@@ -1360,7 +1361,7 @@ watch(answerFullyRendered, (ready) => {
 // Agent: dots until the turn completes. RAG: pipeline dots before answer; answer stream dots after.
 const showLiveProcessPreview = computed(
   () =>
-    usesClaudeSDKTerminalDelivery.value &&
+    usesRuntimeTerminalDelivery.value &&
     !isConversationDone.value &&
     !props.ragMode &&
     !shareMode.value,
@@ -1883,9 +1884,21 @@ const generalAgentArtifactResults = computed<PromotedResultBlock[]>(() => {
     );
   const latest = completedResults[completedResults.length - 1];
   if (!latest) return [];
+  // Each real create_artifact call delivers one file. Keep every filename's
+  // latest successful version; a failed replacement cannot hide a ready file.
+  const files = new Map<string, Record<string, any>>();
+  for (const event of completedResults) {
+    for (const file of event.tool_data?.artifacts || []) {
+      files.set(file.filename || file.artifact_id, file);
+    }
+  }
+  const artifacts = [...files.values()];
   return [{
     display_type: 'general_agent_artifacts',
-    tool_data: latest.tool_data,
+    tool_data: { ...latest.tool_data, artifacts,
+      artifact_returned_count: artifacts.length,
+      artifact_returned_size: artifacts.reduce((total, file) => total + (file.file_size || 0), 0),
+    },
     output: latest.output,
     arguments: latest.arguments,
   }];
@@ -1935,7 +1948,7 @@ const displayEvents = computed(() => {
   // avoids rebuilding the complete event tree for every token while still
   // keeping approval/OAuth cards actionable and the current answer visible.
   if (
-    usesClaudeSDKTerminalDelivery.value &&
+    usesRuntimeTerminalDelivery.value &&
     !isConversationDone.value &&
     liveProjection.value
   ) {

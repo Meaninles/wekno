@@ -2,7 +2,7 @@ package generalagent
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -51,8 +51,8 @@ func TestBuildGeneralAgentHistoryKeepsRecentPairsAndBuildsCompleteUserLedger(t *
 	if history[0].SourceID != "user_message_request-6-user" || history[2].SourceID != "user_message_request-7-user" {
 		t.Fatalf("recent user source IDs are not stable: %#v", history)
 	}
-	if history[1].SourceID != "assistant_after_user_message_request-6-user" ||
-		!strings.Contains(history[1].Content, `authority="non_source"`) {
+	if history[1].SourceID != "assistant_message_request-6-assistant" ||
+		!strings.Contains(history[1].Content, `authority="model_output_not_evidence"`) {
 		t.Fatalf("historical assistant answer was not marked non-authoritative: %#v", history[1])
 	}
 	for _, expected := range []string{"user-fact-1", "user-fact-5"} {
@@ -107,76 +107,55 @@ func TestDedupeSidecarArtifactsByFilenameKeepLast(t *testing.T) {
 	}
 }
 
-func TestArtifactReturnPolicyRemovesCountLimitOnlyForKnowledgeBaseManager(t *testing.T) {
-	manager := artifactReturnPolicy(types.AgentTypeKnowledgeBaseManager)
+func TestArtifactReturnPolicyAdmitsAtRegistrationWithoutCountTruncation(t *testing.T) {
+	manager := artifactReturnPolicy()
 	if manager["artifact_count_limited"] != false || manager["max_artifact_count"] != nil {
 		t.Fatalf("manager policy = %#v, want unlimited artifact count", manager)
 	}
 	if manager["total_return_size_limit_bytes"] != int64(128*1024*1024) {
 		t.Fatalf("manager size limit = %v, want 128MB", manager["total_return_size_limit_bytes"])
 	}
+}
 
-	general := artifactReturnPolicy(types.AgentTypeGeneralAgent)
-	if general["artifact_count_limited"] != true || general["max_artifact_count"] != 5 {
-		t.Fatalf("general policy = %#v, want five-artifact limit", general)
+func TestArtifactDeliveryBelongsToItsActualToolCall(t *testing.T) {
+	for _, origin := range []string{"workspace", "sdk"} {
+		t.Run(origin, func(t *testing.T) {
+			run, bus := &activeRun{sessionID: "session"}, event.NewEventBus()
+			var results []event.AgentToolResultData
+			bus.On(event.EventAgentToolResult, func(_ context.Context, e event.Event) error {
+				results = append(results, e.Data.(event.AgentToolResultData))
+				return nil
+			})
+			item := SidecarArtifact{FileToken: "token", ArtifactID: "stored", FileName: "report.pdf",
+				FileSize: 12, SHA256: "hash", Persisted: true, DownloadURL: "/download"}
+			var output any = item
+			if origin == "sdk" {
+				encoded, _ := json.Marshal(item)
+				output = string(encoded)
+			}
+			for _, phase := range []string{"start", "success", "success"} {
+				data, _ := json.Marshal(map[string]any{"tool_call_id": "model-call", "tool_name": "create_artifact",
+					"phase": phase, "origin": origin, "output": output, "duration_ms": 91})
+				run.recordRuntimeToolEvent(context.Background(), bus, sidecarProgressDataFromEvent(StreamEvent{Data: data}))
+			}
+			steps := run.snapshotSteps("")
+			if len(results) != 1 || len(steps) != 1 || results[0].ToolCallID != "model-call" || results[0].Duration != 91 {
+				t.Fatalf("delivery added a fake tool or lost identity/duration: %+v / %+v", results, steps)
+			}
+			data := results[0].Data
+			if data["display_type"] != displayTypeArtifacts || data["artifacts"].([]map[string]interface{})[0]["artifact_id"] != "stored" {
+				t.Fatalf("actual committed file missing from real tool: %+v", data)
+			}
+		})
 	}
 }
 
-func TestBuildArtifactToolResultIncludesPersistFailureNotice(t *testing.T) {
-	data, output, emit := buildArtifactToolResult(&ChatResult{
-		ArtifactOriginalCount: 1,
-		ArtifactReturnedCount: 1,
-	}, nil, errors.New("ERROR: value too long for type character varying(36)"))
-
-	if !emit {
-		t.Fatalf("emit = false, want true")
-	}
-	if data["display_type"] != displayTypeArtifacts {
-		t.Fatalf("display_type = %v, want %s", data["display_type"], displayTypeArtifacts)
-	}
-	if data["persist_failed"] != true {
-		t.Fatalf("persist_failed = %v, want true", data["persist_failed"])
-	}
-	if got := data["persist_error"]; !strings.Contains(got.(string), "value too long") {
-		t.Fatalf("persist_error = %v, want value-too-long detail", got)
-	}
-	notice, _ := data["notice"].(string)
-	if !strings.Contains(notice, "保存下载记录失败") || !strings.Contains(notice, "暂时无法提供下载链接") {
-		t.Fatalf("notice = %q, want explicit persistence failure", notice)
-	}
-	if !strings.Contains(output, "保存下载记录失败") {
-		t.Fatalf("output = %q, want persistence failure", output)
-	}
-}
-
-func TestBuildArtifactToolResultSerializesArtifactsAsMapList(t *testing.T) {
-	data, _, emit := buildArtifactToolResult(&ChatResult{
-		ArtifactOriginalCount: 1,
-		ArtifactReturnedCount: 1,
-	}, []ArtifactResult{{
-		ArtifactID:  "artifact-1",
-		FileName:    "report.pdf",
-		FileType:    "pdf",
-		FileSize:    1234,
-		SHA256:      "abc123",
-		DownloadURL: "/api/v1/custom/general-agent/artifacts/artifact-1/download",
-	}}, nil)
-
-	if !emit {
-		t.Fatalf("emit = false, want true")
-	}
-	artifacts, ok := data["artifacts"].([]map[string]interface{})
-	if !ok {
-		t.Fatalf("artifacts type = %T, want []map[string]interface{}", data["artifacts"])
-	}
-	if len(artifacts) != 1 {
-		t.Fatalf("artifacts len = %d, want 1", len(artifacts))
-	}
-	if got := artifacts[0]["artifact_id"]; got != "artifact-1" {
-		t.Fatalf("artifact_id = %v, want artifact-1", got)
-	}
-	if got := artifacts[0]["filename"]; got != "report.pdf" {
-		t.Fatalf("filename = %v, want report.pdf", got)
+func TestRuntimePromptUsesSharedCitationProtocolOnce(t *testing.T) {
+	for _, body := range []string{"Use the available tools.", sourcerefs.EnsureGenerationContract("Custom instructions.")} {
+		prompt := renderSystemPrompt(context.Background(), body, false)
+		if strings.Count(prompt, "[WEKNORA_CITATION_OUTPUT]") != 1 || !strings.Contains(prompt, `<src id="S1" />`) {
+			t.Fatalf("runtime did not receive the common source protocol exactly once: %s", prompt)
+		}
 	}
 }
 
@@ -248,27 +227,9 @@ func TestConfiguredSkillSelectionsUseSplitFields(t *testing.T) {
 		},
 	}
 
-	lightMode, lightNames := configuredLightweightSkillSelection(agent)
-	if lightMode != "selected" || strings.Join(lightNames, ",") != "light-a,light-b" {
-		t.Fatalf("light selection = (%q, %v), want split lightweight fields", lightMode, lightNames)
-	}
 	proMode, proNames := configuredProfessionalSkillSelection(agent)
 	if proMode != "selected" || strings.Join(proNames, ",") != "pro-a" {
 		t.Fatalf("professional selection = (%q, %v), want split professional fields", proMode, proNames)
-	}
-}
-
-func TestConfiguredLightweightSkillSelectionFallsBackToLegacyFields(t *testing.T) {
-	agent := &types.CustomAgent{
-		Config: types.CustomAgentConfig{
-			SkillsSelectionMode: "selected",
-			SelectedSkills:      []string{"legacy-a"},
-		},
-	}
-
-	mode, names := configuredLightweightSkillSelection(agent)
-	if mode != "selected" || strings.Join(names, ",") != "legacy-a" {
-		t.Fatalf("light selection = (%q, %v), want legacy fallback", mode, names)
 	}
 }
 
@@ -391,78 +352,6 @@ func TestEmitSidecarAnswerUsesSegmentIDAndDone(t *testing.T) {
 	}
 }
 
-func TestEmitSidecarProductionCandidateFiltersUnsupportedCitationsBeforeSSE(t *testing.T) {
-	bus := event.NewEventBus()
-	var got []event.AgentFinalAnswerData
-	bus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
-		data, _ := evt.Data.(event.AgentFinalAnswerData)
-		got = append(got, data)
-		return nil
-	})
-	ref := &types.SearchResult{
-		ID:              "chunk-1",
-		Content:         "supported fact",
-		EvidenceContent: "supported fact",
-		KnowledgeID:     "knowledge-1",
-		KnowledgeBaseID: "kb-1",
-		KnowledgeTitle:  "manual.md",
-		ChunkType:       string(types.ChunkTypeText),
-	}
-	sourcerefs.AssignCitationIDs([]*types.SearchResult{ref})
-
-	filtered, cited, report := emitSidecarProductionCandidate(
-		context.Background(),
-		bus,
-		"session-1",
-		"request-1",
-		"answer-1",
-		`supported <src id="S1" /> stale <src id="S9" />`,
-		[]*types.SearchResult{ref},
-	)
-
-	if filtered != `supported <src id="S1" /> stale` {
-		t.Fatalf("filtered = %q", filtered)
-	}
-	if len(cited) != 1 || len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S9" {
-		t.Fatalf("citation result = cited:%d report:%+v", len(cited), report)
-	}
-	if len(got) != 2 || got[0].Content != filtered || got[0].Done || !got[1].Done || got[1].Content != "" {
-		t.Fatalf("SSE candidate mismatch: %+v", got)
-	}
-}
-
-func TestEmitSidecarProductionCandidateRepairsMissingCitationBeforeSSE(t *testing.T) {
-	bus := event.NewEventBus()
-	var got []event.AgentFinalAnswerData
-	bus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
-		data, _ := evt.Data.(event.AgentFinalAnswerData)
-		got = append(got, data)
-		return nil
-	})
-	ref := &types.SearchResult{
-		ID: "retention", Content: "The audit service retains immutable security logs for ninety days after each completed operation.",
-		EvidenceContent: "The audit service retains immutable security logs for ninety days after each completed operation.",
-		KnowledgeID:     "security-manual", KnowledgeBaseID: "kb-security", KnowledgeTitle: "安全手册.md",
-		ChunkType: string(types.ChunkTypeText),
-	}
-	sourcerefs.AssignCitationIDs([]*types.SearchResult{ref})
-
-	answer, cited, report := emitSidecarProductionCandidate(
-		context.Background(), bus, "session-2", "request-2", "answer-2",
-		"The audit service retains immutable security logs for ninety days after each completed operation.", []*types.SearchResult{ref},
-	)
-
-	if answer != `The audit service retains immutable security logs for ninety days after each completed operation.<src id="S1" />` {
-		t.Fatalf("production answer did not receive the unambiguous current-turn citation: %q", answer)
-	}
-	if len(cited) != 1 || report.EvidenceAvailableUncited {
-		t.Fatalf("citation result = cited:%d report:%+v", len(cited), report)
-	}
-	if len(got) != 2 || got[0].Content != answer || got[0].Done || !got[1].Done {
-		t.Fatalf("SSE did not receive the repaired production candidate: %+v", got)
-	}
-}
-
 func TestEmitSidecarProgressUsesAgentProgress(t *testing.T) {
 	svc := &Service{}
 	bus := event.NewEventBus()
@@ -506,6 +395,7 @@ func TestEmitSidecarProgressUsesAgentProgress(t *testing.T) {
 
 func TestEmitSidecarStatusProgressDoesNotBecomeATool(t *testing.T) {
 	svc := &Service{}
+	active := &activeRun{}
 	bus := event.NewEventBus()
 	var got event.AgentProgressData
 	bus.On(event.EventAgentProgress, func(ctx context.Context, evt event.Event) error {
@@ -521,7 +411,7 @@ func TestEmitSidecarStatusProgressDoesNotBecomeATool(t *testing.T) {
 		Type:    "progress",
 		Content: "正在整理最终回答",
 		Data:    []byte(`{"progress_kind":"assistant_status","progress_id":"status-1","phase":"start","transient":true}`),
-	}, &streamed, &lastID, &lastDone, nil)
+	}, &streamed, &lastID, &lastDone, active)
 
 	if got.ToolName != "" {
 		t.Fatalf("status progress tool name = %q, want empty", got.ToolName)
@@ -531,5 +421,47 @@ func TestEmitSidecarStatusProgressDoesNotBecomeATool(t *testing.T) {
 	}
 	if got.Metadata["progress_kind"] != "assistant_status" {
 		t.Fatalf("progress kind = %#v", got.Metadata["progress_kind"])
+	}
+	if len(active.snapshotSteps("")) != 0 {
+		t.Fatal("status-only events must not enter tool history")
+	}
+}
+
+func TestSidecarRuntimeToolsUsePlatformEventAndHistoryContract(t *testing.T) {
+	for _, origin := range []string{"workspace", "sdk", "runtime_validation"} {
+		t.Run(origin, func(t *testing.T) {
+			svc, bus, run := &Service{}, event.NewEventBus(), &activeRun{sessionID: "session"}
+			var calls []event.AgentToolCallData
+			var results []event.AgentToolResultData
+			bus.On(event.EventAgentToolCall, func(_ context.Context, e event.Event) error {
+				calls = append(calls, e.Data.(event.AgentToolCallData))
+				return nil
+			})
+			bus.On(event.EventAgentToolResult, func(_ context.Context, e event.Event) error {
+				results = append(results, e.Data.(event.AgentToolResultData))
+				return nil
+			})
+			var streamed strings.Builder
+			id, done := "", false
+			for _, phase := range []string{"start", "start", "error", "error"} {
+				data, _ := json.Marshal(map[string]any{"tool_call_id": "call", "tool_name": "execute_code",
+					"phase": phase, "origin": origin, "arguments": map[string]any{"code": "raise Exception('failure')"},
+					"output": map[string]any{"success": false, "stderr": "actual failure"}, "duration_ms": 42})
+				svc.emitSidecarEvent(context.Background(), bus, "session", "answer", StreamEvent{
+					Type: "runtime_tool", ID: "call", Data: data,
+				}, &streamed, &id, &done, run)
+			}
+			steps := run.snapshotSteps("")
+			if len(calls) != 1 || len(results) != 1 || len(steps) != 1 || sourcerefs.AgentToolCallCount(steps) != 1 {
+				t.Fatalf("duplicate or missing actual tool: calls=%d results=%d steps=%+v", len(calls), len(results), steps)
+			}
+			call := steps[0].ToolCalls[0]
+			if call.Duration != 42 || call.Result.Success || !strings.Contains(call.Result.Output, "actual failure") || call.Args["code"] != "raise Exception('failure')" {
+				t.Fatalf("tool audit lost actual input/result/timing: %+v", call)
+			}
+			if call.Result.Data != nil || calls[0].ToolCallID != results[0].ToolCallID {
+				t.Fatal("runtime tools must not duplicate their payload as progress metadata")
+			}
+		})
 	}
 }

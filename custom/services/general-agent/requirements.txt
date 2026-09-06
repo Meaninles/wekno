@@ -20,3 +20,6 @@ reportlab==4.2.5
 pillow==11.1.0
 beautifulsoup4==4.12.3
 markdown==3.7
+
+httpx==0.28.1
+jsonschema==4.26.0

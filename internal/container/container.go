@@ -1543,14 +1543,18 @@ func registerDataSourceScheduler(
 func registerHousekeepingService(
 	svc *service.HousekeepingService,
 	coordinator *maintenance.Coordinator,
+	knowledge interfaces.KnowledgeService,
 ) error {
 	if svc == nil {
 		return nil
 	}
+	if cleanup, ok := knowledge.(interface{ CleanupRetiredIndexes(context.Context) error }); ok {
+		svc.SetIndexCleanup(cleanup.CleanupRetiredIndexes)
+	}
 	return coordinator.Register(maintenance.Hook{
 		Name: "knowledge-housekeeping",
-		Start: func(context.Context) error {
-			return svc.Start(context.Background())
+		Start: func(ctx context.Context) error {
+			return svc.Start(ctx)
 		},
 		Stop: svc.Stop,
 	})

@@ -103,13 +103,9 @@ func TestFilterAnswerCitationsDropsMalformedOpeningClosingAndIncompleteTags(t *t
 	answer := `甲。<src id="S1"></src>乙。</doc><source id="S1" /><document source_id="S2" />` +
 		`无空格。<src id="S1"/> 多余空格。<src  id="S1" />丙。<src id="S1"`
 	filtered, refs, report := FilterAnswerCitations(answer, citationTestRefs())
-	if strings.Contains(filtered, "<src") || strings.Contains(filtered, "</src") ||
-		strings.Contains(filtered, "</doc") || strings.Contains(filtered, "<source") ||
-		strings.Contains(filtered, "<document") {
-		t.Fatalf("malformed citation markup survived: %q", filtered)
-	}
-	if len(refs) != 0 || report.ForbiddenTags < 6 || report.IncompleteTags != 1 {
-		t.Fatalf("unexpected malformed-tag report: %#v", report)
+	expected := `甲。<src id="S1" />乙。无空格。<src id="S1" /> 多余空格。<src id="S1" />丙。`
+	if filtered != expected || len(refs) != 1 || CitationID(refs[0]) != "S1" || report.IncompleteTags != 1 {
+		t.Fatalf("registry-backed aliases must normalize without changing prose: %q %#v", filtered, report)
 	}
 }
 
@@ -160,116 +156,6 @@ func TestCollapseAdjacentDuplicateCitationsPreservesLaterRuns(t *testing.T) {
 	}
 }
 
-func TestFilterAnswerCitationsMovesExactWholeListCitationAfterFinalItem(t *testing.T) {
-	refs := []*types.SearchResult{{
-		ID: "chunk-methods", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
-		ChunkType:       string(types.ChunkTypeText),
-		Content:         "采购方式有招标采购、询比采购、竞价采购、谈判采购、框架协议采购和单源采购六种。",
-		EvidenceContent: "采购方式有招标采购、询比采购、竞价采购、谈判采购、框架协议采购和单源采购六种。",
-		Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "chunk-methods", "source_type": SourceTypeKnowledge},
-	}}
-	answer := "采购方式共有六种<src id=\"S1\" />：\n\n1. **招标采购**\n2. **询比采购**\n3. **竞价采购**\n4. **谈判采购**\n5. **框架协议采购**\n6. **单源采购**"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if strings.Index(filtered, `<src id="S1" />`) < strings.Index(filtered, "单源采购") {
-		t.Fatalf("whole-list citation was not moved after the final item: %q", filtered)
-	}
-	if len(cited) != 1 || report.RelocatedListCitations != 1 || report.UnsupportedListCitations != 0 {
-		t.Fatalf("unexpected cited refs/report: refs=%#v report=%#v", cited, report)
-	}
-}
-
-func TestFilterAnswerCitationsCompletesRepeatedListAfterShortTransition(t *testing.T) {
-	refs := []*types.SearchResult{{
-		ID: "chunk-methods", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
-		ChunkType:       string(types.ChunkTypeText),
-		Content:         "采购方式有招标采购、询比采购、竞价采购、谈判采购、框架协议采购和单源采购六种。",
-		EvidenceContent: "采购方式有招标采购、询比采购、竞价采购、谈判采购、框架协议采购和单源采购六种。",
-		Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "chunk-methods", "source_type": SourceTypeKnowledge},
-	}}
-	answer := "第三十二条明确列出六种采购方式。<src id=\"S1\" />\n\n这六种采购方式分别为：\n\n1. **招标采购**\n2. **询比采购**\n3. **竞价采购**\n4. **谈判采购**\n5. **框架协议采购**\n6. **单源采购**"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if strings.Count(filtered, `<src id="S1" />`) != 2 || strings.LastIndex(filtered, `<src id="S1" />`) < strings.Index(filtered, "单源采购") {
-		t.Fatalf("repeated supported list did not receive a trailing citation: %q", filtered)
-	}
-	if len(cited) != 1 || report.CompletedListCitations != 1 || report.RelocatedListCitations != 0 {
-		t.Fatalf("unexpected cited refs/report: refs=%#v report=%#v", cited, report)
-	}
-}
-
-func TestFilterAnswerCitationsDoesNotCompleteListAfterLongOrStructuralBridge(t *testing.T) {
-	refs := citationTestRefs()
-	answer := "事实。<src id=\"S1\" />\n\n## 另一节：\n\n1. 第一类\n2. 第二类\n3. 第三类\n4. 第四类"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if filtered != answer || len(cited) != 1 || report.CompletedListCitations != 0 {
-		t.Fatalf("structural bridge must not acquire a citation: filtered=%q refs=%#v report=%#v", filtered, cited, report)
-	}
-}
-
-func TestFilterAnswerCitationsDropsClearlyMismatchedWholeListCitation(t *testing.T) {
-	refs := []*types.SearchResult{{
-		ID: "chunk-thresholds", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
-		ChunkType:       string(types.ChunkTypeText),
-		Content:         "施工合同估算价达到400万元时必须公开招标。",
-		EvidenceContent: "施工合同估算价达到400万元时必须公开招标。",
-		Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "chunk-thresholds", "source_type": SourceTypeKnowledge},
-	}}
-	answer := "采购方式共有六种<src id=\"S2\" />：\n\n1. 招标采购\n2. 询比采购\n3. 竞价采购\n4. 谈判采购\n5. 框架协议采购\n6. 单源采购"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if strings.Contains(filtered, "<src") || len(cited) != 0 || report.UnsupportedListCitations != 1 {
-		t.Fatalf("clearly mismatched list citation survived: filtered=%q refs=%#v report=%#v", filtered, cited, report)
-	}
-}
-
-func TestFilterAnswerCitationsLeavesShortAmbiguousListUntouched(t *testing.T) {
-	refs := citationTestRefs()
-	answer := "可分两类<src id=\"S1\" />：\n\n- 第一类\n- 第二类"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if filtered != answer || len(cited) != 1 || report.RelocatedListCitations != 0 || report.UnsupportedListCitations != 0 {
-		t.Fatalf("short ambiguous list should not be normalized: filtered=%q refs=%#v report=%#v", filtered, cited, report)
-	}
-}
-
-func TestFilterAnswerCitationsDoesNotApplyDocumentListRulesToWebEvidence(t *testing.T) {
-	refs := []*types.SearchResult{{
-		ID:              "https://example.com/source",
-		Content:         "网页证据",
-		EvidenceContent: "网页证据",
-		Metadata: map[string]string{
-			MetadataCitationID: "S3",
-			"source_type":      SourceTypeWeb,
-			"url":              "https://example.com/source",
-		},
-	}}
-	answer := "网页列出六项<src id=\"S3\" />：\n\n1. 第一项\n2. 第二项\n3. 第三项\n4. 第四项\n5. 第五项\n6. 第六项"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if filtered != answer || len(cited) != 1 || report.RelocatedListCitations != 0 || report.UnsupportedListCitations != 0 {
-		t.Fatalf("document-only list normalization changed web evidence: filtered=%q refs=%#v report=%#v", filtered, cited, report)
-	}
-}
-
-func TestFilterAnswerCitationsMovesExactlySupportedWikiListCitation(t *testing.T) {
-	refs := []*types.SearchResult{{
-		ID:              "wiki:kb-1:concept/beiyongjin",
-		KnowledgeBaseID: "kb-1",
-		ChunkType:       "wiki_page",
-		Content:         "备用金分为定额备用金和临时备用金两类。",
-		EvidenceContent: "备用金分为定额备用金和临时备用金两类。",
-		Metadata: map[string]string{
-			MetadataCitationID: "S4",
-			"source_type":      SourceTypeWiki,
-			"slug":             "concept/beiyongjin",
-		},
-	}}
-	answer := "备用金分为两类<src id=\"S4\" />：\n\n- **定额备用金**\n- **临时备用金**"
-	filtered, cited, report := FilterAnswerCitations(answer, refs)
-	if strings.Index(filtered, `<src id="S4" />`) < strings.Index(filtered, "临时备用金") {
-		t.Fatalf("supported Wiki list citation was not moved after the final item: %q", filtered)
-	}
-	if len(cited) != 1 || report.RelocatedListCitations != 1 || report.UnsupportedListCitations != 0 {
-		t.Fatalf("unexpected cited refs/report: refs=%#v report=%#v", cited, report)
-	}
-}
-
 func TestStripCitationProtocolPreventsStaleSourceIDsInHistory(t *testing.T) {
 	content := `事实。<src id="S2" /> [[ops/guide|运维指南]]`
 	got := StripCitationProtocol(content)
@@ -296,5 +182,19 @@ func BenchmarkFilterAnswerCitations(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _, _ = FilterAnswerCitations(answer, refs)
+	}
+}
+
+func TestRepairCitationProjectionNeverInfersBindings(t *testing.T) {
+	refs := citationTestRefs()
+	for _, body := range []string{"甲事实", "甲事实<src id=\"S2\" />", "甲事实<src id=\"S1\" />\n\n- 甲事实\n- 乙事实"} {
+		got, _, _ := FilterAnswerCitations(body, refs)
+		if got != body {
+			t.Fatalf("claim/citation binding inferred: %q => %q", body, got)
+		}
+	}
+	got, _, _ := FilterAnswerCitations("甲事实（S1）", refs)
+	if got != "甲事实<src id=\"S1\" />" {
+		t.Fatal(got)
 	}
 }

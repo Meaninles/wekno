@@ -1,0 +1,23 @@
+package kbmanager
+
+import (
+ "encoding/json"
+ "testing"
+ "github.com/Tencent/WeKnora/internal/types"
+)
+
+func TestPlanValidationReplacementFailure(t *testing.T) {
+ for _, deleteImmediately := range []bool{true,false} {
+  service, knowledge, scope, ctx := newKBManagerWorkflowService(t,types.ParseStatusProcessing)
+  operation,err:=service.ReplaceDocument(ctx,scope,ReplaceDocumentRequest{KnowledgeID:"old-doc",ExpectedOldFileHash:"old-hash",Source:FileSource{SourceType:"artifact",SourceID:"artifact-1",FileName:"replacement.md"}})
+  if err!=nil {t.Fatal(err)}
+  if deleteImmediately {
+   _,err=service.DeleteDocument(ctx,scope,DeleteDocumentRequest{KnowledgeID:"old-doc",ExpectedFileHash:"old-hash"})
+   if err!=nil {t.Fatal(err)}
+  }
+  knowledge.setStatus("new-doc",types.ParseStatusFailed)
+  terminal:=waitForKBManagerOperation(t,service,ctx,scope,operation.ID)
+  data,_:=json.Marshal(map[string]any{"delete_immediately":deleteImmediately,"operation_state":terminal.State,"old_document_exists":knowledge.exists("old-doc"),"new_document_exists":knowledge.exists("new-doc"),"error":terminal.ErrorMessage})
+  t.Log(string(data))
+ }
+}

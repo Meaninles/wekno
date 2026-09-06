@@ -17,11 +17,14 @@ import {
 } from '@/api/embed'
 import { embedToast } from '@/utils/embedToast'
 import { buildQueryWithHostContext } from '@/utils/embedContext'
-import { fileToDataURI } from '@/utils/embedFile'
+import { useChatUploads, chatImagePlaceholder } from '@/custom/modules/chatuploads/uploads'
 import { useI18n } from 'vue-i18n'
 import { useChatStreamHandler } from '@/composables/useChatStreamHandler'
 import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize'
 import { isAgentStreamAgentId } from '@/utils/agent-mode'
+import { synchronizeSessionTitle } from '@/custom/modules/sessiontitle/client'
+import { saveSessionDraftState } from '@/custom/modules/sessionState/draftState'
+import { embedDraftScope } from '@/custom/modules/sessionState/storage'
 
 type EmbedChatImage = { url?: string; data?: string }
 type EmbedChatAttachment = { file_name: string; file_size?: number }
@@ -56,6 +59,7 @@ export function useEmbedChatSession(options: {
   onMessagesChange?: (has: boolean) => void
   onSessionTitle?: (title: string) => void
 }) {
+  const { rows: uploadRows, preparing: uploadsPreparing, prepare: prepareUploads, retry: retryUpload, cancel: cancelUploads, detach: detachUploads } = useChatUploads()
   const { t } = useI18n()
   const { onChunk, error, startStream, stopStream } = useStream()
 
@@ -230,6 +234,12 @@ export function useEmbedChatSession(options: {
         if (batch.length < limit.value) hasMoreHistory.value = false
         created_at.value = nextCursor
         await handleMsgList(batch, isScrollType, scrollHeight)
+        if (!isScrollType && batch.at(-1)?.is_completed) void synchronizeSessionTitle(data.session_id, {
+          prefix: `/api/v1/embed/${options.channelId}`, embedToken: options.token,
+          sessionSig: options.sessionSig.value, visitorId: options.visitorId.value,
+          active: () => options.sessionId.value === data.session_id,
+          onTitle: value => options.onSessionTitle?.(value.title),
+        })
       })
       .catch((err) => {
         console.error('Failed to load messages:', err)
@@ -242,6 +252,7 @@ export function useEmbedChatSession(options: {
   }
 
   const handleStopGeneration = () => {
+    void cancelUploads()
     stopStream()
     markInFlightAssistantStopped(currentAssistantMessageId.value)
     const messageId = currentAssistantMessageId.value
@@ -262,6 +273,7 @@ export function useEmbedChatSession(options: {
     value: string,
     opts: { webSearchEnabled?: boolean; imageFiles?: File[]; attachmentFiles?: File[] } = {},
   ) => {
+    if (uploadsPreparing.value) return
     stopStream()
     prepareForNewOutgoingMessage()
     const outboundQuery = buildQueryWithHostContext(value, options.hostContext?.value)
@@ -271,28 +283,28 @@ export function useEmbedChatSession(options: {
     isReplying.value = true
     loading.value = true
 
-    const imageAttachments: Array<{ data: string }> = []
-    const displayImages: Array<{ url: string }> = []
-    const attachmentUploads: Array<{ data: string; file_name: string; file_size: number }> = []
-    const displayAttachments: Array<{ file_name: string; file_size: number }> = []
+    const requestSessionId = options.sessionId.value
+    const requestSessionSig = options.sessionSig.value
+    const requestVisitorId = options.visitorId.value
+    const draftScope = embedDraftScope(options.channelId, requestVisitorId)
+    const draftAttachments = attachmentFiles.map(file => ({ file, id: crypto.randomUUID(), name: file.name, size: file.size, type: file.type }))
+    saveSessionDraftState(requestSessionId, {}, draftAttachments, imageFiles, value, draftScope)
+    let uploadIds: string[]
     try {
-      for (const file of imageFiles) {
-        const dataURI = String(await fileToDataURI(file))
-        imageAttachments.push({ data: dataURI })
-        displayImages.push({ url: dataURI })
-      }
-      for (const file of attachmentFiles) {
-        const dataURI = String(await fileToDataURI(file))
-        attachmentUploads.push({ data: dataURI, file_name: file.name, file_size: file.size })
-        displayAttachments.push({ file_name: file.name, file_size: file.size })
-      }
-    } catch (err) {
-      console.error('Failed to read attachment:', err)
-      embedToast(t('chat.imageReadFailed'))
+      uploadIds = await prepareUploads([...imageFiles, ...attachmentFiles], {
+        sessionId: requestSessionId, agentId: options.agentId, channelId: options.channelId,
+        token: options.token, sessionSig: requestSessionSig, visitorId: requestVisitorId,
+      })
+    } catch (err: any) {
+      if (requestSessionId !== options.sessionId.value) return
       isReplying.value = false
       loading.value = false
-      return
+      if (err?.name !== 'AbortError') embedToast(err?.message || '文件处理失败')
+      throw err
     }
+    if (requestSessionId !== options.sessionId.value) return
+    const displayImages = imageFiles.map(file => ({ url: chatImagePlaceholder(), name: file.name }))
+    const displayAttachments = attachmentFiles.map(file => ({ file_name: file.name, file_size: file.size }))
 
     messagesList.push({
       content: value,
@@ -329,8 +341,7 @@ export function useEmbedChatSession(options: {
       summary_model_id: '',
       mcp_service_ids: [],
       mentioned_items: [],
-      images: imageAttachments.length > 0 ? imageAttachments : undefined,
-      attachment_uploads: attachmentUploads.length > 0 ? attachmentUploads : undefined,
+      upload_ids: uploadIds,
       query: outboundQuery,
       method: 'POST',
       url: endpoint,
@@ -338,6 +349,7 @@ export function useEmbedChatSession(options: {
       embed_session_sig: options.sessionSig.value,
       embed_visitor_id: options.visitorId.value,
     })
+    saveSessionDraftState(requestSessionId, {}, draftAttachments, imageFiles, '', draftScope)
   }
 
   watch(error, (newError) => {
@@ -351,6 +363,7 @@ export function useEmbedChatSession(options: {
 
   onChunk((data) => {
     if (data.response_type === 'session_title') {
+	  if (data.data?.session_id && data.data.session_id !== options.sessionId.value) return
       const title = String(data.content || (data.data as { title?: string })?.title || '').trim()
       if (title) {
         options.onSessionTitle?.(title)
@@ -361,6 +374,7 @@ export function useEmbedChatSession(options: {
   })
 
   const resetAndLoad = (sid: string) => {
+    detachUploads()
     messagesList.splice(0)
     historyLoading.value = true
     historyLoadingMore.value = false
@@ -396,6 +410,7 @@ export function useEmbedChatSession(options: {
   })
 
   return {
+    uploadRows, uploadsPreparing, retryUpload, cancelUploads,
     messagesList,
     loading,
     isReplying,

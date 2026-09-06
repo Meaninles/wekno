@@ -19,10 +19,8 @@ import (
 )
 
 // langfuseToolOutputPreview caps the Output field we send to Langfuse for a
-// tool call. Tool outputs are already truncated by the registry to
-// DefaultMaxToolOutput (16KB) before this point, but rendering 16KB in the
-// Langfuse UI for every tool call is noisy. We keep a generous slice so the
-// gist is preserved, and include the original length in metadata.
+// tool call. This is an observability preview only; the exact model-facing
+// execution result remains in the message history and readable tool archive.
 const langfuseToolOutputPreview = 4000
 
 func toolExecTimeout(toolName string) time.Duration {

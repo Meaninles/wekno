@@ -226,7 +226,7 @@ func tableAnalysisDisplayIntentPromptBlock(intent *types.TableAnalysisDisplayInt
 		"runtime_rules": []string{
 			"If chart_requested is true, exploratory evidence-inspection table_analysis calls may keep chart_requested=false, but at least one final analytical result query must call table_analysis with chart_requested=true.",
 			"If chart_requested is false, do not set table_analysis.chart_requested=true.",
-			"When table_analysis returns a chart or visible table result, the tool input must include LLM-authored source_mapping JSON; this is a weak-template evidence mapping, not a fixed schema.",
+			"Table results carry executor-owned dataset/query provenance; original file coordinates are exposed by the cell evidence table.",
 			"If table_analysis rejects a call because it conflicts with this decision, correct chart_requested/preferred_chart and retry.",
 		},
 	})

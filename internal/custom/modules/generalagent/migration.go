@@ -10,7 +10,7 @@ var generalAgentMigrationStatements = []string{
 	`CREATE TABLE IF NOT EXISTS custom_general_agent_artifacts (
 		id VARCHAR(36) PRIMARY KEY,
 		tenant_id BIGINT NOT NULL,
-		user_id VARCHAR(128) NOT NULL,
+		user_id VARCHAR(512) NOT NULL,
 		run_id VARCHAR(80) NOT NULL,
 		session_id VARCHAR(36) NOT NULL,
 		message_id VARCHAR(36),
@@ -26,7 +26,7 @@ var generalAgentMigrationStatements = []string{
 		updated_at TIMESTAMPTZ,
 		deleted_at TIMESTAMPTZ
 	)`,
-	`ALTER TABLE custom_general_agent_artifacts ALTER COLUMN user_id TYPE VARCHAR(128)`,
+	`ALTER TABLE custom_general_agent_artifacts ALTER COLUMN user_id TYPE VARCHAR(512)`,
 	`ALTER TABLE custom_general_agent_artifacts ADD COLUMN IF NOT EXISTS file_token VARCHAR(255)`,
 	`UPDATE custom_general_agent_artifacts SET file_token = id WHERE file_token IS NULL OR file_token = ''`,
 	`ALTER TABLE custom_general_agent_artifacts ALTER COLUMN file_token SET NOT NULL`,

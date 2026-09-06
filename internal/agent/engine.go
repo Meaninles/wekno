@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	agentmemory "github.com/Tencent/WeKnora/internal/agent/memory"
 	"github.com/Tencent/WeKnora/internal/agent/skills"
 	agenttoken "github.com/Tencent/WeKnora/internal/agent/token"
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -37,21 +36,20 @@ type AgentEngine struct {
 	toolRegistry         *agenttools.ToolRegistry
 	chatModel            chat.Chat
 	eventBus             *event.EventBus
-	knowledgeBasesInfo   []*KnowledgeBaseInfo      // Detailed knowledge base information for prompt
-	selectedDocs         []*SelectedDocumentInfo   // User-selected documents (via @ mention)
-	pinnedMCPServices    []*PinnedMCPServiceInfo   // User @mentioned MCP services for this turn
-	pinnedSkills         []*PinnedSkillInfo        // User @mentioned skills for this turn
-	sessionID            string                    // Session ID for logging and event emission
-	systemPromptTemplate string                    // System prompt template (optional, uses default if empty)
-	skillsManager        *skills.Manager           // Skills manager for Progressive Disclosure (optional)
-	appConfig            *appconfig.Config         // Application config for prompt template resolution (optional)
-	imageDescriber       ImageDescriberFunc        // VLM function for describing images in tool results (optional)
-	tokenEstimator       *agenttoken.Estimator     // Token estimator for context window management
-	memoryConsolidator   *agentmemory.Consolidator // Memory consolidator for LLM-powered summarization (optional)
-	lastUsage            types.TokenUsage          // Token usage from the most recent LLM call
-	lastSentMsgCount     int                       // Number of messages sent in the most recent LLM call
-	citationState        agentCitationState        // Stable source handles for this execution
-	currentUserRequest   string                    // Exact current chat input, excluding runtime augmentation
+	knowledgeBasesInfo   []*KnowledgeBaseInfo    // Detailed knowledge base information for prompt
+	selectedDocs         []*SelectedDocumentInfo // User-selected documents (via @ mention)
+	pinnedMCPServices    []*PinnedMCPServiceInfo // User @mentioned MCP services for this turn
+	pinnedSkills         []*PinnedSkillInfo      // User @mentioned skills for this turn
+	sessionID            string                  // Session ID for logging and event emission
+	systemPromptTemplate string                  // System prompt template (optional, uses default if empty)
+	skillsManager        *skills.Manager         // Skills manager for Progressive Disclosure (optional)
+	appConfig            *appconfig.Config       // Application config for prompt template resolution (optional)
+	imageDescriber       ImageDescriberFunc      // VLM function for describing images in tool results (optional)
+	tokenEstimator       *agenttoken.Estimator   // Token estimator for context window management
+	lastUsage            types.TokenUsage        // Token usage from the most recent LLM call
+	lastSentMsgCount     int                     // Number of messages sent in the most recent LLM call
+	citationState        agentCitationState      // Stable source handles for this execution
+	currentTurnContext   string                  // Attachment and other request-local context, excluding user text
 }
 
 // ImageDescriberFunc generates a text description of an image.
@@ -86,13 +84,6 @@ func NewAgentEngine(
 		sessionID:            sessionID,
 		systemPromptTemplate: systemPromptTemplate,
 		tokenEstimator:       tokenEst,
-	}
-
-	// Initialize memory consolidator if context window management is configured
-	if config.MaxContextTokens > 0 {
-		engine.memoryConsolidator = agentmemory.NewConsolidator(
-			chatModel, tokenEst, config.MaxContextTokens, 0,
-		)
 	}
 
 	return engine
@@ -173,19 +164,10 @@ func (e *AgentEngine) SetSkillsManager(manager *skills.Manager) {
 	e.skillsManager = manager
 }
 
-// SetCurrentUserRequest keeps the exact user-authored task separate from
-// attachment/runtime augmentation. The model still receives all augmented
-// current-turn content, while recency anchors and terminal synthesis repeat
-// only the user's actual request. No semantic classification is performed.
-func (e *AgentEngine) SetCurrentUserRequest(request string) {
-	e.currentUserRequest = strings.TrimSpace(request)
-}
-
-func (e *AgentEngine) activeUserRequest(fallback string) string {
-	if request := strings.TrimSpace(e.currentUserRequest); request != "" {
-		return request
-	}
-	return strings.TrimSpace(fallback)
+// SetCurrentTurnContext keeps request-local attachments and metadata separate
+// from the exact user input passed to Execute. Neither needs to be repeated.
+func (e *AgentEngine) SetCurrentTurnContext(content string) {
+	e.currentTurnContext = content
 }
 
 // GetSkillsManager returns the skills manager
@@ -280,7 +262,7 @@ func (e *AgentEngine) Execute(
 		imgs = imageURLs[0]
 	}
 	messages := e.buildMessagesWithLLMContext(systemPrompt, query, sessionID, llmContext, imgs)
-	currentRequest := e.activeUserRequest(query)
+	currentRequest := query
 
 	// Get tool definitions for function calling
 	tools := e.buildToolsForLLM()
@@ -420,6 +402,7 @@ func (e *AgentEngine) executeLoop(
 	sessionID string,
 	messageID string,
 ) (*types.AgentState, error) {
+	ctx = conversationmemory.WithLiveTools(ctx)
 	startTime := time.Now()
 	common.PipelineInfo(ctx, "Agent", "loop_start", map[string]interface{}{
 		"max_iterations": e.config.MaxIterations,
@@ -456,8 +439,8 @@ loop:
 			if totalTC := countTotalToolCalls(state.RoundSteps); totalTC > 0 {
 				logger.Infof(ctx, "[Agent] Synthesizing final answer from %d existing tool results",
 					totalTC)
-				_ = e.streamFinalAnswerToEventBus(ctx, query, state, sessionID, messages)
-				state.IsComplete = true
+				// Cancellation preserves collected evidence for history, but is
+				// never reported as a successfully completed answer.
 			}
 			return state, ctx.Err()
 		default:
@@ -483,14 +466,10 @@ loop:
 		}
 	}
 
-	// If loop finished without final answer, generate one — but skip this
-	// when the context was cancelled (user pressed stop). In that case the
-	// fallback LLM call would fail on the already-cancelled ctx and set
-	// state.FinalAnswer to the generic "Sorry, I was unable to generate a
-	// complete answer." message, which then leaks to the UI as the final
-	// answer for a conversation the user deliberately stopped.
+	// A configured execution limit is a stop boundary, not permission to
+	// switch to a second no-tools generator and report its guess as complete.
 	if !state.IsComplete && ctx.Err() == nil {
-		e.handleMaxIterations(ctx, query, state, sessionID, messages)
+		return state, fmt.Errorf("agent reached the configured limit of %d model turns without completing the request", e.config.MaxIterations)
 	}
 
 	return state, nil
@@ -583,11 +562,6 @@ func (e *AgentEngine) runReActIteration(
 	// the API-reported usage from the previous round plus a BPE delta
 	// for newly appended messages (assistant reply + tool results).
 	currentTokens := e.estimateCurrentTokens(*messagesPtr)
-	beforeLen := len(*messagesPtr)
-	*messagesPtr = e.manageContextWindow(ctx, *messagesPtr, round, currentTokens)
-	if len(*messagesPtr) < beforeLen {
-		currentTokens = e.tokenEstimator.EstimateMessages(*messagesPtr)
-	}
 
 	logger.Infof(ctx, "[Agent][Round-%d/%d] Starting: %d messages, %d tools, est_tokens=%d",
 		round, e.config.MaxIterations, len(*messagesPtr), len(tools), currentTokens)
@@ -601,7 +575,7 @@ func (e *AgentEngine) runReActIteration(
 
 	// 1. Think: Call LLM with function calling (includes retry + graceful degradation)
 	e.lastSentMsgCount = len(*messagesPtr)
-	resp, err := e.callLLMWithRetry(ctx, *messagesPtr, tools, state, query, state.CurrentRound, sessionID)
+	resp, err := e.callLLMWithRetry(ctx, messagesPtr, tools, state, query, state.CurrentRound, sessionID)
 	if err != nil {
 		retErr = err
 		return iterOutcomeNext, err

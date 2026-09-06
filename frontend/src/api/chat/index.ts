@@ -22,10 +22,6 @@ export async function unpinSession(session_id: string) {
   return del(`/api/v1/sessions/${session_id}/pin`);
 }
 
-export async function generateSessionsTitle(session_id: string, data: any) {
-  return post(`/api/v1/sessions/${session_id}/generate_title`, data);
-}
-
 export async function knowledgeChat(data: { session_id: string; query: string; }) {
   return postChat(`/api/v1/knowledge-chat/${data.session_id}`, { query: data.query, channel: "web" });
 }

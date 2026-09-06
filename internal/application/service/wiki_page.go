@@ -285,18 +285,22 @@ func (s *wikiPageService) DeletePage(ctx context.Context, kbID string, slug stri
 		return err
 	}
 
-	// Remove inbound link references from pages this page links to
-	s.removeInLinks(ctx, page.TenantID, kbID, slug, page.OutLinks)
+	return s.DeletePageVersion(ctx, page)
+}
 
-	// Delete the page
-	if err := s.repo.Delete(ctx, kbID, slug); err != nil {
+func (s *wikiPageService) DeletePageVersion(ctx context.Context, page *types.WikiPage) error {
+	if err := s.repo.MutateIdentity(ctx, page, nil); err != nil {
 		return err
 	}
-
-	// Delete synced chunk
 	s.deleteChunkForPage(ctx, page)
-
 	return nil
+}
+
+func (s *wikiPageService) RenamePage(ctx context.Context, page *types.WikiPage, newSlug string) (*types.WikiPage, error) {
+	if err := s.repo.MutateIdentity(ctx, page, &newSlug); err != nil {
+		return nil, err
+	}
+	return s.repo.GetByID(ctx, page.ID)
 }
 
 // GetIndex returns the index page for a knowledge base

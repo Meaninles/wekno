@@ -43,7 +43,7 @@ func Split(text string, cfg SplitterConfig) []Chunk {
 	for i, tier := range chain {
 		out := runTier(tier, text, cfg, profile)
 		if v := ValidateChunks(out, totalChars, cfg.ChunkSize); v.OK {
-			return out
+			return annotateStructure(text, out)
 		} else {
 			logger.Debugf(context.Background(), "chunker: tier %s rejected: %s", tier, v.Reason)
 		}
@@ -52,9 +52,9 @@ func Split(text string, cfg SplitterConfig) []Chunk {
 		}
 	}
 	if lastOut != nil {
-		return lastOut
+		return annotateStructure(text, lastOut)
 	}
-	return SplitText(text, cfg)
+	return annotateStructure(text, SplitText(text, cfg))
 }
 
 // TierRejection records why a tier was rejected by the validator and the
@@ -105,7 +105,7 @@ func SplitWithDiagnostics(text string, cfg SplitterConfig) ([]Chunk, *Diagnostic
 		v := ValidateChunks(out, totalChars, cfg.ChunkSize)
 		if v.OK {
 			diag.SelectedTier = tier
-			return out, diag
+			return annotateStructure(text, out), diag
 		}
 		diag.Rejected = append(diag.Rejected, TierRejection{Tier: tier, Reason: v.Reason})
 		logger.Debugf(context.Background(), "chunker: tier %s rejected: %s", tier, v.Reason)
@@ -116,10 +116,10 @@ func SplitWithDiagnostics(text string, cfg SplitterConfig) ([]Chunk, *Diagnostic
 	}
 	if lastOut != nil {
 		diag.SelectedTier = lastTier
-		return lastOut, diag
+		return annotateStructure(text, lastOut), diag
 	}
 	// Defensive last-ditch fallback.
-	return SplitText(text, cfg), diag
+	return annotateStructure(text, SplitText(text, cfg)), diag
 }
 
 // SplitParentChild is the strategy-aware analog of SplitTextParentChild.
@@ -163,6 +163,14 @@ func SplitParentChild(text string, parentCfg, childCfg SplitterConfig) ParentChi
 			children = append(children, ChildChunk{Chunk: sub, ParentIndex: parentIndex})
 			childSeq++
 		}
+	}
+	flat := make([]Chunk, len(children))
+	for i, c := range children {
+		flat[i] = c.Chunk
+	}
+	flat = annotateStructure(text, flat)
+	for i := range children {
+		children[i].Chunk = flat[i]
 	}
 	return ParentChildResult{Parents: newParents, Children: children}
 }

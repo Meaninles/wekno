@@ -9,7 +9,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestFilterKeepsOnlyAuthorizedCoreReadyCurrentGeneration(t *testing.T) {
+func TestFilterKeepsCommittedGenerationWhileReplacementIsProcessing(t *testing.T) {
 	results := []*types.RetrieveResult{{Results: []*types.IndexWithScore{
 		{ChunkID: "valid", KnowledgeID: "knowledge-current", KnowledgeBaseID: "kb-1"},
 		{ChunkID: "stale", KnowledgeID: "knowledge-current", KnowledgeBaseID: "kb-1"},
@@ -24,7 +24,7 @@ func TestFilterKeepsOnlyAuthorizedCoreReadyCurrentGeneration(t *testing.T) {
 	}
 	knowledge := map[uint64][]*types.Knowledge{
 		7: {
-			{ID: "knowledge-current", TenantID: 7, KnowledgeBaseID: "kb-1", ProcessingGeneration: "gen-2", EnableStatus: "enabled", CoreStatus: types.CoreStatusReady},
+			{ID: "knowledge-current", TenantID: 7, KnowledgeBaseID: "kb-1", PublishedGeneration: "gen-2", ProcessingGeneration: "gen-3", EnableStatus: "enabled", CoreStatus: types.CoreStatusProcessing},
 			{ID: "knowledge-waiting", TenantID: 7, KnowledgeBaseID: "kb-1", ProcessingGeneration: "gen-3", EnableStatus: "enabled", CoreStatus: types.CoreStatusProcessing},
 		},
 	}

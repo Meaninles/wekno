@@ -359,10 +359,10 @@ func TestCommitPreparedReparseAtomicallyBindsPendingGeneration(t *testing.T) {
 	require.NoError(t, c.db.Where("id = ?", binding.KnowledgeID).Take(&knowledge).Error)
 	require.Equal(t, types.ParseStatusPending, knowledge.ParseStatus)
 	require.Equal(t, binding.WorkflowID, knowledge.ProcessingWorkflowID)
-	require.Equal(t, "disabled", knowledge.EnableStatus)
-	require.Empty(t, knowledge.Description)
+	require.Equal(t, "enabled", knowledge.EnableStatus)
+	require.Equal(t, "old description", knowledge.Description)
 	require.Nil(t, knowledge.ProcessedAt)
-	require.Equal(t, "embedding-new", knowledge.EmbeddingModelID)
+	require.Equal(t, "old-model", knowledge.EmbeddingModelID)
 	require.Zero(t, knowledge.PendingSubtasksCount)
 	require.Equal(t, "batch-reparse-ready:generation-1:3", knowledge.ErrorMessage)
 

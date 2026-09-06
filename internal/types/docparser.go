@@ -96,7 +96,8 @@ type DocParserVLMConfig struct {
 }
 
 type ParsedChunk struct {
-	Content string
+	SourceLocator JSON
+	Content       string
 	// ContextHeader is an optional context string (e.g. a Markdown heading
 	// breadcrumb) that should be prepended at embedding time but is NOT
 	// part of the stored Content. Lets retrieval pipelines see section
@@ -132,10 +133,12 @@ func (c ParsedChunk) EmbeddingContent() string {
 // ParsedParentChunk represents a parent chunk in the parent-child strategy.
 // Parent chunks are stored in DB for context retrieval but NOT vector-indexed.
 type ParsedParentChunk struct {
-	Content string
-	Seq     int
-	Start   int
-	End     int
+	ContextHeader string
+	SourceLocator JSON
+	Content       string
+	Seq           int
+	Start         int
+	End           int
 }
 
 type ParsedImage struct {

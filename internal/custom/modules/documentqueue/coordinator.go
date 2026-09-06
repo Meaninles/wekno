@@ -1373,10 +1373,7 @@ func (c *Coordinator) CommitPreparedReparse(
 			Where("processing_workflow_id = '' OR processing_workflow_id = ?", binding.WorkflowID).
 			Updates(map[string]interface{}{
 				"parse_status":           types.ParseStatusPending,
-				"enable_status":          "disabled",
-				"description":            "",
 				"processed_at":           nil,
-				"embedding_model_id":     transition.EmbeddingModelID,
 				"pending_subtasks_count": 0,
 				"enrichment_status":      types.EnrichmentStatusNone,
 				"wiki_status":            types.WikiStatusNone,

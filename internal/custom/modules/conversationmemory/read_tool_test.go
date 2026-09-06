@@ -48,6 +48,10 @@ func TestReadConversationScopePaginationAndCancellation(t *testing.T) {
 			t.Fatal(r, err)
 		}
 	}
+	r, err = tool.Execute(ctx, json.RawMessage(`{"source_id":"assistant_message_assistant"}`))
+	if err != nil || !strings.Contains(r.Output, `"role":"assistant"`) || !strings.Contains(r.Output, "untrusted") {
+		t.Fatal("assistant source cannot be read", r, err)
+	}
 	for _, id := range []string{"foreign", "deleted"} {
 		tool.SessionID = id
 		if _, err = tool.Execute(ctx, json.RawMessage(`{}`)); err == nil {
@@ -66,5 +70,16 @@ func TestReadConversationScopePaginationAndCancellation(t *testing.T) {
 	}
 	if _, err = tool.Execute(ctx, json.RawMessage(`{"offset":-1}`)); err == nil {
 		t.Fatal("negative offset accepted")
+	}
+	archived := WithLiveTools(ctx)
+	LiveToolsFromContext(archived).outputs["current-call"] = text
+	r, err = tool.Execute(archived, json.RawMessage(`{"tool_call_id":"current-call","section":"tools","offset":16000}`))
+	if err != nil || !strings.Contains(r.Output, "final fact") {
+		t.Fatal("current run archive could not be read", r, err)
+	}
+	for _, inaccessible := range []context.Context{ctx, WithLiveTools(ctx), context.WithValue(archived, types.UserIDContextKey, "other")} {
+		if _, err = tool.Execute(inaccessible, json.RawMessage(`{"tool_call_id":"current-call","section":"tools"}`)); err == nil {
+			t.Fatal("archive escaped its session, user or run")
+		}
 	}
 }

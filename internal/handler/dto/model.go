@@ -43,6 +43,7 @@ type ModelParametersDTO struct {
 	BaseURL             string                    `json:"base_url"`
 	InterfaceType       string                    `json:"interface_type"`
 	EmbeddingParameters types.EmbeddingParameters `json:"embedding_parameters"`
+	RerankParameters    types.RerankParameters    `json:"rerank_parameters"`
 	ParameterSize       string                    `json:"parameter_size"`
 	Provider            string                    `json:"provider"`
 	ExtraConfig         map[string]string         `json:"extra_config,omitempty"`
@@ -63,6 +64,7 @@ func NewModelResponse(m *types.Model) *ModelResponse {
 		BaseURL:             m.Parameters.BaseURL,
 		InterfaceType:       m.Parameters.InterfaceType,
 		EmbeddingParameters: m.Parameters.EmbeddingParameters,
+		RerankParameters:    m.Parameters.RerankParameters,
 		ParameterSize:       m.Parameters.ParameterSize,
 		Provider:            m.Parameters.Provider,
 		ExtraConfig:         m.Parameters.ExtraConfig,

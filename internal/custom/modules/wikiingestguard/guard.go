@@ -24,6 +24,15 @@ const appliedPageSlugsPayloadKey = "applied_page_slugs"
 
 var ErrInvalidIdentity = errors.New("wiki ingest guard requires a complete identity")
 
+// AwaitingPublication is a durable control-plane wait, not a failed model
+// attempt. The existing task scheduler retries without exhausting its model
+// failure budget; source identity is checked again on every attempt.
+type AwaitingPublication struct{}
+
+func (*AwaitingPublication) Error() string                  { return "wiki source is awaiting publication" }
+func (*AwaitingPublication) ModelWorkDeferred() bool        { return true }
+func (*AwaitingPublication) ModelRetryAfter() time.Duration { return 2 * time.Second }
+
 // Identity is the authoritative lifecycle identity of one durable ingest op.
 type Identity struct {
 	TenantID             uint64
@@ -193,7 +202,7 @@ func ValidateScope(ctx context.Context, tx *gorm.DB, tenantID uint64, knowledgeB
 		}
 		var row knowledgeIdentityRow
 		query := tx.Unscoped().Table("knowledges").
-			Select("id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "processed_at", "wiki_status", "deleted_at").
+			Select("id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "processed_at", "wiki_status", "deleted_at", "publication_state").
 			Where("id = ?", identity.KnowledgeID)
 		if tx.Dialector.Name() != "sqlite" {
 			query = query.Clauses(clause.Locking{Strength: "SHARE"})
@@ -212,7 +221,10 @@ func ValidateScope(ctx context.Context, tx *gorm.DB, tenantID uint64, knowledgeB
 				identity.KnowledgeID, row.TenantID, identity.TenantID,
 			)
 		}
-		if row.DeletedAt.Valid || row.KnowledgeBaseID != identity.KnowledgeBaseID ||
+		if row.PublicationState == "staged" {
+			return &AwaitingPublication{}
+		}
+		if row.PublicationState == "retired" || row.DeletedAt.Valid || row.KnowledgeBaseID != identity.KnowledgeBaseID ||
 			row.ProcessingGeneration != identity.ProcessingGeneration || terminalParseStatus(row.ParseStatus) {
 			stale = append(stale, identity)
 			continue
@@ -303,6 +315,7 @@ func RecordPageApplication(ctx context.Context, tx *gorm.DB, pageSlug string) er
 }
 
 type knowledgeIdentityRow struct {
+	PublicationState     string
 	ID                   string
 	TenantID             uint64
 	KnowledgeBaseID      string

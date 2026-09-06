@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -23,7 +22,7 @@ func NewWikiDeletePageTool(wikiPageService interfaces.WikiPageService, kbIDs []s
 		BaseTool: NewBaseTool(
 			ToolWikiDeletePage,
 			"Delete a Wiki page. Automatically cleans up incoming links on other pages to prevent dead links.",
-			json.RawMessage(`{
+			wikicontract.TargetSchema(json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
@@ -32,7 +31,7 @@ func NewWikiDeletePageTool(wikiPageService interfaces.WikiPageService, kbIDs []s
 					}
 				},
 				"required": ["slug"]
-			}`),
+			}`), true),
 		),
 		wikiPageService: wikiPageService,
 		kbIDs:           kbIDs,
@@ -41,6 +40,7 @@ func NewWikiDeletePageTool(wikiPageService interfaces.WikiPageService, kbIDs []s
 
 func (t *wikiDeletePageTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
 	var params struct {
+		wikicontract.Target
 		Slug string `json:"slug"`
 	}
 
@@ -51,7 +51,10 @@ func (t *wikiDeletePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	if len(t.kbIDs) == 0 {
 		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
-	kbID := t.kbIDs[0]
+	kbID, targetErr := params.Target.KnowledgeBase(t.kbIDs)
+	if targetErr != nil {
+		return &types.ToolResult{Success: false, Error: targetErr.Error()}, nil
+	}
 
 	if params.Slug == "" {
 		return &types.ToolResult{Success: false, Error: "slug is required"}, nil
@@ -62,64 +65,23 @@ func (t *wikiDeletePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: "Failed to fetch page to delete: " + err.Error()}, nil
 	}
-	inLinks := make([]string, len(existingPage.InLinks))
-	copy(inLinks, existingPage.InLinks)
-
-	err = t.wikiPageService.DeletePage(ctx, kbID, params.Slug)
-	if err != nil {
-		return &types.ToolResult{Success: false, Error: "Failed to delete page: " + err.Error()}, nil
-	}
-
-	// Clean up incoming links to prevent dead links
-	updatedCount := 0
-	var updatedSlugs []string
-	for _, sourceSlug := range inLinks {
-		sourcePage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, sourceSlug)
-		if err == nil {
-			changed := false
-
-			// Replace [[deleted-slug]] with readable name
-			parts := strings.Split(params.Slug, "/")
-			readableName := parts[len(parts)-1]
-			readableName = strings.ReplaceAll(readableName, "-", " ")
-
-			link1 := "[[" + params.Slug + "]]"
-			if strings.Contains(sourcePage.Content, link1) {
-				sourcePage.Content = strings.ReplaceAll(sourcePage.Content, link1, readableName)
-				changed = true
-			}
-
-			// Replace [[deleted-slug|Text]] with just Text
-			re := regexp.MustCompile(`\[\[` + regexp.QuoteMeta(params.Slug) + `\|([^\]]+)\]\]`)
-			if re.MatchString(sourcePage.Content) {
-				sourcePage.Content = re.ReplaceAllString(sourcePage.Content, "$1")
-				changed = true
-			}
-
-			if changed {
-				_, updateErr := t.wikiPageService.UpdatePage(ctx, sourcePage)
-				if updateErr == nil {
-					updatedCount++
-					updatedSlugs = append(updatedSlugs, sourceSlug)
-				}
-			}
+	if existingPage != nil {
+		if err := params.Target.ValidatePage(existingPage, true); err != nil {
+			return &types.ToolResult{Success: false, Error: err.Error()}, nil
 		}
 	}
-
-	outputMsg := fmt.Sprintf("Successfully deleted page [[%s]] and cleaned up %d incoming links.", params.Slug, updatedCount)
-	if updatedCount > 0 {
-		outputMsg += fmt.Sprintf("\n- Affected pages: %s", strings.Join(updatedSlugs, ", "))
+	if err := t.wikiPageService.DeletePageVersion(ctx, existingPage); err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, nil
 	}
+	outputMsg := fmt.Sprintf("Deleted page %s in knowledge base %s; links and issues updated atomically.", params.Slug, kbID)
 
 	return &types.ToolResult{
 		Success: true,
 		Output:  outputMsg,
 		Data: map[string]interface{}{
-			"display_type":    "wiki_delete_page",
-			"slug":            params.Slug,
-			"title":           existingPage.Title,
-			"updated_count":   updatedCount,
-			"affected_pages":  updatedSlugs,
+			"display_type": "wiki_delete_page",
+			"slug":         params.Slug,
+			"title":        existingPage.Title,
 		},
 	}, nil
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/toolcontract"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/utils"
 )
@@ -110,7 +111,11 @@ func (t *QueryTool) Execute(ctx context.Context, args json.RawMessage) (*types.T
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}, err
 	}
-	return &types.ToolResult{Success: true, Output: formatAnalysisOutput(data), Data: data}, nil
+	output, err := toolcontract.QueryOutput(data)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, err
+	}
+	return &types.ToolResult{Success: true, Output: output, Data: data}, nil
 }
 
 func (t *CatalogTool) scopeFromContext(ctx context.Context) ToolScope {
@@ -166,7 +171,6 @@ func formatCatalogOutput(data map[string]any) string {
 
 func formatSchemaOutput(data map[string]any) string {
 	rawTables, _ := data["tables"].([]map[string]any)
-	semanticContext, _ := data["semantic_context"].([]map[string]any)
 	var b strings.Builder
 	b.WriteString("=== Database Schema ===\n\n")
 	for _, table := range rawTables {
@@ -176,69 +180,12 @@ func formatSchemaOutput(data map[string]any) string {
 		}
 		if cols, ok := table["columns"].([]map[string]any); ok {
 			for _, col := range cols {
-				b.WriteString(fmt.Sprintf("- %s %s [%s]: %s; samples=%v\n",
-					col["name"], col["type"], col["semantic_type"], col["description"], col["sample_values"]))
+				b.WriteString(fmt.Sprintf("- %s %s; nullable=%v; configured_role=%s; description=%s; samples=%v\n",
+					col["name"], col["type"], col["nullable"], col["semantic_type"], col["description"], col["sample_values"]))
 			}
 		}
 		b.WriteString("\n")
 	}
-	if len(semanticContext) > 0 {
-		b.WriteString("=== Business Meaning Inference For SQL Reasoning ===\n")
-		b.WriteString("Use this inferred context to choose joins, metrics, dimensions and time filters. Do not repeat this inference in the final answer unless the user asks.\n")
-		for _, item := range semanticContext {
-			b.WriteString(fmt.Sprintf("- %s: %s; grain=%s\n",
-				item["sql_table_name"], item["business_meaning"], item["grain_hint"]))
-			if rels, ok := item["likely_relationships"].([]map[string]string); ok && len(rels) > 0 {
-				for _, rel := range rels {
-					b.WriteString(fmt.Sprintf("  join hint: %s -> %s\n", rel["column"], rel["likely_references"]))
-				}
-			}
-			b.WriteString(fmt.Sprintf("  metrics=%v; dimensions=%v; time=%v\n",
-				item["metric_columns"], item["dimension_columns"], item["time_columns"]))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
-}
 
-func formatAnalysisOutput(data map[string]any) string {
-	rows, _ := data["rows"].([]map[string]any)
-	chart, _ := data["chart"].(map[string]any)
-	chartEligible, _ := chart["eligible"].(bool)
-	var b strings.Builder
-	b.WriteString("=== Structured Analysis Result ===\n")
-	b.WriteString(fmt.Sprintf("SQL: %s\n", data["query"]))
-	b.WriteString(fmt.Sprintf("Returned rows: %d\n", len(rows)))
-	b.WriteString(fmt.Sprintf("Display mode: %s\n", data["display_mode"]))
-	b.WriteString(fmt.Sprintf("Chart requested: %v\n", data["chart_requested"]))
-	if chartEligible {
-		chartID := fmt.Sprint(chart["id"])
-		contractJSON, _ := json.Marshal(chart["contract"])
-		b.WriteString(fmt.Sprintf("Structured chart: id=%s; type=%s; x=%s; y=%v; group=%s; secondary_y=%v; value=%s\n",
-			chartID,
-			chart["default_type"],
-			chart["x"],
-			chart["y"],
-			chart["group"],
-			chart["secondary_y"],
-			chart["value"],
-		))
-		if len(contractJSON) > 0 && string(contractJSON) != "null" {
-			b.WriteString(fmt.Sprintf("ChartContract: %s\n", string(contractJSON)))
-		}
-		b.WriteString(fmt.Sprintf("In the final answer, place {{chart:%s}} immediately after the paragraph that explains this chart. Do not create chart images or artifact files unless the user explicitly requested a file export.\n", chartID))
-		b.WriteString("Final chart explanation rule: ChartContract visual_scope describes what the chart actually renders. Additional conclusions may use query rows or evidence_scope, but write them as textual insights and do not claim the chart itself visualizes non_visual_fields.\n")
-	} else if data["chart_requested"] == true {
-		b.WriteString(fmt.Sprintf("Structured chart unavailable: %s\n", chart["reason"]))
-	}
-	b.WriteString("\n")
-	for i, row := range rows {
-		if i >= 20 {
-			b.WriteString("...\n")
-			break
-		}
-		encoded, _ := json.Marshal(row)
-		b.WriteString(fmt.Sprintf("row %d: %s\n", i+1, string(encoded)))
-	}
 	return b.String()
 }

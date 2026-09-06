@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -27,18 +28,7 @@ const wikiIndexAgentTopK = 20
 // about index layouts do not need retraining.
 func renderIndexOverviewForAgent(resp *types.WikiIndexResponse) string {
 	var sb strings.Builder
-	// Intro may still carry a legacy inline directory on KBs that
-	// haven't been re-ingested since the index refactor — clip
-	// everything from the first "\n## " heading onwards so the model
-	// doesn't see the old directory alongside the live top-K below.
-	intro := strings.TrimSpace(resp.Intro)
-	if idx := strings.Index(intro, "\n## "); idx >= 0 {
-		intro = strings.TrimSpace(intro[:idx])
-	}
-	if intro != "" {
-		sb.WriteString(intro)
-		sb.WriteString("\n")
-	}
+	sb.WriteString("# Current Wiki directory (navigation only)\n")
 
 	typeLabels := map[string]string{
 		types.WikiPageTypeSummary:    "Summary",
@@ -346,9 +336,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 			}
 		}
 		if len(filtered) == 0 {
-			// Not in the agent's scope list — still allow direct addressing
-			// but without any pin (scopes were the source of the pin).
-			filtered = append(filtered, WikiScope{KnowledgeBaseID: params.KnowledgeBaseID})
+			return &types.ToolResult{Success: false, Error: "knowledge_base_id is outside the current scope"}, nil
 		}
 		effectiveScopes = filtered
 	}
@@ -359,28 +347,10 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 	// multiple KBs when the agent has several wiki KBs in scope.
 	foundKBs := make(map[string][]string)
 
-	formatLinks := func(slugs []string, kbID string) []string {
-		var descs []string
-		for _, s := range slugs {
-			key := seenLinkKey(kbID, s)
-			t.mu.Lock()
-			seen := t.seenLinks[key]
-			t.seenLinks[key] = true
-			t.mu.Unlock()
-
-			if seen {
-				// We already injected the summary for this link in this session (within the same KB)
-				descs = append(descs, fmt.Sprintf("[[%s]] (summary omitted, already seen)", s))
-			} else {
-				if linkPage, err := t.wikiService.GetPageBySlug(ctx, kbID, s); err == nil && linkPage != nil {
-					descs = append(descs, fmt.Sprintf("[[%s]] (%s)", s, linkPage.Summary))
-				} else {
-					descs = append(descs, fmt.Sprintf("[[%s]]", s))
-				}
-			}
-		}
-		if len(descs) == 0 {
-			return []string{"(none)"}
+	formatLinks := func(slugs []string, _ string) []string {
+		descs := make([]string, 0, len(slugs))
+		for _, slug := range slugs {
+			descs = append(descs, "[["+slug+"]]")
 		}
 		return descs
 	}
@@ -417,15 +387,25 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 		// without overflowing its context window — the explicit hint
 		// steers the model to wiki_search for deeper exploration.
 		contentBody := page.Content
+		summary := page.Summary
+		citable := page.PageType != types.WikiPageTypeLog
 		if page.PageType == types.WikiPageTypeIndex {
+			summary = "Live directory snapshot: page titles, counts and displayed summaries. Read individual pages for their detailed claims."
+			contentBody = "Live directory is unavailable."
+			citable = false
 			if overview, err := t.wikiService.GetIndexView(ctx, kbID, nil, wikiIndexAgentTopK, ""); err == nil && overview != nil {
 				contentBody = renderIndexOverviewForAgent(overview)
+				citable = true
+			} else if err != nil {
+				errs = append(errs, fmt.Sprintf("read live directory in %s: %v", kbID, err))
 			}
 		}
 
-		return fmt.Sprintf(`<wiki_page>
+		rendered := fmt.Sprintf(`<wiki_page>
 <metadata>
 <knowledge_base_id>%s</knowledge_base_id>
+<page_id>%s</page_id>
+<version>%d</version>
 <link>[[%s|%s]]</link>
 <type>%s</type>
 <aliases>%s</aliases>
@@ -444,15 +424,19 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 %s
 </content>
 </wiki_page>`,
-			kbID,
+			kbID, page.ID, page.Version,
 			page.Slug, page.Title, page.PageType,
 			strings.Join(page.Aliases, ", "),
 			strings.Join(outLinksDesc, ", "),
 			strings.Join(inLinksDesc, ", "),
 			strings.Join(sourcesDesc, "\n"),
-			page.Summary,
+			summary,
 			contentBody,
 		)
+		if !citable {
+			rendered = strings.ReplaceAll(strings.ReplaceAll(rendered, "<wiki_page>", "<wiki_navigation>"), "</wiki_page>", "</wiki_navigation>")
+		}
+		return rendered
 	}
 
 	// Track slugs that were found in the raw lookup but filtered out by a
@@ -473,7 +457,8 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 				continue
 			}
 			page, err := t.wikiService.GetPageBySlug(ctx, kbID, slug)
-			if err != nil || page == nil {
+			if err != nil || page == nil || page.Status == types.WikiPageStatusArchived {
+				errs = append(errs, fmt.Sprintf("read %s in %s: %v", slug, kbID, err))
 				continue
 			}
 			actualKBID := kbID
@@ -528,7 +513,9 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 	}
 
 	if len(outputs) == 0 {
-		return &types.ToolResult{Success: false, Error: strings.Join(errs, "; ")}, nil
+		result := &types.ToolResult{Success: false, Error: strings.Join(errs, "; ")}
+		attachWikiReceipt(result, effectiveScopes, slugsToFetch, 0, 0, errs)
+		return result, nil
 	}
 
 	finalOutput := strings.Join(outputs, "\n\n")
@@ -545,14 +532,16 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 		}
 	}
 
-	return &types.ToolResult{
+	result := &types.ToolResult{
 		Success: true,
 		Output:  finalOutput,
 		Data: map[string]interface{}{
 			"found_kbs":       foundKBs,
 			"ambiguous_slugs": ambiguous,
 		},
-	}, nil
+	}
+	attachWikiReceipt(result, effectiveScopes, slugsToFetch, len(outputs), len(outputs), errs)
+	return result, nil
 }
 
 // ---- wiki_search ----
@@ -646,12 +635,15 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			}
 		}
 		if len(filtered) == 0 {
-			filtered = append(filtered, WikiScope{KnowledgeBaseID: params.KnowledgeBaseID})
+			return &types.ToolResult{Success: false, Error: "knowledge_base_id is outside the current scope"}, nil
 		}
 		effectiveScopes = filtered
 	}
 
 	var allOutputs []string
+	var searchErrors []string
+	candidateCount, resultCount := 0, 0
+	limitReached := false
 	// Per-slug list of KB IDs that produced a match. Multiple KBs may share a
 	// slug when the agent has several wiki KBs in scope, so we keep the full list.
 	foundKBs := make(map[string][]string)
@@ -675,14 +667,20 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			}
 			pages, err := t.wikiService.SearchPages(ctx, kbID, query, params.Limit)
 			if err != nil {
+				searchErrors = append(searchErrors, fmt.Sprintf("search %s for %q: %v", kbID, query, err))
 				continue
 			}
+			candidateCount += len(pages)
+			limitReached = limitReached || len(pages) >= params.Limit
 			for _, p := range pages {
 				if p == nil {
 					continue
 				}
 				passesScope, scopeErr := pagePassesWikiScope(ctx, p, sc, fetchTags)
 				if scopeErr != nil || !passesScope {
+					if scopeErr != nil {
+						searchErrors = append(searchErrors, scopeErr.Error())
+					}
 					filteredCount++
 					continue
 				}
@@ -697,7 +695,8 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 				registerLinkedSlugs(foundKBs, p, actualKBID)
 			}
 		}
-		_ = filteredCount // reserved for future debug surface
+		_ = filteredCount
+		resultCount += len(allHits)
 
 		if len(allHits) == 0 {
 			allOutputs = append(allOutputs, fmt.Sprintf("<search_results count=\"0\" query=\"%s\" />", query))
@@ -706,7 +705,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "<search_results count=\"%d\" query=\"%s\">\n", len(allHits), query)
-		sb.WriteString("<catalog_only>These matches are navigation metadata, not claim-bearing evidence and have no citation handles. Call wiki_read_page for the selected slug before making any factual claim from it.</catalog_only>\n")
+		sb.WriteString("<catalog_only>Navigation matches contain titles, summaries and snippets; full page content is available by slug through wiki_read_page. These entries have no claim-bearing citation handles.</catalog_only>\n")
 		for _, h := range allHits {
 			p := h.page
 			key := seenLinkKey(h.kbID, p.Slug)
@@ -739,13 +738,16 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		allOutputs = append(allOutputs, sb.String())
 	}
 
-	return &types.ToolResult{
+	result := &types.ToolResult{
 		Success: true,
 		Output:  strings.Join(allOutputs, "\n\n"),
 		Data: map[string]interface{}{
 			"found_kbs": foundKBs,
 		},
-	}, nil
+	}
+	result.Data["candidate_limit_reached"] = limitReached
+	attachWikiReceipt(result, effectiveScopes, queriesToRun, resultCount, candidateCount, searchErrors)
+	return result, nil
 }
 
 // --- Helper ---
@@ -861,4 +863,27 @@ func truncateRunes(s string, maxRunes int) string {
 		return s
 	}
 	return string(runes[:maxRunes]) + "..."
+}
+
+// attachWikiReceipt keeps navigation/read results on the same scope/status
+// contract as chunk retrieval. Partial failures never become a global no-hit.
+func attachWikiReceipt(result *types.ToolResult, scopes []WikiScope, queries []string, count, candidates int, failures []string) {
+	ids := []string{}
+	for _, scope := range scopes {
+		ids = append(ids, scope.KnowledgeBaseID)
+	}
+	if result.Data == nil {
+		result.Data = map[string]any{}
+	}
+	result.Data["count"] = count
+	result.Data["search_targets"] = scopes
+	var err error
+	if len(failures) > 0 {
+		err = fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	chatretrieval.Receipt(result, "wiki_pages", ids, ids, queries, candidates, err)
+	if count == 0 && err != nil {
+		result.Success = false
+		result.Error = err.Error()
+	}
 }

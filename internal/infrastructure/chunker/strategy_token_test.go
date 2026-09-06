@@ -55,3 +55,13 @@ func TestTokenLimitAlsoSplitsOversizedProtectedBlocks(t *testing.T) {
 		}
 	}
 }
+
+func TestProtectedRowUsesModelBudgetNotAggregationTarget(t *testing.T) {
+	for _, length := range []int{500, 900, 1600} {
+		row := "| row-key | " + strings.Repeat("值", length) + " | 32 |\n"
+		chunks := Split(row, SplitterConfig{ChunkSize: 384, TokenLimit: 8192, Strategy: StrategyAuto})
+		if len(chunks) != 1 || chunks[0].Content != row {
+			t.Fatalf("row length %d lost its atomic identity: %#v", length, chunks)
+		}
+	}
+}

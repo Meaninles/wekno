@@ -12,6 +12,7 @@ import (
 // Stored as a JSONB column on the tenants table, managed via the settings UI
 // at /tenants/kv/retrieval-config.
 type RetrievalConfig struct {
+	RetrievalBudget RetrievalBudget `json:"retrieval_budget"`
 	// EmbeddingTopK is the maximum number of chunks returned by vector search (default: 50)
 	EmbeddingTopK int `json:"embedding_top_k"`
 	// VectorThreshold is the minimum vector similarity score (0-1, default: 0.15)
@@ -35,6 +36,13 @@ type RetrievalConfig struct {
 	RRFVectorWeight float64 `json:"rrf_vector_weight,omitempty"`
 	// RRFKeywordWeight is the keyword counterpart. Default: 0.3.
 	RRFKeywordWeight float64 `json:"rrf_keyword_weight,omitempty"`
+}
+
+func (c *RetrievalConfig) GetEffectiveBudget() RetrievalBudget {
+	if c == nil {
+		return RetrievalBudget{}
+	}
+	return c.RetrievalBudget
 }
 
 // GetEffectiveEmbeddingTopK returns EmbeddingTopK with a fallback default.

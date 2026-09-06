@@ -5,6 +5,36 @@ import (
 	"testing"
 )
 
+func TestAccountUserIDSeparatesAccountsFromSessionPrincipals(t *testing.T) {
+	const account = "fc9ba12e-ff9f-4bfe-9ec9-493808d068f0"
+	for _, tc := range []struct {
+		name      string
+		uid       string
+		principal Principal
+		want      string
+	}{
+		{"account context", account, Principal{}, account},
+		{"web user", account, Principal{Type: PrincipalWebUser, ID: account}, account},
+		{"conflicting account", account, Principal{Type: PrincipalWebUser, ID: "another-account"}, ""},
+		{"API tenant", "system-10000", Principal{Type: PrincipalAPITenant, ID: "10000"}, ""},
+		{"synthetic fallback", "system-10000", Principal{}, ""},
+		{"API external user", account, Principal{Type: PrincipalAPIExternalUser, ID: "10000:visitor"}, ""},
+		{"embed session", "embed-d0303a5f-4b2e-488f-82fc-b3395eca7061", EmbedSessionPrincipal(10000, "channel", "session"), ""},
+		{"IM user", account, Principal{Type: PrincipalIMUser, ID: "im:visitor"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := WithPrincipal(context.WithValue(context.Background(), UserIDContextKey, tc.uid), tc.principal)
+			got, ok := AccountUserIDFromContext(ctx)
+			if got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("account = %q, %v; want %q", got, ok, tc.want)
+			}
+		})
+	}
+	if _, ok := AccountUserIDFromContext(nil); ok {
+		t.Fatal("nil context has no account")
+	}
+}
+
 func TestPrincipalFromContextFallsBackToWebUser(t *testing.T) {
 	ctx := context.WithValue(context.Background(), UserIDContextKey, "u1")
 

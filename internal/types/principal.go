@@ -69,6 +69,24 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return Principal{}, false
 }
 
+// AccountUserIDFromContext returns only a real account acting as itself.
+// Terminal identities remain valid session owners, but do not own RBAC
+// resources through creator fields that reference WeKnora accounts.
+func AccountUserIDFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	uid, ok := UserIDFromContext(ctx)
+	if !ok || IsSyntheticUserID(uid) {
+		return "", false
+	}
+	principal, ok := PrincipalFromContext(ctx)
+	if !ok || principal.Type != PrincipalWebUser || principal.ID != uid {
+		return "", false
+	}
+	return uid, true
+}
+
 func WithEmbedVisitorID(ctx context.Context, visitorID string) context.Context {
 	visitorID = strings.TrimSpace(visitorID)
 	if visitorID == "" {

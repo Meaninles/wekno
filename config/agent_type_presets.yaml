@@ -56,7 +56,6 @@ agent_type_presets:
       retain_retrieval_history: false
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       kb_selection_mode: "all"
     # kb_filter derived from allowed_tools: any_of = [vector, keyword]
 
@@ -121,7 +120,6 @@ agent_type_presets:
       retain_retrieval_history: false
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       kb_selection_mode: "all"
 
   # --------------------------------------------------------------------------
@@ -197,7 +195,6 @@ agent_type_presets:
       retain_retrieval_history: true
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       web_search_enabled: false
       web_fetch_enabled: true
       web_fetch_top_n: 3
@@ -332,7 +329,6 @@ agent_type_presets:
       retain_retrieval_history: true
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
-      faq_score_boost: 1.2
       web_search_enabled: false
       web_fetch_enabled: true
       web_fetch_top_n: 3

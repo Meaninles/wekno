@@ -8,7 +8,6 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
@@ -90,7 +89,7 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 
 		out := engine.appendToolResults(nil, step, "answer the current question")
 
-		require.Len(t, out, 3, "expect assistant + tool + current-task reminder")
+		require.Len(t, out, 2, "expect the actual assistant/tool pair only")
 		assert.Equal(t, "assistant", out[0].Role)
 		assert.Equal(t, "I will call search.", out[0].Content)
 		assert.Equal(t, "Detailed chain of thought from MiMo/DeepSeek.", out[0].ReasoningContent,
@@ -103,10 +102,6 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 
 		assert.Equal(t, "tool", out[1].Role)
 		assert.Equal(t, "result text", out[1].Content)
-		assert.Equal(t, "user", out[2].Role)
-		assert.Contains(t, out[2].Content, "answer the current question")
-		assert.Contains(t, out[2].Content, "assert(P) permits P")
-		assert.Contains(t, out[2].Content, "evidence, not a replacement task")
 	})
 
 	t.Run("reasoning_content alone produces an assistant message", func(t *testing.T) {
@@ -154,7 +149,7 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 	})
 }
 
-func TestAppendToolResults_ReanchorsVerbatimCurrentTaskWithoutClassifyingIt(t *testing.T) {
+func TestAppendToolResults_DoesNotRepeatCurrentTask(t *testing.T) {
 	engine := &AgentEngine{}
 	query := "Analyze why the operation is prohibited; do not say it was rejected."
 	step := types.AgentStep{
@@ -169,12 +164,9 @@ func TestAppendToolResults_ReanchorsVerbatimCurrentTaskWithoutClassifyingIt(t *t
 	}
 
 	out := engine.appendToolResults(nil, step, query)
-	require.Len(t, out, 3)
-	reminder := out[2].Content
-	assert.Contains(t, reminder, query)
-	assert.Contains(t, reminder, "constrain(output, P) permits neither polarity")
-	assert.NotContains(t, reminder, "case_id")
-	assert.NotContains(t, reminder, "rejected\":true")
+	require.Len(t, out, 2)
+	assert.Equal(t, "tool", out[1].Role)
+	assert.Equal(t, "evidence", out[1].Content)
 }
 
 func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
@@ -192,12 +184,7 @@ func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
 	assert.Contains(t, block, `knowledge_id="kid-1"`)
 	assert.Contains(t, block, `title="Report.pdf"`)
 	assert.Contains(t, block, `file_type="pdf"`)
-	assert.Contains(t, block, "list_knowledge_chunks")
-	assert.Contains(t, block, "targeted grep_chunks")
-	assert.Contains(t, block, "complete claim-bearing content with a current citation handle as sufficient")
-	assert.Contains(t, block, "load an exact chunk_id only for")
 	assert.NotContains(t, block, "then deep-read exact chunk_id hits")
-	assert.Contains(t, block, "bounded tool context")
 	assert.NotContains(t, block, "<must_use>")
 	assert.NotContains(t, block, "runtime_observed_at")
 	assert.NotContains(t, block, "<current_time>")
@@ -258,11 +245,8 @@ func TestRenderUserTurnContent_IncludesScopeBlocks(t *testing.T) {
 	out := engine.RenderUserTurnContent("sess-1", "hello")
 	assert.Contains(t, out, "<runtime_context")
 	assert.Contains(t, out, "<must_use>")
-	assert.Contains(t, out, `<user_request verbatim="true" priority="highest">hello</user_request>`)
-	assert.Contains(t, out, conversationmemory.TerminalAnswerOpen)
-	assert.Contains(t, out, "no final-answer or final-response tool exists")
+	assert.Contains(t, out, `<user_request verbatim="true">hello</user_request>`)
 	assert.NotContains(t, out, "inside exactly one <weknora_final_response>")
-	assert.Contains(t, out, "Previous conversation messages are background context")
 	assert.Greater(t, strings.Index(out, "<user_request"), strings.Index(out, "<runtime_context"))
 }
 
@@ -284,28 +268,25 @@ func TestBuildMessagesWithLLMContext_CurrentTurnRemainsAuthoritative(t *testing.
 	assert.Equal(t, "old procurement question", messages[1].Content)
 	assert.Equal(t, "long old procurement answer", messages[2].Content)
 	assert.Contains(t, messages[3].Content, "new reserve-fund question")
+	assert.Equal(t, 1, strings.Count(messages[3].Content, "new reserve-fund question"))
 	assert.NotContains(t, messages[3].Content, "old procurement question")
 	assert.Contains(t, messages[3].Content,
-		`<user_request verbatim="true" priority="highest">new reserve-fund question</user_request>`)
-	assert.True(t, strings.HasSuffix(messages[3].Content,
-		conversationmemory.TerminalGenerationDirective()))
+		`<user_request verbatim="true">new reserve-fund question</user_request>`)
 }
 
 func TestBuildMessagesWithLLMContext_SeparatesExactTaskFromRuntimeAugmentation(t *testing.T) {
 	engine := &AgentEngine{config: &types.AgentConfig{}}
-	engine.SetCurrentUserRequest("write exactly two sentences")
-	augmented := "write exactly two sentences\n\n[derived attachment text]\n\n" +
-		conversationmemory.AppendCurrentTurnDirective("", "write exactly two sentences")
+	engine.SetCurrentTurnContext("[derived attachment text]")
 
-	messages := engine.buildMessagesWithLLMContext("system", augmented, "session-1", nil, nil)
+	messages := engine.buildMessagesWithLLMContext("system", "write exactly two sentences", "session-1", nil, nil)
 	require.Len(t, messages, 2)
 	content := messages[1].Content
 	assert.Contains(t, content, "[derived attachment text]")
-	assert.Contains(t, content, "WEKNORA_CURRENT_TURN_SEMANTICS_V15")
+	assert.Equal(t, 1, strings.Count(content, "write exactly two sentences"))
 	assert.Contains(t, content,
-		`<user_request verbatim="true" priority="highest">write exactly two sentences</user_request>`)
+		`<user_request verbatim="true">write exactly two sentences</user_request>`)
 	assert.NotContains(t, content,
-		`<user_request verbatim="true" priority="highest">write exactly two sentences\n\n[derived attachment text]`)
+		`<user_request verbatim="true">write exactly two sentences\n\n[derived attachment text]`)
 }
 
 func TestBuildMustUseBlock_MultiWordServicePrefix(t *testing.T) {

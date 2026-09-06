@@ -73,8 +73,12 @@ async function isStoredSessionValid(
   try {
     await getEmbedMessageList(channelId, apiToken, session.id, 1, undefined, session.sig)
     return true
-  } catch {
-    return false
+  } catch (error: unknown) {
+    const status = (error as { status?: number })?.status
+    if (status === 403 || status === 404) return false
+    // A network outage or expired API token says nothing about the stored
+    // conversation. Keep its identity and draft instead of creating a new one.
+    throw error
   }
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -23,7 +24,7 @@ func NewWikiFlagIssueTool(wikiService interfaces.WikiPageService, kbIDs []string
 			`Flag a wiki page that contains errors, mixed entities, or outdated information.
 Use this tool when you or the user identifies that a wiki page is factually incorrect or wrongly merged (e.g., a page contains information about two different products).
 This will log an issue for human review or automated maintenance.`,
-			json.RawMessage(`{
+			wikicontract.TargetSchema(json.RawMessage(`{
   "type": "object",
   "properties": {
     "slug": {
@@ -46,7 +47,7 @@ This will log an issue for human review or automated maintenance.`,
     }
   },
   "required": ["slug", "issue_type", "description"]
-}`),
+}`), true),
 		),
 		wikiService: wikiService,
 		kbIDs:       kbIDs,
@@ -55,6 +56,7 @@ This will log an issue for human review or automated maintenance.`,
 
 func (t *wikiFlagIssueTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
 	var params struct {
+		wikicontract.Target
 		Slug                  string   `json:"slug"`
 		IssueType             string   `json:"issue_type"`
 		Description           string   `json:"description"`
@@ -72,14 +74,20 @@ func (t *wikiFlagIssueTool) Execute(ctx context.Context, args json.RawMessage) (
 	if len(t.kbIDs) == 0 {
 		return &types.ToolResult{Success: false, Error: "No knowledge bases available for issue tracking"}, nil
 	}
-	
+
 	// Default to first KB ID if multiple (normally there's only one in this context)
-	kbID := t.kbIDs[0]
+	kbID, targetErr := params.Target.KnowledgeBase(t.kbIDs)
+	if targetErr != nil {
+		return &types.ToolResult{Success: false, Error: targetErr.Error()}, nil
+	}
 
 	// Verify the page exists
 	page, err := t.wikiService.GetPageBySlug(ctx, kbID, slug)
 	if err != nil || page == nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("Wiki page with slug '%s' not found", slug)}, nil
+	}
+	if err := params.Target.ValidatePage(page, true); err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, nil
 	}
 
 	issue := &types.WikiPageIssue{

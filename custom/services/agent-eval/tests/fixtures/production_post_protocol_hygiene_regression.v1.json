@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-04T23:25:00+08:00",
+  "source_environment": "codex-authored-unseen-post-protocol-hygiene-regression",
+  "target_environment": "local-production-mode",
+  "purpose": "bounded production-path verification of protocol hygiene, evidence fidelity, exact output structure, fresh RAG citations, and separation of hypothetical analysis from active user state",
+  "required_model_id": "prod-deepseek-v4-flash-int8-chat",
+  "source_answers_in_sut_input": false,
+  "source_references_in_sut_input": false,
+  "reference_answers_in_sut_input": false,
+  "required_claims_in_sut_input": false,
+  "judge_feedback_in_sut_input": false,
+  "sealed_holdout_accessed": false,
+  "eval_assistance_enabled": false,
+  "profiles": ["quick-answer", "rag-reasoning", "general-agent"],
+  "repetitions": 3,
+  "concurrency": 8,
+  "cases": [
+    {
+      "case_id": "post-protocol-product-evidence-and-hypothetical-separation",
+      "source_session_alias": "codex-post-protocol-product-evidence",
+      "source_agent_kind": "new-generic-regression",
+      "kb_slug": "imoutai-private-wecom",
+      "family": "cross-product-rag-plus-hypothetical-analysis-and-exact-output-structure",
+      "high_usage_user": false,
+      "turns": [
+        {
+          "source_ordinal": 1,
+          "query": "从当前知识库核实会议签到功能的版本要求、可用版本类别和支持系统。严格写三行，每行一个要点并各自附上依据。"
+        },
+        {
+          "source_ordinal": 2,
+          "query": "再查爱茅台鸿蒙客户端的获取方式。这里是在问资料里的安装说明，不是让你执行安装，也不能因为句子里有“不执行安装”就跳过检索；只写资料能确认的内容并引用。"
+        },
+        {
+          "source_ordinal": 3,
+          "query": "做一个纯逻辑反例分析：假设 Vega 已部署但验收结论未知，说明为什么不能断言它已验收。这个假设只用于本次分析，不是要记录 Vega 的真实状态；不用查资料。"
+        },
+        {
+          "source_ordinal": 4,
+          "query": "现在记录真实事项 Orion：评审日期是11月6日，负责人是 Nia，就绪结论未提供。‘不要称为受阻’只是措辞边界，不代表它不受阻。不要检索，也不要带入 Vega 的假设。"
+        },
+        {
+          "source_ordinal": 5,
+          "query": "In exactly three English sentences, state only Orion's review date, owner, and unresolved readiness conclusion, one fact per sentence. Do not mention Vega, products, tools, or future actions."
+        },
+        {
+          "source_ordinal": 6,
+          "query": "重新从资料取证并分三段回答：第一段三行列会议签到的版本要求、可用版本类别、支持系统，每行就近引用；第二段只写爱茅台鸿蒙客户端获取方式并引用；第三段用一句中文列 Orion 的三个用户事实，不给用户事实加资料引用。不要增加资料未写的先决条件。"
+        }
+      ]
+    }
+  ]
+}

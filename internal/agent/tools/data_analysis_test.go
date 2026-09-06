@@ -224,7 +224,7 @@ func TestTableAnalysisValidationOptionsAreTableOnly(t *testing.T) {
 		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__raw"})...,
 	)
 	if !hardcodedValidation.Valid {
-		t.Fatalf("table_analysis validation should allow LLM-normalized constant datasets; source_mapping is enforced at tool-call level, got %#v", hardcodedValidation.Errors)
+		t.Fatalf("table_analysis validation should allow LLM-normalized constant datasets; literal values remain query-authored inputs, got %#v", hardcodedValidation.Errors)
 	}
 
 	_, valuesValidation := utils.ValidateSQL(
@@ -232,7 +232,7 @@ func TestTableAnalysisValidationOptionsAreTableOnly(t *testing.T) {
 		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__raw"})...,
 	)
 	if !valuesValidation.Valid {
-		t.Fatalf("table_analysis validation should allow VALUES-normalized datasets; source_mapping is enforced at tool-call level, got %#v", valuesValidation.Errors)
+		t.Fatalf("table_analysis validation should allow VALUES-normalized datasets; literal values remain query-authored inputs, got %#v", valuesValidation.Errors)
 	}
 
 	_, boolFilterValidation := utils.ValidateSQL(
@@ -249,20 +249,6 @@ func TestTableAnalysisValidationOptionsAreTableOnly(t *testing.T) {
 	)
 	if !emptyProbeValidation.Valid {
 		t.Fatalf("table_analysis validation should allow harmless empty-result probes; runtime limits still apply, got %#v", emptyProbeValidation.Errors)
-	}
-}
-
-func TestTableAnalysisRequiresSourceMappingOnlyForDisplayedResult(t *testing.T) {
-	if hasUsableTableAnalysisSourceMapping(nil) {
-		t.Fatal("nil mapping should not be usable")
-	}
-	if hasUsableTableAnalysisSourceMapping(map[string]interface{}{"result_fields": []interface{}{}}) {
-		t.Fatal("empty template-looking mapping should not be usable")
-	}
-	if !hasUsableTableAnalysisSourceMapping(map[string]interface{}{
-		"说明": "营销序列来自 A56，子序列来自 C56:C57",
-	}) {
-		t.Fatal("free-form non-empty LLM-authored mapping should be usable")
 	}
 }
 

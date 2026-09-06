@@ -794,6 +794,19 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		}
 	}
 
+	// Required image extraction is part of the index generation. An exhausted
+	// image task must not publish an incomplete replacement over valid evidence.
+	if knowledge.CoreStatus == types.CoreStatusProcessing && (generationOutcomes.Failed > 0 || generationOutcomes.Degraded > 0) {
+		_, err := compareAndSwapProcessingGeneration(ctx, s.knowledgeRepo,
+			payload.TenantID, payload.KnowledgeID, payload.KnowledgeBaseID, payload.ProcessingGeneration,
+			[]string{types.ParseStatusProcessing}, map[string]interface{}{
+				"parse_status": types.ParseStatusFailed, "processing_owner": "", "processing_fanout": nil,
+				"error_message": "Required image extraction did not complete; the previous published index is retained.",
+				"updated_at":    time.Now(),
+			})
+		return err
+	}
+
 	// Close the multimodal stage span (parent enqueued it as "running"
 	// and we never see the per-image fan-in here other than by reaching
 	// post-process). LookupStage returns the persisted status and EndSpan
@@ -873,6 +886,9 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 			}
 			var textChunks []*types.Chunk
 			for _, chunk := range chunks {
+				if chunk.ProcessingGeneration != payload.ProcessingGeneration {
+					continue
+				}
 				if chunk.ChunkType == types.ChunkTypeText || chunk.ChunkType == types.ChunkTypeImageOCR ||
 					chunk.ChunkType == types.ChunkTypeImageCaption {
 					textChunks = append(textChunks, chunk)
@@ -1047,6 +1063,10 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 			"processing_fanout":  types.JSON(durablePlanBytes),
 			"updated_at":         now,
 		}
+		if knowledge.CoreStatus == types.CoreStatusProcessing {
+			updates["core_status"] = types.CoreStatusReady
+			updates["core_completed_at"] = now
+		}
 		if expectedSubtasks == 0 && enrichmentStatus != types.EnrichmentStatusNone {
 			updates["enrichment_completed_at"] = now
 		}
@@ -1099,6 +1119,9 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 			payload.ProcessingGeneration,
 		)
 		if !wikiResult.PendingPersisted {
+			if isDurableTaskDeferred(wikiErr) {
+				return wikiErr
+			}
 			if wikiErr == nil {
 				wikiErr = fmt.Errorf("wiki ingest pending row was not persisted")
 			}

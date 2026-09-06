@@ -717,7 +717,7 @@ func TestManagerRateLimitBackoffFencesOldDeliveryAndPausesDocument(t *testing.T)
 	require.Equal(t, 2, reclaimed.Attempt)
 }
 
-func TestManagerTransientRetryUsesSinglePartProbe(t *testing.T) {
+func TestManagerTransientRetryRestoresWindowAfterSuccessfulProbe(t *testing.T) {
 	ctx := context.Background()
 	db := newManagerTestDB(t)
 	enqueuer := &splitEnqueuerStub{}
@@ -763,18 +763,14 @@ func TestManagerTransientRetryUsesSinglePartProbe(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.False(t, allComplete)
-	require.Equal(t, 1, enqueuer.count(TypePartProcess),
-		"a successful retry must pace the next part instead of spending residual TPM")
-	require.NoError(t, db.Model(&Part{}).Where(
-		"plan_id = ? AND state = ?", created.ID, PartPreparing,
-	).Update("lease_until", time.Now().Add(-time.Second)).Error)
+	require.Equal(t, 5, enqueuer.count(TypePartProcess),
+		"a recovered provider must not permanently serialize healthy parts")
 	require.NoError(t, manager.DispatchPlan(ctx, created.ID))
-	require.Equal(t, 2, enqueuer.count(TypePartProcess),
-		"the next single-part probe must resume after its cooldown")
+	require.Equal(t, 5, enqueuer.count(TypePartProcess), "dispatch remains bounded and idempotent")
 	require.NoError(t, db.Model(&Part{}).Where(
 		"plan_id = ? AND state = ?", created.ID, PartQueued,
 	).Count(&queued).Error)
-	require.EqualValues(t, 1, queued)
+	require.EqualValues(t, 4, queued)
 }
 
 func TestManagerRecoveryNeverTurnsExpiredLeaseIntoBusinessFailure(t *testing.T) {
@@ -886,7 +882,7 @@ func TestBusinessFailuresAloneConsumeSplitPartRetryBudget(t *testing.T) {
 	require.Equal(t, 2, stored.FailureAttempts)
 }
 
-func TestManagerPublishGenerationAtomicallySwapsLogicalChunks(t *testing.T) {
+func TestManagerLinksDraftGenerationWithoutPublishing(t *testing.T) {
 	ctx := context.Background()
 	db := newManagerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&types.Chunk{}))
@@ -910,11 +906,12 @@ func TestManagerPublishGenerationAtomicallySwapsLogicalChunks(t *testing.T) {
 		ChunkType: types.ChunkTypeText, IsEnabled: false,
 	}
 	require.NoError(t, db.Create([]*types.Chunk{old, first, second}).Error)
+	require.NoError(t, db.Model(&types.Chunk{}).Where("id IN ?", []string{first.ID, second.ID}).Update("is_enabled", false).Error)
 	parts := []*Part{
 		{PartIndex: 0, FirstChunkID: first.ID, LastChunkID: first.ID},
 		{PartIndex: 1, FirstChunkID: second.ID, LastChunkID: second.ID},
 	}
-	require.NoError(t, manager.PublishGeneration(
+	require.NoError(t, manager.LinkGeneration(
 		ctx, 7, "knowledge", "new-generation", parts,
 	))
 
@@ -922,9 +919,9 @@ func TestManagerPublishGenerationAtomicallySwapsLogicalChunks(t *testing.T) {
 	require.NoError(t, db.First(&gotOld, "id = ?", old.ID).Error)
 	require.NoError(t, db.First(&gotFirst, "id = ?", first.ID).Error)
 	require.NoError(t, db.First(&gotSecond, "id = ?", second.ID).Error)
-	require.False(t, gotOld.IsEnabled)
-	require.True(t, gotFirst.IsEnabled)
-	require.True(t, gotSecond.IsEnabled)
+	require.True(t, gotOld.IsEnabled)
+	require.False(t, gotFirst.IsEnabled)
+	require.False(t, gotSecond.IsEnabled)
 	require.Equal(t, second.ID, gotFirst.NextChunkID)
 	require.Equal(t, first.ID, gotSecond.PreChunkID)
 }

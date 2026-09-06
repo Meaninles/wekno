@@ -737,7 +737,7 @@
                     </div>
 
                     <!-- 温度：Claude SDK 未提供采样温度参数 -->
-                    <div v-if="!isGeneralRuntimeAgent && !isFixedAnalysisAgent" class="setting-row">
+                    <div v-if="!selectedModelOwnsSampling" class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agent.editor.temperature') }}</label>
                         <p class="desc">{{ $t('agentEditor.desc.temperature') }}</p>
@@ -747,6 +747,13 @@
                           <t-slider v-model="formData.config.temperature" :min="0" :max="1" :step="0.1" />
                           <span class="slider-value">{{ formData.config.temperature }}</span>
                         </div>
+                      </div>
+                    </div>
+
+                    <div v-if="selectedModelOwnsSampling" class="setting-row">
+                      <div class="setting-info">
+                        <label>采样参数</label>
+                        <p class="desc">{{ selectedModelSamplingDescription }}</p>
                       </div>
                     </div>
 
@@ -819,8 +826,8 @@
                       </div>
                     </div>
 
-                    <!-- 最大迭代次数（Agent 模式） -->
-                    <div v-if="isAgentMode" class="setting-row">
+                    <!-- Both conversation profiles use the shared tool loop. -->
+                    <div class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agent.editor.maxIterations') }}</label>
                         <p class="desc">{{ $t('agentEditor.desc.maxIterations') }}</p>
@@ -831,8 +838,7 @@
                       </div>
                     </div>
 
-                    <!-- LLM 调用超时（Agent 模式） -->
-                    <div v-if="isAgentMode" class="setting-row">
+                    <div class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agentEditor.llmCallTimeout.label') }}</label>
                         <p class="desc">{{ $t('agentEditor.llmCallTimeout.desc') }}</p>
@@ -1552,6 +1558,21 @@
                       </div>
                     </div>
 
+                    <template v-if="formData.config.retrieval_budget">
+                      <div class="setting-row">
+                        <div class="setting-info"><label>候选数量</label><p class="desc">每个检索查询的候选上限。0 使用自动预算。</p></div>
+                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.candidate_count" :min="0" :max="500" theme="column" /></div>
+                      </div>
+                      <div class="setting-row">
+                        <div class="setting-info"><label>重排候选数量</label><p class="desc">去重后参与重排的证据上限。0 使用自动预算。</p></div>
+                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.fusion_count" :min="0" :max="500" theme="column" /></div>
+                      </div>
+                      <div class="setting-row">
+                        <div class="setting-info"><label>回答证据预算</label><p class="desc">包含正文和图片文字的估算 token 上限。0 使用自动预算。</p></div>
+                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.evidence_tokens" :min="0" :max="64000" theme="column" /></div>
+                      </div>
+                    </template>
+
                     <!-- 关键词阈值 -->
                     <div class="setting-row">
                       <div class="setting-info">
@@ -1627,19 +1648,6 @@
                             :step="0.05" />
                           <span class="slider-value">{{ formData.config.faq_direct_answer_threshold?.toFixed(2)
                             }}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div v-if="hasFaqKnowledgeBase && formData.config.faq_priority_enabled" class="setting-row">
-                      <div class="setting-info">
-                        <label>{{ $t('agentEditor.faq.boostLabel') }}</label>
-                        <p class="desc">{{ $t('agentEditor.faq.boostDesc') }}</p>
-                      </div>
-                      <div class="setting-control">
-                        <div class="slider-wrapper">
-                          <t-slider v-model="formData.config.faq_score_boost" :min="1" :max="2" :step="0.1" />
-                          <span class="slider-value">{{ formData.config.faq_score_boost?.toFixed(1) }}x</span>
                         </div>
                       </div>
                     </div>
@@ -1886,6 +1894,12 @@ onBeforeUnmount(() => {
 const saving = ref(false);
 const resettingBuiltinAgent = ref(false);
 const allModels = ref<ModelConfig[]>([]);
+const selectedModelExtra = computed(() => allModels.value.find(model => model.id === formData.value.config.model_id)?.parameters?.extra_config || {});
+const selectedModelOwnsSampling = computed(() => selectedModelExtra.value.generation_policy === 'gateway' || selectedModelExtra.value.agent_runtime_adapter === 'claude-sdk');
+const selectedModelSamplingDescription = computed(() => selectedModelExtra.value.generation_policy === 'gateway'
+  ? '由网关按实际模型和思考开关设置官方参数。思考强度在模型设置中配置。'
+  : 'Claude SDK 不提供温度参数，由模型服务决定。');
+
 const kbOptions = ref<{ label: string; value: string; type?: 'document' | 'faq'; count?: number; shared?: boolean; orgName?: string; permission?: 'owner' | 'admin' | 'editor' | 'viewer' | null; ragEnabled?: boolean; wikiEnabled?: boolean; capabilities?: KBCapabilities }[]>([]);
 const dbSourceOptions = ref<DatabaseSource[]>([]);
 // 智能体类型预设（仅 smart-reasoning 模式下展示）
@@ -2479,7 +2493,6 @@ const defaultFormData = {
     // FAQ 策略设置
     faq_priority_enabled: true, // 是否启用 FAQ 优先策略
     faq_direct_answer_threshold: 0.9, // FAQ 直接回答阈值（相似度高于此值直接使用 FAQ 答案）
-    faq_score_boost: 1.2, // FAQ 分数加权系数
     // 网络搜索设置
     web_search_enabled: false,
     web_search_max_results: 5,
@@ -2491,6 +2504,7 @@ const defaultFormData = {
     history_turns: 5,
     // 检索策略设置
     embedding_top_k: 10,
+    retrieval_budget: { candidate_count: 0, fusion_count: 0, evidence_tokens: 0 },
     keyword_threshold: 0.3,
     vector_threshold: 0.5,
     rerank_top_k: 5,
@@ -3302,17 +3316,7 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
   const target = formData.value.config;
   if (c.system_prompt_id !== undefined) {
     target.system_prompt_id = c.system_prompt_id;
-    // 根据 system_prompt_id 从已加载的模板列表里查出正文并回填到用户可见的 textarea
-    const tmpl = agentSystemPromptTemplates.value.find(t => t.id === c.system_prompt_id);
-    if (tmpl && typeof tmpl.content === 'string') {
-      target.system_prompt = tmpl.content;
-    } else {
-      // 模板列表还没加载完 / 或预设引用了不存在的 id：清空让用户感知到变化
-      target.system_prompt = '';
-      if (c.system_prompt_id) {
-        console.warn(`[AgentType] system_prompt_id "${c.system_prompt_id}" not found in agent_system_prompt templates`);
-      }
-    }
+    target.system_prompt = c.system_prompt || '';
   }
   if (typeof c.thinking === 'boolean') target.thinking = c.thinking;
   if (typeof c.temperature === 'number') target.temperature = c.temperature;
@@ -3326,7 +3330,6 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
   if (typeof c.retain_retrieval_history === 'boolean') target.retain_retrieval_history = c.retain_retrieval_history;
   if (typeof c.faq_priority_enabled === 'boolean') target.faq_priority_enabled = c.faq_priority_enabled;
   if (typeof c.faq_direct_answer_threshold === 'number') target.faq_direct_answer_threshold = c.faq_direct_answer_threshold;
-  if (typeof c.faq_score_boost === 'number') target.faq_score_boost = c.faq_score_boost;
   if (typeof c.web_search_enabled === 'boolean') target.web_search_enabled = c.web_search_enabled;
   if (typeof c.claude_sdk_web_search_enabled === 'boolean') target.claude_sdk_web_search_enabled = c.claude_sdk_web_search_enabled;
   if (typeof c.web_fetch_enabled === 'boolean') target.web_fetch_enabled = c.web_fetch_enabled;
@@ -3494,6 +3497,7 @@ const normalizeAgentFormData = (agent: CustomAgent) => {
 
 const applyAgentFormData = (agent: CustomAgent) => {
   const agentData = normalizeAgentFormData(agent);
+  agentData.config.retrieval_budget ??= { candidate_count: 0, fusion_count: 0, evidence_tokens: 0 };
   isInitializing.value = true;
   formData.value = agentData;
   if (isDocumentProcessingAgent.value) {
@@ -3833,9 +3837,6 @@ watch(agentMode, (val, _oldVal) => {
       }
       formData.value.config.allowed_tools = tools;
     }
-    if (formData.value.config.max_iterations <= 1) {
-      formData.value.config.max_iterations = 10;
-    }
     // 切换到 Agent 模式时，如果系统提示词是快速问答的默认值或为空，替换为 Agent 默认提示词
     if (defaultAgentSystemPrompt.value) {
       const isDefaultNormalPrompt = formData.value.config.system_prompt === defaultNormalSystemPrompt.value;
@@ -3850,7 +3851,6 @@ watch(agentMode, (val, _oldVal) => {
     if (currentSection.value === 'document-template') {
       currentSection.value = 'model';
     }
-    formData.value.config.max_iterations = 1; // 设置为1表示单轮 RAG
     // 切换到快速问答模式时，如果系统提示词是 Agent 的默认值或为空，替换为快速问答默认提示词
     if (defaultNormalSystemPrompt.value) {
       const isDefaultAgentPrompt = formData.value.config.system_prompt === defaultAgentSystemPrompt.value;
@@ -4809,6 +4809,7 @@ watch(() => props.visible, (val) => {
 
 // 模板选择处理函数
 const handleSystemPromptTemplateSelect = (template: PromptTemplate) => {
+  formData.value.config.system_prompt_id = template.id;
   formData.value.config.system_prompt = template.content;
 };
 
@@ -4921,14 +4922,14 @@ const handleSave = async () => {
     }
 
     // 自定义智能体必须填写系统提示词
-    if (!formData.value.config.system_prompt || !formData.value.config.system_prompt.trim()) {
+    if (!formData.value.config.system_prompt_id && !formData.value.config.system_prompt?.trim()) {
       MessagePlugin.error(t('agent.editor.systemPromptRequired'));
       currentSection.value = 'prompts';
       return;
     }
 
     // 自定义智能体普通模式必须填写上下文模板
-    if (!isAgentMode.value && (!formData.value.config.context_template || !formData.value.config.context_template.trim())) {
+    if (!isAgentMode.value && !formData.value.config.context_template_id && !formData.value.config.context_template?.trim()) {
       MessagePlugin.error(t('agent.editor.contextTemplateRequired'));
       currentSection.value = 'prompts';
       return;
@@ -4983,7 +4984,7 @@ const handleSave = async () => {
     return;
   }
 
-  if (isAgentMode.value) {
+  {
     const maxIterations = Number(formData.value.config.max_iterations);
     if (!Number.isFinite(maxIterations) || maxIterations < 1 || maxIterations > AGENT_MAX_ITERATIONS_LIMIT) {
       MessagePlugin.error(`最大迭代次数必须在 1-${AGENT_MAX_ITERATIONS_LIMIT} 之间`);

@@ -18,6 +18,8 @@ def empty_dict_when_none(value: Any) -> Any:
 
 
 class LLMConfig(BaseModel):
+    reasoning_effort: str = ""
+    runtime_adapter: str = "platform"
     supports_vision: bool = False
     model_name: str
     base_url: str = ""
@@ -35,6 +37,7 @@ class RuntimeToolSpec(BaseModel):
 
 
 class RuntimeConfigSpec(BaseModel):
+    max_completion_tokens: int = 0
     agent_id: str = ""
     agent_type: str = ""
     max_iterations: int = 10
@@ -66,7 +69,6 @@ class RuntimeConfigSpec(BaseModel):
     rerank_threshold: float = 0
     faq_priority_enabled: bool = False
     faq_direct_answer_threshold: float = 0
-    faq_score_boost: float = 0
     knowledge_management: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("knowledge_management", mode="before")
@@ -158,6 +160,7 @@ class ProfessionalSkillSpec(BaseModel):
 
 
 class LightweightSkillSpec(BaseModel):
+    selected_by_user: bool = False
     key: str
     name: str
     description: str = ""

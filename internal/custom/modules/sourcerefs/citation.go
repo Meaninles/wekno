@@ -1,7 +1,6 @@
 package sourcerefs
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -269,7 +268,7 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 }
 
 const citationUseInstruction = `[CITATION_USE]
-Complete the original user's answer using the current-turn evidence. For each factual sentence or compact group of adjacent claims, copy the matching citation_handle_for_this_evidence verbatim immediately after the supported sentence or paragraph. Select that handle by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. The handle must appear in the final user-visible answer. Use the minimum sufficient handles: choose the single most direct evidence when sources overlap, keep every handle adjacent to the claim it supports, and leave framing, transitions, analysis, and unsupported text without a handle.
+Cite source-supported claims with the matching provided cite_exactly handle, placed beside the supported text. Use only current registered IDs; validated reused evidence receives current IDs. Omit citations for unsupported claims and disclose material evidence gaps.
 [/CITATION_USE]`
 
 // TerminalCitationInstruction returns the single shared, positive final-output
@@ -349,7 +348,7 @@ func RenderEvidenceBlock(ref *types.SearchResult, content string, annotations ma
 const generationContractMarker = "[WEKNORA_CITATION_OUTPUT]"
 
 const generationContract = `[WEKNORA_CITATION_OUTPUT]
-The last user message is the current task. A prior turn's output format, ending, or citation constraint is inactive unless the current message repeats or explicitly refers to it. Citation handles are request-local: when the current turn contains no AVAILABLE_CITATIONS or source_references, emit no <src> tag and do not claim that earlier retrieval is current evidence. When current-turn AVAILABLE_CITATIONS or source_references are present, cite claims directly supported by the matching claim-bearing evidence. Copy the matching cite_exactly value verbatim immediately after the supported sentence or paragraph; each supplied value uses the canonical form <src id="S1" /> with its own available S-number. Never invent, guess, or reuse a handle from conversation history. Treat each S-number as an opaque evidence handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. A document title and its collection membership are different facts: claim that a document belongs to a named collection when current evidence exposes that collection name or the current scope has exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited.
+Copy a provided source handle such as <src id="S1" /> beside the claim supported by that evidence. IDs are opaque and local to this run; do not invent a handle or copy one from assistant history. The evidence itself, not its title or rank, must support the claim. Cite the minimum sufficient sources and keep citation tags outside code and link destinations.
 [/WEKNORA_CITATION_OUTPUT]`
 
 // EnsureGenerationContract applies the shared first-pass generation contract
@@ -469,39 +468,41 @@ func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 	return src
 }
 
-// sourceLocatorAttribute keeps the model-facing citation catalog bounded while
-// CitationSource.SourceLocator retains the complete coordinate for API/UI
-// consumers. Invalid JSON is never injected into the XML prompt.
+// sourceLocatorAttribute projects coordinates without repeating the parser's
+// per-row copies of table content. API/UI retain the untouched full locator.
+// The projection remains valid JSON; context budgets count its actual size.
 func sourceLocatorAttribute(locator types.JSON) string {
 	if len(locator) == 0 || !json.Valid(locator) {
 		return ""
 	}
-	const maximumRunes = 1024
 	var logical map[string]any
 	if err := json.Unmarshal(locator, &logical); err != nil {
 		return ""
 	}
-	for key := range logical {
-		if key == "physical_part_index" ||
-			strings.HasPrefix(key, "part_row_") ||
-			strings.HasPrefix(key, "part_line_") {
-			delete(logical, key)
-		}
-	}
+	projectSourceCoordinates(logical)
 	logicalLocator, err := json.Marshal(logical)
 	if err != nil {
 		return ""
 	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, logicalLocator); err != nil {
-		return ""
+	return string(logicalLocator)
+}
+
+func projectSourceCoordinates(value any) {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			if key == "physical_part_index" || key == "table_rows" || key == "block_id" || key == "table_id" ||
+				strings.HasPrefix(key, "part_row_") || strings.HasPrefix(key, "part_line_") {
+				delete(node, key)
+				continue
+			}
+			projectSourceCoordinates(child)
+		}
+	case []any:
+		for _, child := range node {
+			projectSourceCoordinates(child)
+		}
 	}
-	value := compact.String()
-	runes := []rune(value)
-	if len(runes) > maximumRunes {
-		return string(runes[:maximumRunes]) + "…"
-	}
-	return value
 }
 
 // ModelSourceLocator returns a bounded, compact original-source coordinate for

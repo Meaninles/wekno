@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/logprivacy"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modelparams"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/provider"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -38,10 +39,14 @@ type RemoteAPIChat struct {
 	adapter providerAdapter
 	// thinkingOverride 来自 extra_config.thinking_control，非 nil 时覆盖 adapter.Thinking()。
 	thinkingOverride ThinkingStrategy
+	reasoningEffort  string
 }
 
 // NewRemoteAPIChat 创建远程 API 聊天实例
 func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
+	if err := types.ValidateThinkingControl(chatConfig.ExtraConfig); err != nil {
+		return nil, err
+	}
 	if chatConfig.BaseURL != "" {
 		if err := secutils.ValidateURLForSSRF(chatConfig.BaseURL); err != nil {
 			return nil, fmt.Errorf("baseURL SSRF check failed: %w", err)
@@ -122,7 +127,7 @@ func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
 		modelName:        modelName,
 		client:           openai.NewClientWithConfig(config),
 		modelID:          chatConfig.ModelID,
-		baseURL:          chatConfig.BaseURL,
+		baseURL:          config.BaseURL,
 		apiKey:           apiKey,
 		provider:         providerName,
 		appID:            chatConfig.AppID,
@@ -130,6 +135,7 @@ func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
 		customHeaders:    chatConfig.CustomHeaders,
 		adapter:          resolveProvider(providerName, modelName),
 		thinkingOverride: parseThinkingOverride(chatConfig.ExtraConfig),
+		reasoningEffort:  strings.TrimSpace(chatConfig.ExtraConfig["reasoning_effort"]),
 	}, nil
 }
 
@@ -172,6 +178,25 @@ func (c *RemoteAPIChat) buildOutbound(
 	}
 	endpoint = c.adapter.Endpoint(c.baseURL, c.modelID, isStream)
 	useRawHTTP = useRaw || c.adapter.ForceRawHTTP() || endpoint != ""
+	fields := map[string]any{}
+	if opts != nil && opts.Temperature == 0 && req.Temperature == 0 {
+		switch c.adapter.(type) {
+		case openAIReasoningProvider, azureReasoningProvider:
+			// These providers intentionally omit unsupported sampling parameters.
+		default:
+			fields["temperature"] = 0.0
+		}
+	}
+	if c.reasoningEffort != "" && (opts == nil || opts.Thinking == nil || *opts.Thinking) {
+		fields["reasoning_effort"] = c.reasoningEffort
+	}
+	if len(fields) > 0 {
+		body, err = modelparams.Apply(body, fields)
+		if err != nil {
+			return nil, "", false, err
+		}
+		useRawHTTP = true
+	}
 	return body, endpoint, useRawHTTP, nil
 }
 

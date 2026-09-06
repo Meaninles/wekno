@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/toolcontract"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/utils"
@@ -1242,12 +1243,10 @@ func (s *Service) Schema(ctx context.Context, scope ToolScope, input SchemaInput
 		filter[strings.ToLower(strings.TrimSpace(name))] = true
 	}
 	outTables := make([]map[string]any, 0, len(tables))
-	selectedTables := make([]SourceTable, 0, len(tables))
 	for _, table := range tables {
 		if len(filter) > 0 && !matchesTableFilter(table, filter) {
 			continue
 		}
-		selectedTables = append(selectedTables, table)
 		cols := make([]map[string]any, 0, len(table.Columns))
 		for _, col := range table.Columns {
 			if isHiddenColumn(col) {
@@ -1267,10 +1266,9 @@ func (s *Service) Schema(ctx context.Context, scope ToolScope, input SchemaInput
 		})
 	}
 	return map[string]any{
-		"display_type":     "db_schema",
-		"tables":           outTables,
-		"semantic_context": inferBusinessSemantics(selectedTables),
-		"count":            len(outTables),
+		"display_type": "db_schema",
+		"tables":       outTables,
+		"count":        len(outTables),
 	}, nil
 }
 
@@ -1429,6 +1427,7 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 		"display_type":    DisplayTypeStructuredAnalysis,
 		"display_mode":    displayMode,
 		"analysis_type":   "database",
+		"lineage":         toolcontract.QueryLineage(queryTables, querySQL, cols, resultRows, truncated),
 		"source":          map[string]any{"type": "database", "source_count": len(seenSourceIDs), "source_ids": queriedSourceIDs, "source_names": queriedSourceNames},
 		"query":           querySQL,
 		"columns":         cols,
@@ -1851,137 +1850,6 @@ func scoreTable(table SourceTable, terms []string) int {
 		}
 	}
 	return score
-}
-
-func inferBusinessSemantics(tables []SourceTable) []map[string]any {
-	out := make([]map[string]any, 0, len(tables))
-	tableByName := make(map[string]SourceTable, len(tables))
-	for _, table := range tables {
-		tableByName[strings.ToLower(table.PhysicalName)] = table
-	}
-	for _, table := range tables {
-		columns := make([]map[string]any, 0, len(table.Columns))
-		metricNames := make([]string, 0)
-		dimensionNames := make([]string, 0)
-		timeNames := make([]string, 0)
-		foreignKeys := make([]map[string]string, 0)
-		for _, col := range table.Columns {
-			if isHiddenColumn(col) {
-				continue
-			}
-			meaning := inferColumnBusinessMeaning(table.PhysicalName, col)
-			columns = append(columns, map[string]any{
-				"name":             col.ColumnName,
-				"business_meaning": meaning,
-				"semantic_type":    col.SemanticType,
-			})
-			switch col.SemanticType {
-			case "metric":
-				metricNames = append(metricNames, col.ColumnName)
-			case "time":
-				timeNames = append(timeNames, col.ColumnName)
-			default:
-				dimensionNames = append(dimensionNames, col.ColumnName)
-			}
-			if fk := inferForeignKey(tableByName, col.ColumnName); fk != "" {
-				foreignKeys = append(foreignKeys, map[string]string{"column": col.ColumnName, "likely_references": fk})
-			}
-		}
-		out = append(out, map[string]any{
-			"sql_table_name":       table.VirtualName,
-			"business_meaning":     inferTableBusinessMeaning(table),
-			"grain_hint":           inferTableGrain(table),
-			"metric_columns":       metricNames,
-			"dimension_columns":    dimensionNames,
-			"time_columns":         timeNames,
-			"likely_relationships": foreignKeys,
-			"columns":              columns,
-		})
-	}
-	return out
-}
-
-func inferTableBusinessMeaning(table SourceTable) string {
-	if desc := strings.TrimSpace(table.Description); desc != "" {
-		return desc
-	}
-	name := strings.ReplaceAll(table.PhysicalName, "_", " ")
-	lower := strings.ToLower(name)
-	switch {
-	case strings.Contains(lower, "order"):
-		return "order or transaction records"
-	case strings.Contains(lower, "customer") || strings.Contains(lower, "user"):
-		return "customer or user dimension records"
-	case strings.Contains(lower, "product") || strings.Contains(lower, "sku"):
-		return "product or SKU dimension records"
-	case strings.Contains(lower, "payment"):
-		return "payment records"
-	case strings.Contains(lower, "refund"):
-		return "refund or after-sales records"
-	case strings.Contains(lower, "inventory") || strings.Contains(lower, "stock"):
-		return "inventory or stock records"
-	case strings.Contains(lower, "campaign") || strings.Contains(lower, "marketing"):
-		return "marketing campaign records"
-	default:
-		return "business table inferred from table and column names: " + name
-	}
-}
-
-func inferTableGrain(table SourceTable) string {
-	lower := strings.ToLower(table.PhysicalName)
-	for _, col := range table.Columns {
-		colName := strings.ToLower(col.ColumnName)
-		if colName == "id" || strings.HasSuffix(colName, "_id") {
-			if strings.Contains(lower, "item") || strings.Contains(lower, "line") {
-				return "likely one row per detail line"
-			}
-			if strings.Contains(lower, "daily") || strings.Contains(lower, "day") {
-				return "likely one row per day and dimension"
-			}
-			return "likely one row per " + strings.TrimSuffix(strings.TrimSuffix(lower, "s"), "_id") + " entity/event"
-		}
-	}
-	return "grain should be confirmed from primary keys, names and sample rows"
-}
-
-func inferColumnBusinessMeaning(tableName string, col SourceColumn) string {
-	if desc := strings.TrimSpace(col.Description); desc != "" {
-		return desc
-	}
-	name := strings.ToLower(strings.ReplaceAll(col.ColumnName, "_", " "))
-	switch {
-	case name == "id":
-		return "primary identifier of the row"
-	case strings.HasSuffix(strings.ToLower(col.ColumnName), "_id"):
-		return "identifier that may join to a related dimension/entity table"
-	case strings.Contains(name, "amount"), strings.Contains(name, "price"), strings.Contains(name, "revenue"), strings.Contains(name, "cost"):
-		return "monetary metric"
-	case strings.Contains(name, "qty") || strings.Contains(name, "quantity") || strings.Contains(name, "count"):
-		return "quantity/count metric"
-	case strings.Contains(name, "status"):
-		return "status/category dimension"
-	case strings.Contains(name, "date") || strings.Contains(name, "time") || strings.HasSuffix(strings.ToLower(col.ColumnName), "_at"):
-		return "time dimension"
-	case strings.Contains(name, "name") || strings.Contains(name, "type") || strings.Contains(name, "category"):
-		return "descriptive/category dimension"
-	default:
-		return "field in " + tableName + " inferred from name and type"
-	}
-}
-
-func inferForeignKey(tableByName map[string]SourceTable, columnName string) string {
-	lower := strings.ToLower(columnName)
-	if !strings.HasSuffix(lower, "_id") || lower == "id" {
-		return ""
-	}
-	stem := strings.TrimSuffix(lower, "_id")
-	candidates := []string{stem, stem + "s", stem + "_info", stem + "_dim", "dim_" + stem}
-	for _, candidate := range candidates {
-		if table, ok := tableByName[candidate]; ok {
-			return table.VirtualName
-		}
-	}
-	return ""
 }
 
 func sourceSummaries(sources map[string]Source) []map[string]any {

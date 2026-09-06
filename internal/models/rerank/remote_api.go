@@ -30,11 +30,11 @@ func (r *OpenAIReranker) SetCustomHeaders(headers map[string]string) {
 
 // RerankRequest represents a request to rerank documents based on relevance to a query
 type RerankRequest struct {
-	Model                string                 `json:"model"`                  // Model to use for reranking
-	Query                string                 `json:"query"`                  // Query text to compare documents against
-	Documents            []string               `json:"documents"`              // List of document texts to rerank
-	AdditionalData       map[string]interface{} `json:"additional_data"`        // Optional additional data for the model
-	TruncatePromptTokens int                    `json:"truncate_prompt_tokens"` // Maximum prompt tokens to use
+	Model                string                 `json:"model"`           // Model to use for reranking
+	Query                string                 `json:"query"`           // Query text to compare documents against
+	Documents            []string               `json:"documents"`       // List of document texts to rerank
+	AdditionalData       map[string]interface{} `json:"additional_data"` // Optional additional data for the model
+	TruncatePromptTokens int                    `json:"truncate_prompt_tokens,omitempty"`
 }
 
 // RerankResponse represents the response from a reranking request
@@ -71,10 +71,9 @@ func NewOpenAIReranker(config *RerankerConfig) (*OpenAIReranker, error) {
 func (r *OpenAIReranker) Rerank(ctx context.Context, query string, documents []string) ([]RankResult, error) {
 	// Build the request body
 	requestBody := &RerankRequest{
-		Model:                r.modelName,
-		Query:                query,
-		Documents:            documents,
-		TruncatePromptTokens: 511,
+		Model:     r.modelName,
+		Query:     query,
+		Documents: documents,
 	}
 
 	jsonData, err := json.Marshal(requestBody)

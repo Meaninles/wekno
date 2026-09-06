@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/retrievalfence"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -50,11 +51,31 @@ func (s *knowledgeBaseService) retrieveFromStores(
 	groups []*storeGroup,
 	normalizer retriever.ScoreNormalizer,
 ) ([]*types.RetrieveResult, error) {
+	return s.retrieveStoreGroups(ctx, groups, normalizer, func(ctx context.Context, group *storeGroup) ([]*types.RetrieveResult, error) {
+		scopes := make([]retrievalfence.Scope, 0, len(group.KBIDs))
+		for _, id := range group.KBIDs {
+			scopes = append(scopes, retrievalfence.Scope{TenantID: group.OwnerTenantID, KnowledgeBaseID: id})
+		}
+		return retrievalfence.Retrieve(ctx, paramsWithTopK(group), scopes, group.Engine.Retrieve,
+			func(ctx context.Context, ids []string) ([]*types.Chunk, error) {
+				return s.chunkRepo.ListChunksByIDOnly(ctx, ids)
+			},
+			func(ctx context.Context, tenantID uint64, ids []string) ([]*types.Knowledge, error) {
+				return s.kgRepo.GetKnowledgeBatch(ctx, tenantID, ids)
+			})
+	})
+}
+
+func (s *knowledgeBaseService) retrieveStoreGroups(ctx context.Context, groups []*storeGroup,
+	normalizer retriever.ScoreNormalizer, fetch func(context.Context, *storeGroup) ([]*types.RetrieveResult, error),
+) ([]*types.RetrieveResult, error) {
 	if len(groups) == 0 {
 		return nil, nil
 	}
 	if len(groups) == 1 {
-		return groups[0].Engine.Retrieve(ctx, paramsWithTopK(groups[0]))
+		groupCtx, cancel := context.WithTimeout(ctx, multiStoreRetrieveTimeout())
+		defer cancel()
+		return fetch(groupCtx, groups[0])
 	}
 
 	timeout := multiStoreRetrieveTimeout()
@@ -70,7 +91,7 @@ func (s *knowledgeBaseService) retrieveFromStores(
 		g.Go(func() error {
 			gcCtx, cancel := context.WithTimeout(gctx, timeout)
 			defer cancel()
-			res, err := grp.Engine.Retrieve(gcCtx, paramsWithTopK(grp))
+			res, err := fetch(gcCtx, grp)
 			if err != nil {
 				logger.WarnWithFields(gctx, logger.Fields{
 					"tenant_id":  grp.OwnerTenantID,

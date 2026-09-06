@@ -13,12 +13,15 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 )
 
 type activeRun struct {
+	chatModel          chat.Chat
+	agentConfig        *types.AgentConfig
 	runID              string
 	client             *Client
 	originalInputFiles map[string]OriginalInputFileSpec
@@ -32,18 +35,20 @@ type activeRun struct {
 	originalUserQuery  string
 	toolExecTimeout    time.Duration
 
-	mu       sync.Mutex
-	stepSeq  int
-	steps    []types.AgentStep
-	progress map[string]progressRecord
-	refSeen  map[string]bool
-	sources  *sourcerefs.Registry
+	mu           sync.Mutex
+	stepSeq      int
+	steps        []types.AgentStep
+	runtimeTools map[string]runtimeToolRecord
+	refSeen      map[string]bool
+	sources      *sourcerefs.Registry
 }
 
-type progressRecord struct {
+type runtimeToolRecord struct {
 	iteration int
 	startedAt time.Time
 	toolName  string
+	args      map[string]any
+	done      bool
 }
 
 var activeRuns = struct {
@@ -315,94 +320,69 @@ func (r *activeRun) recordToolCall(iteration int, id, name string, args map[stri
 	r.steps = append(r.steps, step)
 }
 
-func (r *activeRun) recordProgressStatus(id, name, phase, message string, metadata map[string]any) {
-	id = strings.TrimSpace(id)
-	name = strings.TrimSpace(name)
-	phase = strings.TrimSpace(phase)
-	message = strings.TrimSpace(message)
-	if id == "" && name == "" && message == "" {
+// Runtime-selected tools use the same event and history contract as platform
+// callbacks. Status-only sidecar events never become synthetic tool calls.
+func (r *activeRun) recordRuntimeToolEvent(ctx context.Context, bus *event.EventBus, evt sidecarProgressData) {
+	if evt.ToolCallID == "" || evt.ToolName == "" {
 		return
 	}
-	if id == "" {
-		id = fmt.Sprintf("agent-progress-%s", name)
-	}
-	if name == "" {
-		name = "general_agent_progress"
-	}
-
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.progress == nil {
-		r.progress = make(map[string]progressRecord)
+	if r.runtimeTools == nil {
+		r.runtimeTools = make(map[string]runtimeToolRecord)
 	}
-	rec, exists := r.progress[id]
-	if !exists {
-		rec = progressRecord{
-			iteration: r.stepSeq,
-			startedAt: time.Now(),
-			toolName:  name,
-		}
-		r.stepSeq++
-		r.progress[id] = rec
-	}
-	if phase != "success" && phase != "error" {
+	rec, exists := r.runtimeTools[evt.ToolCallID]
+	if rec.done {
+		r.mu.Unlock()
 		return
 	}
-
-	success := phase != "error"
-	resultData := map[string]interface{}{
-		"agent_progress":         true,
-		"agent_progress_message": message,
-		"phase":                  phase,
-		"display_type":           "agent_progress",
+	if !exists {
+		args, _ := evt.Metadata["arguments"].(map[string]any)
+		rec = runtimeToolRecord{iteration: r.stepSeq, startedAt: time.Now(), toolName: evt.ToolName, args: args}
+		r.stepSeq++
+		r.runtimeTools[evt.ToolCallID] = rec
 	}
-	for key, value := range metadata {
-		if strings.TrimSpace(key) == "" {
-			continue
-		}
-		resultData[key] = value
+	terminal := evt.Phase == "success" || evt.Phase == "error"
+	if terminal {
+		rec.done = true
+		r.runtimeTools[evt.ToolCallID] = rec
 	}
-	resultData["agent_progress"] = true
-	resultData["agent_progress_message"] = message
-	resultData["phase"] = phase
-	resultData["display_type"] = "agent_progress"
-	result := &types.ToolResult{
-		Success: success,
-		Output:  message,
-		Data:    resultData,
+	r.mu.Unlock()
+	if !exists {
+		bus.Emit(ctx, event.Event{Type: event.EventAgentToolCall, SessionID: r.sessionID, RequestID: r.requestID,
+			Data: event.AgentToolCallData{ToolCallID: evt.ToolCallID, ToolName: rec.toolName, Arguments: rec.args, Iteration: rec.iteration}})
 	}
-	if !success {
-		result.Error = message
+	if !terminal {
+		return
 	}
-	durationMs := int64(0)
-	if !rec.startedAt.IsZero() {
-		durationMs = time.Since(rec.startedAt).Milliseconds()
-	}
-	args, _ := metadata["arguments"].(map[string]any)
-	if metadata["origin"] == "sdk" {
-		if output, ok := metadata["output"].(string); ok {
-			result.Output = output
-			if !success {
-				result.Error = output
-			}
-		}
-		if measured, ok := metadata["duration_ms"].(float64); ok {
-			durationMs = int64(measured)
+	output := evt.Content
+	if value, ok := evt.Metadata["output"]; ok {
+		if text, ok := value.(string); ok {
+			output = text
+		} else if encoded, err := json.Marshal(value); err == nil {
+			output = string(encoded)
 		}
 	}
-	r.steps = append(r.steps, types.AgentStep{
-		Iteration: rec.iteration,
-		ToolCalls: []types.ToolCall{{
-			ID:       id,
-			Name:     rec.toolName,
-			Args:     args,
-			Result:   result,
-			Duration: durationMs,
-		}},
-		Timestamp: time.Now(),
-	})
-	delete(r.progress, id)
+	result := &types.ToolResult{Success: evt.Phase == "success", Output: output}
+	if result.Success && rec.toolName == "create_artifact" {
+		var item SidecarArtifact
+		if json.Unmarshal([]byte(output), &item) == nil && item.Persisted && item.ArtifactID != "" {
+			result.Data = map[string]any{"display_type": displayTypeArtifacts,
+				"artifacts": artifactResultMaps([]ArtifactResult{{ArtifactID: item.ArtifactID,
+					FileName: item.FileName, FileType: item.FileType, FileSize: item.FileSize,
+					SHA256: item.SHA256, DownloadURL: item.DownloadURL}})}
+		}
+	}
+	if !result.Success {
+		result.Error = output
+	}
+	duration := time.Since(rec.startedAt).Milliseconds()
+	if measured, ok := evt.Metadata["duration_ms"].(float64); ok {
+		duration = int64(measured)
+	}
+	r.recordToolCall(rec.iteration, evt.ToolCallID, rec.toolName, rec.args, result, duration)
+	bus.Emit(ctx, event.Event{Type: event.EventAgentToolResult, SessionID: r.sessionID, RequestID: r.requestID,
+		Data: event.AgentToolResultData{ToolCallID: evt.ToolCallID, ToolName: rec.toolName, Output: result.Output,
+			Error: result.Error, Success: result.Success, Duration: duration, Iteration: rec.iteration, Data: result.Data}})
 }
 
 func (r *activeRun) snapshotSteps(finalAnswer string) []types.AgentStep {

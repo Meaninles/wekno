@@ -55,16 +55,16 @@ func (h *Handler) UploadArtifact(c *gin.Context) {
 		return
 	}
 	maxBytes := artifactUploadMaxBytes()
-	if c.Request.ContentLength < 0 || c.Request.ContentLength >= maxBytes {
+	if c.Request.ContentLength < 0 || c.Request.ContentLength > maxBytes {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "artifact body exceeds upload limit"})
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(c.Request.Body, maxBytes))
+	data, err := io.ReadAll(io.LimitReader(c.Request.Body, maxBytes+1))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read artifact body"})
 		return
 	}
-	if int64(len(data)) >= maxBytes {
+	if int64(len(data)) > maxBytes {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "artifact body exceeds upload limit"})
 		return
 	}

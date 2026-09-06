@@ -902,8 +902,8 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         break
       }
       case 'agent_progress': {
-        if (String(dataPayload?.answer_contract || '').startsWith('claude-sdk-terminal-v')) {
-          message._usesClaudeSDKTerminalDelivery = true
+        if (dataPayload?.answer_contract === 'runtime-terminal-v1') {
+          message._usesRuntimeTerminalDelivery = true
         }
         if (shouldSupersedeAgentAnswersForProgress(dataPayload)) {
           supersedeAgentAnswers(message)

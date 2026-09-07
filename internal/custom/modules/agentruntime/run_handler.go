@@ -87,7 +87,16 @@ func (h *Handler) RunControl(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 		return
 	}
-	if op == "prefetch" {
+	if op == "prefetch" || op == "reuse-evidence" {
+		if op == "reuse-evidence" {
+			result, err := h.service.reuseEvidence(ctx, req.RunID, req.OwnerEpoch)
+			if err != nil {
+				controlFailure(c, err)
+				return
+			}
+			c.JSON(200, result)
+			return
+		}
 		result, err := h.service.prefetch(ctx, req.RunID, req.OwnerEpoch)
 		if err != nil {
 			controlFailure(c, err)
@@ -186,10 +195,8 @@ func (s *Service) validateResult(ctx context.Context, tx *gorm.DB, row *RunRecor
 	if strings.TrimSpace(result.Answer) == "" {
 		violations = append(violations, "Answer must not be empty.")
 	}
-	clean, refs, report := sourcerefs.FilterAnswerCitations(result.Answer, row.References)
-	if len(report.UnknownIDs) > 0 || report.ForbiddenTags > 0 || report.IncompleteTags > 0 {
-		violations = append(violations, "Use only source handles returned by tools, with the exact <src id=\"S1\" /> syntax. Remove unsupported source claims.")
-	}
+	// Resolve display references without a citation review, retry or diagnostic.
+	clean, refs, _ := sourcerefs.FilterAnswerCitations(result.Answer, row.References)
 	result.Answer, result.References = clean, refs
 	result.Usage = map[string]any{"model_requests": row.ModelRequests, "input_tokens": row.InputTokens, "output_tokens": row.OutputTokens, "unknown_usage_requests": row.UnknownUsageRequests, "reserved_tokens": row.ReservedTokens}
 	var published []Artifact

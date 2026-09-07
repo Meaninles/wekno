@@ -398,7 +398,6 @@ export function pollWeChatQRCodeStatus(qrcode: string) {
   return post('/api/v1/wechat/qrcode/status', { qrcode }) as unknown as Promise<{ data: WeChatQRCodeStatus }>;
 }
 
-export const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat';
 
 export const BUILTIN_WIKI_RESEARCHER_ID = 'builtin-wiki-researcher';
 

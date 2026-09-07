@@ -13,6 +13,7 @@ from app.contracts import RunRequest
 from app.delivery import DeliveryError
 from app.budget import BudgetExhausted
 from app.run import execute
+from app.context import KNOWLEDGE_QA_SCOPE, messages, system_prompt
 
 
 class Parameters(BaseModel):
@@ -61,7 +62,7 @@ class MemoryControl:
     async def validate(self, result):
         if self.reject_once:
             self.reject_once = False
-            return {"violations": ["Unknown source ID"]}
+            return {"violations": ["Requested file has not been published"]}
         return {"result": result}
 
     async def commit(self, result):
@@ -73,6 +74,125 @@ class MemoryControl:
     async def post(self, path, **kwargs):
         assert path == "runs/prefetch"
         return {"output": "The verified value is 42."}
+
+
+@pytest.mark.asyncio
+async def test_knowledge_qa_can_redirect_without_prefetch_even_with_history_and_selected_kb():
+    payload = request(history=[{"role":"user", "content":"Earlier policy question"}],
+        runtime_config={"agent_type":"knowledge-qa", "prefetch_knowledge":True},
+        tools=[{"name":"read_conversation", "parameters":{"type":"object","properties":{}}}])
+    control = MemoryControl(payload)
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Capability response must not trigger automatic evidence reads")
+    control.post = forbidden
+    model = ScriptedModel([[TextBlock(text="请切换到文档处理智能体生成文件。")]])
+    result = await execute(payload, control, model)
+    assert result.answer == "请切换到文档处理智能体生成文件。"
+    assert len(model.requests) == 1 and not control.calls
+
+
+def test_capability_scope_is_last_and_only_applies_to_knowledge_qa():
+    payload = request(runtime_config={"agent_type":"knowledge-qa"},
+        history=[{"role":"assistant","content":"earlier answer","context_metadata":{"read_required":True}}])
+    prompt = system_prompt(payload)
+    assert prompt.endswith(KNOWLEDGE_QA_SCOPE)
+    assert prompt.count("[KNOWLEDGE_QA_SCOPE]") == 1
+    payload.runtime_config.agent_type = "general-agent"
+    assert "[KNOWLEDGE_QA_SCOPE]" not in system_prompt(payload)
+
+
+def test_history_keeps_image_only_turns_and_image_provenance():
+    payload = request(history=[
+        {"role":"user","content":"","images":[{"url":"https://example.test/first.png"}]},
+        {"role":"user","content":"Second diagram","images":[{"url":"https://example.test/second.png"}]},
+    ])
+    payload.llm.supports_vision = True
+    history = messages(payload)[0]
+    assert history.role == "user"
+    assert '"image_positions": [1]' in history.content[0].text
+    assert '"image_positions": [2]' in history.content[0].text
+    assert len(history.content) == 3
+    assert str(history.content[1].source.url) == "https://example.test/first.png"
+    assert str(history.content[2].source.url) == "https://example.test/second.png"
+
+
+@pytest.mark.asyncio
+async def test_uncited_history_sources_are_available_before_one_generation():
+    payload = request(history=[{"role":"assistant", "content":"Earlier summary without citations",
+        "source_id":"assistant_message_prior", "context_metadata":{"source_id":"assistant_message_prior",
+        "evidence_catalog":{"read_tool":"read_conversation","section":"evidence","sources":[{"title":"Original policy"}]}}}],
+        runtime_config={"prefetch_knowledge":True},
+        tools=[{"name":"read_conversation","parameters":{"type":"object","properties":{}}}])
+    control = MemoryControl(payload)
+    posts = []
+    async def restored(path, **kwargs):
+        posts.append(path)
+        assert path == "runs/reuse-evidence", "Do not search again when historical evidence is loaded"
+        return {"output":'Original policy: verified value 42. <src id="S1" />',
+                "source_references":[{"id":"S1"}],"citation_output_contract":"Cite supplied source handles."}
+    control.post = restored
+    model = ScriptedModel([[TextBlock(text='42. <src id="S1" />')]])
+    result = await execute(payload, control, model)
+    assert result.answer == '42. <src id="S1" />'
+    assert len(model.requests) == 1 and posts == ["runs/reuse-evidence"]
+    assert "evidence_catalog" in str(model.requests[0])
+    assert "Original policy: verified value 42" in str(model.requests[0])
+    for message in model.requests[0]:
+        if message.role != "system":
+            assert "evidence_catalog" not in str(message)
+        if message.role == "assistant":
+            assert "Earlier summary without citations" not in str(message)
+
+
+@pytest.mark.asyncio
+async def test_archived_history_handles_are_control_state_not_prose():
+    payload = request(history=[
+        {"role":"user", "content":"", "source_id":"user_message_long",
+         "context_metadata":{"read_required":True}},
+        {"role":"assistant", "content":"", "source_id":"assistant_message_long",
+         "context_metadata":{"source_id":"assistant_message_long","read_required":True}},
+        {"role":"user", "content":"Correction: use working days, not calendar days."},
+    ])
+    model = ScriptedModel([[TextBlock(text="Five working days.")]])
+    await execute(payload, MemoryControl(payload), model)
+    for message in model.requests[0]:
+        if message.role != "system":
+            assert "read_required" not in str(message)
+            assert "assistant_message_long" not in str(message)
+    assert any(m.role == "user" and "Correction: use working days" in str(m) for m in model.requests[0])
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_is_control_state_not_an_answer_to_rewrite():
+    payload = request(history=[
+        {"role":"user","content":"What is the deadline?","source_id":"user_message_before"},
+        {"role":"assistant","content":"","source_id":"assistant_message_failed",
+         "context_metadata":{"source_id":"assistant_message_failed","outcome":"failed"}},
+    ])
+    model = ScriptedModel([[TextBlock(text="The previous attempt did not produce an answer.")]])
+    await execute(payload, MemoryControl(payload), model)
+    assert any(m.role == "system" and "outcome" in str(m) for m in model.requests[0])
+    assert any(m.role == "user" and '"outcome": "failed"' in str(m.content) for m in model.requests[0])
+    assert not any(m.role == "assistant" and m.id == "assistant_message_failed" for m in model.requests[0])
+    assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_historical_cache_still_allows_selected_source_prefetch():
+    payload = request(history=[{"role":"user","content":"previous topic"}],
+        runtime_config={"prefetch_knowledge":True},
+        tools=[{"name":"read_conversation","parameters":{"type":"object","properties":{}}}])
+    control = MemoryControl(payload)
+    posts = []
+    async def restored(path, **kwargs):
+        posts.append(path)
+        if path == "runs/reuse-evidence": return {"output":"", "source_references":[]}
+        return {"output":"New source fact"}
+    control.post = restored
+    model = ScriptedModel([[TextBlock(text="New source fact")]])
+    await execute(payload, control, model)
+    assert posts == ["runs/reuse-evidence","runs/prefetch"]
+    assert len(model.requests) == 1
 
 
 def request(**updates):
@@ -193,15 +313,15 @@ async def test_tool_decision_persisted_before_execution_then_answer_commits():
 
 
 @pytest.mark.asyncio
-async def test_delivery_correction_stays_in_same_sdk_context():
+async def test_artifact_delivery_feedback_stays_in_same_sdk_context():
     payload = request()
     control = MemoryControl(payload)
     control.reject_once = True
-    model = ScriptedModel([[TextBlock(text="unknown reference")], [TextBlock(text="correct reference")]])
+    model = ScriptedModel([[TextBlock(text="File not yet published")], [TextBlock(text="Published document")]])
     result = await execute(payload, control, model)
-    assert result.answer == "correct reference"
+    assert result.answer == "Published document"
     assert len(model.requests) == 2
-    assert "Unknown source ID" in str(model.requests[1])
+    assert "Requested file has not been published" in str(model.requests[1])
 
 
 @pytest.mark.asyncio

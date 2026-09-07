@@ -9,8 +9,9 @@ import (
 
 // Turn keeps persisted user input independent of the outcome of the assistant.
 type Turn struct {
-	User, Assistant *types.Message
-	SourceID        string
+	User, Assistant                 *types.Message
+	SourceID                        string
+	UserArchived, AssistantArchived bool
 }
 
 func MessageSourceID(id string) string { return "user_message_" + id }
@@ -99,6 +100,7 @@ func BuildHistoryWithBudget(rows []*types.Message, recentRounds, tokenBudget int
 		archived[turns[i].User] = true
 		if turns[i].Assistant != nil {
 			turns[i].Assistant = archivedMessage(turns[i].Assistant, AssistantSourceID(turns[i].Assistant.ID))
+			archived[turns[i].Assistant] = true
 		}
 	}
 	omitted := 0
@@ -170,6 +172,10 @@ func BuildHistoryWithBudget(rows []*types.Message, recentRounds, tokenBudget int
 		if cost() > tokenBudget {
 			turns[i].Assistant = before
 		}
+	}
+	for i := range turns {
+		turns[i].UserArchived = archived[turns[i].User]
+		turns[i].AssistantArchived = archived[turns[i].Assistant]
 	}
 	return turns[olderCount:], renderLedger()
 }

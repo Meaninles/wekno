@@ -80,7 +80,7 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 		"web_enabled":    chatManage.WebSearchEnabled,
 	})
 
-	// Run only the enabled branches. Web-only agents such as Simple Chat
+	// Run only the enabled branches. Agents configured for web-only search
 	// should not even enter the KB branch; the old unconditional goroutine was
 	// cheap, but it made traces and progress misleading.
 	pipelineInfo(ctx, "Search", "plan", map[string]interface{}{

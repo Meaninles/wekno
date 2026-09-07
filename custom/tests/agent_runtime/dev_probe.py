@@ -6,6 +6,7 @@ timings and public source/tool metadata, and are written under .local-data.
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -14,7 +15,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 def sql(query):
-    command = ["docker", "exec", "-i", "WeKnora-agent-eval-postgres-dev", "sh", "-c",
+    command = ["docker", "exec", "-i", os.environ.get("WEKNORA_PROBE_POSTGRES", "WeKnora-postgres-dev"), "sh", "-c",
                'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At']
     result = subprocess.run(command, input=query, capture_output=True, text=True, encoding="utf-8", check=True)
     return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
@@ -35,7 +36,7 @@ def main():
     tenant = sql("SELECT row_to_json(t) FROM (SELECT id,api_key FROM tenants WHERE deleted_at IS NULL ORDER BY (SELECT count(*) FROM sessions s WHERE s.tenant_id=tenants.id) DESC LIMIT 1)t;")[0]
     key = tenant["api_key"]
     if key.startswith("enc:v1:"):
-        info = json.loads(subprocess.check_output(["docker","inspect","weknora-agent-eval-runtime-api-1"],text=True))
+        info = json.loads(subprocess.check_output(["docker","inspect",os.environ.get("WEKNORA_PROBE_API", "weknora-runtime-api-1")],text=True))
         env = dict(value.split("=",1) for value in info[0]["Config"]["Env"])
         data = base64.urlsafe_b64decode(key[7:] + "=" * (-len(key[7:]) % 4))
         key = AESGCM(env["SYSTEM_AES_KEY"].encode()).decrypt(data[:12],data[12:],None).decode()

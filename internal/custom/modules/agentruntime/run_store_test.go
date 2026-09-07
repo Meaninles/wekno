@@ -6,11 +6,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/custom/testsupport"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestPostgresCitationResolutionNeverRequestsRegeneration(t *testing.T) {
+	db := testsupport.Postgres(t, &Artifact{})
+	ref := &types.SearchResult{ID: "chunk", KnowledgeBaseID: "kb", KnowledgeID: "doc", ChunkType: "text", Content: "source fact", EvidenceContent: "source fact"}
+	sourcerefs.AssignCitationIDs([]*types.SearchResult{ref})
+	row := &RunRecord{ID: "run", TenantID: 7, References: []*types.SearchResult{ref}}
+	service := &Service{db: db}
+	for _, answer := range []string{"uncited answer", `answer <src id="S999" />`, `answer <src id="S1" />`} {
+		result := &ChatResult{RunID: row.ID, Answer: answer}
+		violations, err := service.validateResult(context.Background(), db, row, result)
+		require.NoError(t, err)
+		require.Empty(t, violations)
+		if answer == `answer <src id="S1" />` {
+			require.Len(t, result.References, 1)
+		} else {
+			require.Empty(t, result.References)
+		}
+	}
+}
 
 func fixtureRun(t *testing.T, db *gorm.DB) *RunRecord {
 	t.Helper()

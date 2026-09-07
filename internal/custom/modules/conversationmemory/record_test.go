@@ -10,6 +10,17 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
+func TestFailedAnswerIsRepresentedAsOutcomeNotAssistantProse(t *testing.T) {
+	m := &types.Message{ID: "failed", Role: "assistant", Content: "这次未能完成，请稍后重试。", ErrorCode: "unknown"}
+	if AssistantContent(m) != "" {
+		t.Fatal("failure banner became assistant prose")
+	}
+	metadata := string(AssistantMetadata(m))
+	if !strings.Contains(metadata, `"outcome":"failed"`) || strings.Contains(metadata, m.Content) {
+		t.Fatal(metadata)
+	}
+}
+
 func TestAssistantCatalogPreservesReadIdentityWithoutReplayingEvidence(t *testing.T) {
 	m := &types.Message{ID: "answer", Role: "assistant", Content: "<think>private</think>Previous answer"}
 	for i := 0; i < 8; i++ {

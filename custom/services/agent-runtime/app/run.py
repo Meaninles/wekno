@@ -11,7 +11,7 @@ from agentscope.model import ChatModelBase
 from agentscope.permission import PermissionMode
 from agentscope.tool import ToolBase, Toolkit
 
-from .context import EvidencePrefetch, messages
+from .context import EvidencePrefetch, messages, system_prompt
 from .contracts import RunRequest, RunResult
 from .control import Control
 from .delivery import Delivery, DeliveryError
@@ -40,7 +40,7 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
     toolkit = Toolkit(tools=[BusinessTool(spec, control) for spec in payload.tools] + list(extra_tools),
                       skills_or_loaders=skills or None)
     agent = Agent(
-        name="weknora", system_prompt=payload.system_prompt, model=model,
+        name="weknora", system_prompt=system_prompt(payload), model=model,
         toolkit=toolkit, state=state, offloader=offloader,
         middlewares=[Vision(control), EvidencePrefetch(control), IterationBudget(payload.runtime_config.max_iterations), lifecycle, delivery],
         model_config=ModelConfig(max_retries=0, fallback_model=None),

@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -21,7 +22,7 @@ class DevClient:
     def __init__(self):
         key=sql("SELECT row_to_json(t) FROM (SELECT api_key FROM tenants WHERE id=10000)t;")[0]["api_key"]
         if key.startswith("enc:v1:"):
-            info=json.loads(subprocess.check_output(["docker","inspect","weknora-agent-eval-runtime-api-1"],text=True))
+            info=json.loads(subprocess.check_output(["docker","inspect",os.environ.get("WEKNORA_PROBE_API", "weknora-runtime-api-1")],text=True))
             env=dict(value.split("=",1) for value in info[0]["Config"]["Env"])
             data=base64.urlsafe_b64decode(key[7:]+"="*(-len(key[7:])%4))
             key=AESGCM(env["SYSTEM_AES_KEY"].encode()).decrypt(data[:12],data[12:],None).decode()

@@ -293,6 +293,7 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 
 const citationUseInstruction = `[CITATION_USE]
 Cite source-supported claims with the matching provided cite_exactly handle, placed beside the supported text. The final answer must retain these literal tags, including inside tables and quotations; a document title or article number alone is not a clickable citation. Before finishing, check that conclusions drawn from this evidence have their matching handles. Use only current registered IDs; validated reused evidence receives current IDs. Omit citations for unsupported claims and disclose material evidence gaps. If these sources do not answer the question, say so without attaching an unrelated source. Do not copy the missing-citation formatting of earlier assistant messages.
+Write each supported paragraph or list item together with its source handle, in the same generation: - 原文支持的职责。<src id="S1" /> (use the actual matching ID, not necessarily S1). Historical assistant prose is a summary with old handles removed, not a formatting example. Validated historical fragments below are original evidence and should be cited exactly like newly retrieved fragments. Preserve the supplied document title; do not replace it with a similar-sounding title.
 [/CITATION_USE]`
 
 // TerminalCitationInstruction returns the single shared, positive final-output

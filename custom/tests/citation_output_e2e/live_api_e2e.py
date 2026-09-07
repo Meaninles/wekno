@@ -89,7 +89,7 @@ CASES = {
     "web": Case(
         name="web",
         endpoint="knowledge-chat",
-        agent_id="builtin-simple-chat",
+        agent_id="builtin-general-agent",
         query="请联网查找 OpenAI Codex 的官方产品页面，用两点概括页面当前介绍的能力，并为每点标注网页引用。",
         web_search_enabled=True,
         require_retrieval=True,
@@ -697,7 +697,7 @@ def run_multi_turn(api: API, model_id: str) -> dict[str, Any]:
     no_source = Case(
         name="multi-turn-no-source",
         endpoint="knowledge-chat",
-        agent_id="builtin-simple-chat",
+        agent_id="builtin-general-agent",
         query="本轮不使用知识库或联网，只回答：2+2等于多少？",
     )
     second, _ = stream_turn(api, session_id, no_source, model_id)

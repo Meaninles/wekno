@@ -17,6 +17,28 @@ type recordingProfessionalSkillProvider struct {
 	calls int
 }
 
+func TestBuildHistoryArchiveAndFailureStayOutOfProse(t *testing.T) {
+	rows := []*types.Message{
+		{ID: "u", RequestID: "r", Role: "user", Content: strings.Repeat("长上下文", 20000)},
+		{ID: "a", RequestID: "r", Role: "assistant", Content: strings.Repeat("长回答", 20000), IsCompleted: true},
+	}
+	history, _ := buildGeneralAgentHistory(rows, 10)
+	if len(history) != 2 {
+		t.Fatal("archive records lost", history)
+	}
+	for _, entry := range history {
+		if entry.Content != "" || !strings.Contains(string(entry.ContextMetadata), `"read_required":true`) {
+			t.Fatal("archive navigation was presented as prose", entry)
+		}
+	}
+	rows[1].ErrorCode = "incomplete"
+	rows[1].Content = "这次未能完成，请稍后重试。"
+	history, _ = buildGeneralAgentHistory(rows, 10)
+	if history[1].Content != "" || !strings.Contains(string(history[1].ContextMetadata), `"outcome":"failed"`) {
+		t.Fatal("failed answer was replayed", history[1])
+	}
+}
+
 func TestBuildGeneralAgentHistoryKeepsRecentPairsAndBuildsCompleteUserLedger(t *testing.T) {
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 	var messages []*types.Message

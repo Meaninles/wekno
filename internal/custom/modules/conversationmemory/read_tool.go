@@ -21,10 +21,10 @@ type ReadTool struct {
 
 func (*ReadTool) Name() string { return "read_conversation" }
 func (*ReadTool) Description() string {
-	return "Read persisted messages in this authorized conversation by source_id or page. Sections: text, tools, files, references (historical catalog), evidence (reuse exact source fragments after current scope/version/hash validation; requires assistant source_id). Assistant text is history, not evidence. Invalidated evidence requires a new source read."
+	return "Read this authorized conversation. section=evidence restores original fragments retrieved in prior runs, including uncited fragments, after permission/version/hash validation. Copy an assistant source_id from the conversation navigation and page for exact reads, or provide query to select relevant recent evidence. section=references lists archived sources. Other sections: text, tools, files. Assistant prose is not source evidence."
 }
 func (*ReadTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"source_id":{"type":"string"},"tool_call_id":{"type":"string","description":"Read an archived tool payload from this active run; use section=tools."},"section":{"type":"string","enum":["text","tools","files","references","evidence"]},"page":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}`)
+	return json.RawMessage(`{"type":"object","properties":{"source_id":{"type":"string","description":"Copy an assistant source_id from conversation navigation for source reads."},"query":{"type":"string","description":"With section=evidence, select relevant archived fragments; source_id is optional."},"tool_call_id":{"type":"string","description":"Read an archived tool payload from this active run; use section=tools."},"section":{"type":"string","enum":["text","tools","files","references","evidence"]},"page":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}`)
 }
 func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.ToolResult, error) {
 	if err := toolcontract.Validate(raw, t.Parameters()); err != nil {
@@ -39,6 +39,7 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.Too
 		Page       int    `json:"page"`
 		Offset     int    `json:"offset"`
 		Section    string `json:"section"`
+		Query      string `json:"query"`
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, err
@@ -78,6 +79,9 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.Too
 		return &types.ToolResult{Success: true, Output: string(body), Data: data}, nil
 	}
 	q := t.DB.WithContext(ctx).Where("session_id = ?", t.SessionID)
+	if input.Section == "evidence" && input.SourceID == "" && strings.TrimSpace(input.Query) != "" {
+		q = q.Where("role = ? AND is_completed = ?", "assistant", true).Order("created_at DESC, id DESC")
+	}
 	if input.SourceID != "" {
 		id := strings.TrimPrefix(strings.TrimPrefix(input.SourceID, "user_message_"), "assistant_message_")
 		q = q.Where("id = ?", id)
@@ -95,21 +99,50 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.Too
 		return nil, err
 	}
 	if input.Section == "evidence" {
-		if input.SourceID == "" || len(rows) != 1 || rows[0].Role != "assistant" {
+		if (input.SourceID == "" && strings.TrimSpace(input.Query) == "") || (input.SourceID != "" && (len(rows) != 1 || rows[0].Role != "assistant")) {
 			return nil, fmt.Errorf("evidence requires an accessible assistant source_id")
 		}
-		refs := rows[0].KnowledgeReferences
-		start := min((max(1, input.Page)-1)*EvidencePageSize, len(refs))
-		end := min(start+EvidencePageSize, len(refs))
-		valid, invalid, err := sourcerefs.ReuseEvidence(ctx, t.DB, t.SearchTargets, refs[start:end])
+		ids := []string{}
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+		}
+		archive, err := LoadEvidenceArchive(ctx, t.DB, t.SessionID, ids)
 		if err != nil {
 			return nil, err
 		}
+		refs := []*types.SearchResult{}
+		for _, row := range rows {
+			saved := row.KnowledgeReferences
+			if stored, exists := archive[row.ID]; exists {
+				saved = stored
+			}
+			for _, ref := range saved {
+				if evidenceInScope(ref, t.SearchTargets) {
+					refs = append(refs, ref)
+				}
+			}
+		}
+		if strings.TrimSpace(input.Query) != "" {
+			refs = SelectEvidence(refs, input.Query, 4000)
+		}
+		refs, invalid, err := sourcerefs.ReuseEvidence(ctx, t.DB, t.SearchTargets, refs)
+		if err != nil {
+			return nil, err
+		}
+		start := min((max(1, input.Page)-1)*EvidencePageSize, len(refs))
+		end := min(start+EvidencePageSize, len(refs))
+		if input.Query != "" {
+			start, end = 0, len(refs)
+		}
+		valid := refs[start:end]
 		data := map[string]any{"validated_evidence": valid, "invalidated_sources": invalid, "complete": end == len(refs)}
 		if end < len(refs) {
 			data["next_page"] = max(1, input.Page) + 1
 		}
 		status := map[string]any{"invalidated_sources": invalid, "complete": end == len(refs), "source_id": input.SourceID, "page": max(1, input.Page)}
+		if input.Query != "" {
+			status["selection"] = "bounded relevant fragments; use source_id/page or retrieve for missing claims"
+		}
 		if next, ok := data["next_page"]; ok {
 			status["next_page"] = next
 		}
@@ -118,8 +151,25 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.Too
 		return &types.ToolResult{Success: true, Output: string(output) + "\n\n" + evidence, Data: data, SourceReferences: valid}, nil
 	}
 	entries := make([]map[string]any, 0, len(rows))
+	archive := map[string][]*types.SearchResult{}
+	if input.Section == "references" {
+		ids := []string{}
+		for _, row := range rows {
+			if row.Role == "assistant" {
+				ids = append(ids, row.ID)
+			}
+		}
+		var err error
+		archive, err = LoadEvidenceArchive(ctx, t.DB, t.SessionID, ids)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, row := range rows {
 		content := row.Content
+		if row.Role == "assistant" && row.ErrorCode != "" {
+			content = ""
+		}
 		var value any
 		switch input.Section {
 		case "tools":
@@ -127,7 +177,13 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.Too
 		case "files":
 			value = row.Attachments
 		case "references":
-			value = row.KnowledgeReferences
+			copy := *row
+			valid, _, err := sourcerefs.ReuseEvidence(ctx, t.DB, t.SearchTargets, archive[row.ID])
+			if err != nil {
+				return nil, err
+			}
+			copy.KnowledgeReferences = valid
+			value = json.RawMessage(AssistantMetadata(&copy))
 		}
 		if input.Section != "" && input.Section != "text" {
 			encoded, _ := json.Marshal(value)
@@ -145,6 +201,9 @@ func (t *ReadTool) Execute(ctx context.Context, raw json.RawMessage) (*types.Too
 			sourceID = AssistantSourceID(row.ID)
 		}
 		entry := map[string]any{"source_id": sourceID, "role": row.Role, "section": input.Section, "text": string(runes[start:end]), "created_at": row.CreatedAt, "offset": start, "complete": start == 0 && end == len(runes)}
+		if row.Role == "assistant" && row.ErrorCode != "" {
+			entry["outcome"] = "failed"
+		}
 		if end < len(runes) {
 			entry["next_offset"] = end
 		}

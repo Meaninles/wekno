@@ -14,8 +14,6 @@ import {
   stripTrailingStreamingListMarker,
 } from './chatMarkdownRenderer.ts'
 import {
-  collapseStandaloneCitationParagraphs,
-  joinCitationTagsToPreviousLine,
   resolveCitationChunkId,
   stripIncompleteCitationTag,
   stripUnsupportedCitationTags,
@@ -663,19 +661,6 @@ test('renderChatMarkdown does not guess indexed chunk ids from titles or positio
   assert.doesNotMatch(html, /<kb/)
 })
 
-test('joinCitationTagsToPreviousLine removes blank lines before citation tags', () => {
-  const input = 'Setup is complete.\n\n<src id="S1" />'
-  assert.equal(joinCitationTagsToPreviousLine(input), 'Setup is complete. <src id="S1" />')
-})
-
-test('joinCitationTagsToPreviousLine inlines consecutive citation tags across single newlines', () => {
-  const tag1 = '<src id="S1" />'
-  const tag2 = '<src id="S2" />'
-  const tag3 = '<src id="S3" />'
-  const input = `${tag1}\n${tag2}\n${tag3}`
-  assert.equal(joinCitationTagsToPreviousLine(input), `${tag1} ${tag2} ${tag3}`)
-})
-
 test('renderChatMarkdown inlines consecutive citation tags across newlines', () => {
   const renderer = createChatMarkdownRenderer({
     imageRenderer: ({ href, text }) => `<img src="${href}" alt="${text}">`,
@@ -703,23 +688,6 @@ test('renderChatMarkdown inlines consecutive citation tags across newlines', () 
   assert.doesNotMatch(html, /<\/p>\s*<p>\s*<span class="citation citation-source"/)
 })
 
-test('joinCitationTagsToPreviousLine appends an indented citation to the preceding list item', () => {
-  const tag = '<src id="S1" />'
-  const input = [
-    '#### 5️⃣ 阅读之星培养基地',
-    '- 每个组别冠亚季军及前十强所在的学校，将获得 **"阅读之星培养基地"** 奖牌',
-    '',
-    `  ${tag}`,
-  ].join('\n')
-  assert.equal(
-    joinCitationTagsToPreviousLine(input),
-    [
-      '#### 5️⃣ 阅读之星培养基地',
-      `- 每个组别冠亚季军及前十强所在的学校，将获得 **"阅读之星培养基地"** 奖牌 ${tag}`,
-    ].join('\n'),
-  )
-})
-
 test('renderChatMarkdown renders a citation after a list item inline in that item', () => {
   const renderer = createChatMarkdownRenderer({
     imageRenderer: ({ href, text }) => `<img src="${href}" alt="${text}">`,
@@ -738,21 +706,9 @@ test('renderChatMarkdown renders a citation after a list item inline in that ite
     }],
   })
 
-  assert.match(html, /<li>培养基地奖牌 <a class="citation citation-source citation-source--knowledge"/)
+  assert.match(html, /<li>\s*(?:<p>)?培养基地奖牌 <a class="citation citation-source citation-source--knowledge"/)
   assert.match(html, /href="\/platform\/knowledge-bases\/kb-1\?knowledge_id=doc-1&amp;chunk_id=chunk-1|href="\/platform\/knowledge-bases\/kb-1\?chunk_id=chunk-1&amp;knowledge_id=doc-1/)
   assert.doesNotMatch(html, /<\/ul>\s*<p>\s*<(?:span|a) class="citation citation-source"/)
-})
-
-test('joinCitationTagsToPreviousLine does not merge citations onto fenced code closing delimiter', () => {
-  const tag = '<src id="S1" />'
-  const input = '```bash\nunzip setup.zip\n```\n\n' + tag
-  assert.equal(joinCitationTagsToPreviousLine(input), '```bash\nunzip setup.zip\n```\n\n' + tag)
-})
-
-test('joinCitationTagsToPreviousLine does not merge citations onto an unlabeled closing fence on a single newline', () => {
-  const tag = '<src id="S1" />'
-  const input = '```\nAPR = principal\n```\n' + tag
-  assert.equal(joinCitationTagsToPreviousLine(input), '```\nAPR = principal\n```\n' + tag)
 })
 
 test('applyStreamingTailFade wraps the trailing text run', () => {
@@ -835,11 +791,4 @@ test('renderChatMarkdown drops invalid markdown image placeholders', () => {
   assert.doesNotMatch(html, /各品类的消费占比/)
   assert.doesNotMatch(html, /商品品类占比/)
   assert.match(html, /<img src="https:\/\/example\.com\/chart\.png" alt="ok">/)
-})
-
-test('collapseStandaloneCitationParagraphs merges citations across empty paragraphs', () => {
-  const html = '<p>Steps:</p><p></p><p><span class="citation citation-kb" data-chunk-id="x">doc</span></p>'
-  const out = collapseStandaloneCitationParagraphs(html)
-  assert.match(out, /Steps:.*citation-kb/s)
-  assert.doesNotMatch(out, /<p><\/p>/)
 })

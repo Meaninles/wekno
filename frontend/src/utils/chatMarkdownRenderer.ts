@@ -1,11 +1,10 @@
 import { marked, type Renderer } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import type { Tokens } from 'marked'
+import { attachCitationParagraphs } from '../custom/modules/sourcerefs/citationLayout.ts'
 
 import {
-  collapseStandaloneCitationParagraphs,
   extractCitationHtmlPlaceholders,
-  joinCitationTagsToPreviousLine,
   preserveCitationTags,
   restoreCitationHtmlPlaceholders,
   restoreCitationTags,
@@ -360,14 +359,13 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
   const imageSafe = replaceIncompleteImageWithPlaceholder(tagSafe)
   const mathSafe = preprocessMathDelimiters(imageSafe)
   const restoredTags = restoreCitationTags(mathSafe, tags)
-  const inlineTags = joinCitationTagsToPreviousLine(restoredTags)
   // Run the list-marker guard again after emphasis balancing: closing/hiding a
   // dangling `*`/`**` (the first chars of the next bullet's bold) can re-expose a
   // bare `   - `, which would otherwise flash an empty nested item under the
   // previous line right as the next item starts streaming.
   const balancedInline = options.streaming
-    ? stripTrailingStreamingListMarker(closeDanglingStreamingEmphasis(inlineTags))
-    : inlineTags
+    ? stripTrailingStreamingListMarker(closeDanglingStreamingEmphasis(restoredTags))
+    : restoredTags
   const preparedMarkdown = options.prepareMarkdown
     ? options.prepareMarkdown(balancedInline, options.cachedMermaidSvgHtml)
     : balancedInline
@@ -377,16 +375,16 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
   const { content: markdownWithPlaceholders, htmlSnippets } =
     extractCitationHtmlPlaceholders(flankingSafeMarkdown, options.knowledgeReferences)
   const escapedMarkdown = options.escapeMarkdown(markdownWithPlaceholders)
-  const html = marked.parse(markdownWithPlaceholders, {
+  const tokens = marked.lexer(markdownWithPlaceholders, { ...marked.defaults, breaks: true, gfm: true })
+  if (options.collapseStandaloneCitations !== false) attachCitationParagraphs(tokens)
+  const html = marked.parser(tokens, {
+    ...marked.defaults,
     renderer: options.renderer,
     breaks: true,
     async: false,
   }) as string
   const restoredHtml = restoreCitationHtmlPlaceholders(html, htmlSnippets)
-  const citationHtml = options.collapseStandaloneCitations === false
-    ? restoredHtml
-    : collapseStandaloneCitationParagraphs(restoredHtml)
-  const tableWrappedHtml = wrapChatMarkdownTables(citationHtml)
+  const tableWrappedHtml = wrapChatMarkdownTables(restoredHtml)
   const strongTitleHtml = markStandaloneStrongParagraphs(tableWrappedHtml)
   const sanitized = options.sanitizeHtml(strongTitleHtml)
   const withMermaid = options.injectCachedMermaidSvg

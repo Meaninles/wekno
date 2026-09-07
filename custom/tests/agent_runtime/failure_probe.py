@@ -40,7 +40,7 @@ def main():
             if not r.is_success: raise RuntimeError(f'Fixture model create HTTP {r.status_code}: {r.text[:400]}')
             model=r.json()['data']['id']
             try:
-                report=c.qa('failure-'+case,'请用一句话打招呼。',agent='builtin-simple-chat',model=model)
+                report=c.qa('failure-'+case,'请用一句话打招呼。',agent='builtin-general-agent',model=model)
                 session=report['session']
                 persisted=sql("SELECT row_to_json(t) FROM (SELECT content,error_code,is_completed FROM messages WHERE session_id='"+session+"' AND role='assistant' ORDER BY created_at DESC LIMIT 1)t;")[0]
                 failure=next((e for e in reversed(report['events']) if e.get('response_type')=='error' and e.get('done')),None)

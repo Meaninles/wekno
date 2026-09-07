@@ -145,6 +145,7 @@ class ImageSpec(BaseModel):
 
 
 class ChatHistoryMessage(BaseModel):
+    context_metadata: dict[str, Any] = Field(default_factory=dict)
     role: str
     content: str
     source_id: str = ""

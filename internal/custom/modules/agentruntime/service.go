@@ -224,7 +224,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		// to every KB is not a reason to retrieve for greetings or calculations;
 		// the same SDK decision can request retrieval when it actually needs it.
 		explicitScope := len(req.KnowledgeBaseIDs) > 0 || len(req.KnowledgeIDs) > 0 || len(req.TagScopes) > 0 || req.CustomAgent.Config.KBSelectionMode == "selected"
-		if explicitScope && tool.Name == agenttools.ToolKnowledgeSearch && len(agentConfig.SearchTargets) > 0 {
+		if payload.RuntimeConfig.AgentType != types.AgentTypeKnowledgeQA && explicitScope && tool.Name == agenttools.ToolKnowledgeSearch && len(agentConfig.SearchTargets) > 0 {
 			payload.RuntimeConfig.PrefetchKnowledge = true
 		}
 	}
@@ -330,6 +330,10 @@ func (s *Service) buildHistory(
 	if err != nil {
 		return nil, "", fmt.Errorf("load agent history: %w", err)
 	}
+	msgs, err = conversationmemory.WithArchivedEvidence(ctx, s.db, req.Session.ID, msgs, config.SearchTargets)
+	if err != nil {
+		return nil, "", fmt.Errorf("load conversation evidence: %w", err)
+	}
 	history, archive := buildGeneralAgentHistory(msgs, turns, req.UserMessageID, req.AssistantMessageID)
 	return history, archive, nil
 }
@@ -351,15 +355,25 @@ func buildGeneralAgentHistory(
 			Images:         imageSpecs(pair.User.Images),
 			Attachments:    attachmentSpecsWithoutContent(pair.User.Attachments),
 		})
+		if pair.UserArchived {
+			out[len(out)-1].Content = ""
+			out[len(out)-1].ContextMetadata = json.RawMessage(`{"read_required":true}`)
+		}
 		if pair.Assistant == nil {
 			continue
 		}
 		answer := conversationmemory.AssistantContent(pair.Assistant)
-		if answer != "" {
+		metadata := conversationmemory.AssistantMetadata(pair.Assistant)
+		if pair.AssistantArchived && pair.Assistant.ErrorCode == "" {
+			answer = ""
+			metadata, _ = json.Marshal(map[string]any{"source_id": conversationmemory.AssistantSourceID(pair.Assistant.ID), "read_required": true})
+		}
+		if answer != "" || pair.Assistant.ErrorCode != "" || pair.AssistantArchived {
 			out = append(out, ChatHistoryMessage{
-				Role:     "assistant",
-				Content:  answer,
-				SourceID: conversationmemory.AssistantSourceID(pair.Assistant.ID),
+				Role:            "assistant",
+				Content:         answer,
+				SourceID:        conversationmemory.AssistantSourceID(pair.Assistant.ID),
+				ContextMetadata: metadata,
 			})
 		}
 	}
@@ -951,7 +965,7 @@ func answerStylePrompt(prompt string, agent *types.CustomAgent) string {
 	}
 	return prompt + `
 [KNOWLEDGE_QA_STYLE]
-Accuracy is the first priority. Answer the actual question directly: conclusion first, then only necessary evidence, conditions, exceptions and citations. A simple question usually needs one short paragraph or a few bullets. Do not narrate searches, recap the question or conversation, repeat conclusions, or offer unrequested further work. Retrieve only for unresolved claims: reuse still-applicable verified conversation evidence with read_conversation, batch independent searches and reads, and stop once evidence supports the requested claims. Do not repeat an equivalent search without identifying a specific evidence gap. Cross-check contradictory, ambiguous or insufficient evidence; explicitly distinguish direct evidence from inference. Preserve qualifications and uncertainty instead of guessing. If the user asks for detailed analysis or a complete procedure, cover it fully. Never sacrifice correctness for brevity or speed.
+Accuracy is the first priority. Resolve pronouns and omitted subjects or scope from the preceding topic; switch topics when the user asks to. Preserve that scope when planning retrieval; do not expand a contextual follow-up into an exhaustive cross-topic inventory unless requested. Answer the actual question directly: conclusion first, then only necessary evidence, conditions, exceptions and citations. A simple question usually needs one short paragraph or a few bullets. Do not narrate searches, recap the question or conversation, repeat conclusions, or offer unrequested further work. Retrieve only for unresolved claims: reuse still-applicable verified conversation evidence with read_conversation, batch independent searches and reads, and stop once evidence supports the requested claims. Do not repeat an equivalent search without identifying a specific evidence gap. Cross-check contradictory, ambiguous or insufficient evidence; explicitly distinguish direct evidence from inference. Preserve qualifications and uncertainty instead of guessing. If the user asks for detailed analysis or a complete procedure, cover it fully. Never sacrifice correctness for brevity or speed.
 [/KNOWLEDGE_QA_STYLE]`
 }
 

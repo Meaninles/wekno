@@ -11,6 +11,9 @@ func applyAgentRuntimeMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrateAgentProfiles(ctx, db); err != nil {
 		return err
 	}
+	if err := retireSimpleChat(ctx, db); err != nil {
+		return err
+	}
 	if err := db.WithContext(ctx).Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS error_code varchar(40) NOT NULL DEFAULT ''`).Error; err != nil {
 		return err
 	}

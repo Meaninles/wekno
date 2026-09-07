@@ -26,6 +26,19 @@ func AssistantRecord(m *types.Message) string {
 	if content == "" && len(m.KnowledgeReferences) == 0 {
 		return ""
 	}
+	return HistoricalAssistantOutput(content) + "\n<conversation_record>" + string(AssistantMetadata(m)) + "</conversation_record>"
+}
+
+// AssistantMetadata is navigation separate from model-written prose. Evidence
+// is supplied by the archive projection, never inferred from answer text.
+func AssistantMetadata(m *types.Message) json.RawMessage {
+	if m == nil {
+		return nil
+	}
+	if m.ErrorCode != "" {
+		encoded, _ := json.Marshal(map[string]any{"source_id": AssistantSourceID(m.ID), "outcome": "failed"})
+		return encoded
+	}
 	record := map[string]any{"source_id": AssistantSourceID(m.ID)}
 	type source struct {
 		KnowledgeBaseID string `json:"knowledge_base_id"`
@@ -69,14 +82,14 @@ func AssistantRecord(m *types.Message) string {
 		}
 		encoded, _ = json.Marshal(record)
 	}
-	return HistoricalAssistantOutput(content) + "\n<conversation_record>" + string(encoded) + "</conversation_record>"
+	return encoded
 }
 
-// AssistantContent is used in a native assistant-role message. Provenance is
-// conveyed by the role and separate navigation metadata, not imitation-prone
-// markup around a previous answer.
+// AssistantContent is plain historical prose, separate from navigation and
+// failure state. The runtime presents it as a dialogue record, not an example
+// of the current answer's citation format.
 func AssistantContent(m *types.Message) string {
-	if m == nil {
+	if m == nil || m.ErrorCode != "" {
 		return ""
 	}
 	return strings.TrimSpace(sourcerefs.StripCitationProtocol(historicalThinking.ReplaceAllString(m.Content, "")))

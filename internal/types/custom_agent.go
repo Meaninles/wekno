@@ -10,7 +10,6 @@ import (
 
 // All conversations run in one harness with two fixed execution budgets.
 const (
-	BuiltinSimpleChatID              = "builtin-simple-chat"
 	BuiltinDeepResearcherID          = "builtin-deep-researcher"
 	BuiltinDataAnalystID             = "builtin-data-analyst"
 	BuiltinTableAnalystID            = "builtin-table-analyst"
@@ -357,7 +356,6 @@ type SuggestedQuestion struct {
 var BuiltinAgentRegistry = map[string]func(uint64) *CustomAgent{}
 
 var builtinAgentIDsOrdered = []string{
-	BuiltinSimpleChatID,
 	BuiltinKnowledgeQAID,
 	BuiltinWikiResearcherID,
 	BuiltinDeepResearcherID,

@@ -184,12 +184,13 @@ type ImageSpec struct {
 }
 
 type ChatHistoryMessage struct {
-	Role           string                `json:"role"`
-	Content        string                `json:"content"`
-	SourceID       string                `json:"source_id,omitempty"`
-	MentionedItems []types.MentionedItem `json:"mentioned_items,omitempty"`
-	Images         []ImageSpec           `json:"images,omitempty"`
-	Attachments    []AttachmentSpec      `json:"attachments,omitempty"`
+	ContextMetadata json.RawMessage       `json:"context_metadata,omitempty"`
+	Role            string                `json:"role"`
+	Content         string                `json:"content"`
+	SourceID        string                `json:"source_id,omitempty"`
+	MentionedItems  []types.MentionedItem `json:"mentioned_items,omitempty"`
+	Images          []ImageSpec           `json:"images,omitempty"`
+	Attachments     []AttachmentSpec      `json:"attachments,omitempty"`
 }
 
 type ChatPayload struct {

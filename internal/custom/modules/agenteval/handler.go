@@ -58,7 +58,6 @@ func (h *Handler) Capabilities(c *gin.Context) {
 				"citation",
 			},
 			"agent_types": []string{
-				"simple-chat",
 				"knowledge-qa",
 				"general-agent",
 				"document-processing-agent",

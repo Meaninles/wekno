@@ -274,9 +274,12 @@ class RuntimeWorkspace(WorkspaceBase):
         prompt={"workspace":"/workspace","files":instructions,"visible_context":self.payload.visible_context,
                 "lightweight_skills":[s.model_dump() for s in self.payload.lightweight_skills]}
         self.payload.system_prompt += "\n\n"+json.dumps(prompt,ensure_ascii=False)
-        self.payload.system_prompt += "\nUse available evidence to answer directly. Call a tool only when necessary to resolve missing information or perform the requested action. Independent reads may run together. Files are delivered only through publish_artifact, which returns a persistent download link."
+        self.payload.system_prompt += "\nUse available evidence to answer directly. Call a tool only when necessary to resolve missing information or perform an action within your capabilities. Independent reads may run together."
+        if not self.payload.enable_artifacts:
+            self.payload.system_prompt += "\nWorkspace capability: read supplied input files as source material."
         self.payload.system_prompt += "\nGround factual claims in the sources actually inspected. A search with no relevant result establishes only that this search found no evidence; it does not establish that a rule or document does not exist. Distinguish explicit provisions from your interpretation. For findings from original files, reuse an existing matching citation handle. If none is available, use list_knowledge_chunks with the file's knowledge_id to obtain the relevant citable excerpt; do not invent source handles or cite a fragment that does not support the finding. Internal conversation metadata is not part of the user-facing answer."
         if self.payload.enable_artifacts:
+            self.payload.system_prompt += "\nFiles are delivered only through publish_artifact, which returns a persistent download link."
             self.payload.system_prompt += ("\nWorkspace capabilities are already provisioned: Python with openpyxl, xlsxwriter, pandas, python-docx, python-pptx, PyMuPDF, Pillow and matplotlib; Node with pptxgenjs; LibreOffice, pandoc and PDF utilities with CJK fonts. Do not probe or install these dependencies. Combine creation and meaningful validation in one script when their inputs are known. For spreadsheets, verify formulas and recalculate with LibreOffice before publishing if computed values are needed. Use /workspace/outputs for deliverables.")
 
     async def close(self):

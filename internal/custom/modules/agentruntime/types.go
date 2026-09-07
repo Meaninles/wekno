@@ -59,6 +59,7 @@ type ArtifactResult struct {
 }
 
 type LLMConfig struct {
+	ReasoningFormat  string            `json:"reasoning_format,omitempty"`
 	GenerationPolicy string            `json:"generation_policy,omitempty"`
 	ThinkingControl  string            `json:"thinking_control"`
 	Protocol         string            `json:"protocol"`

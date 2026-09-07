@@ -235,6 +235,8 @@ type CustomAgentConfig struct {
 
 func defaultCustomAgentConfig() CustomAgentConfig {
 	return CustomAgentConfig{
+		ImageUploadEnabled:  true,
+		AudioUploadEnabled:  true,
 		Temperature:         0.7,
 		MaxIterations:       50,
 		WebSearchMaxResults: 5,

@@ -32,5 +32,12 @@ func runtimeProviderConfig(model *types.Model) (*LLMConfig, error) {
 	default:
 		return nil, fmt.Errorf("unsupported model API protocol %q", protocol)
 	}
-	return &LLMConfig{GenerationPolicy: strings.TrimSpace(p.ExtraConfig["generation_policy"]), Protocol: protocol, SupportsVision: p.SupportsVision, ModelName: modelName, BaseURL: p.BaseURL, APIKey: p.APIKey, Provider: p.Provider, Headers: p.CustomHeaders, ReasoningEffort: strings.TrimSpace(p.ExtraConfig["reasoning_effort"]), ThinkingControl: chat.EffectiveThinkingControl(&chat.ChatConfig{ModelName: modelName, Provider: p.Provider, BaseURL: p.BaseURL, ExtraConfig: p.ExtraConfig})}, nil
+	reasoningFormat := strings.TrimSpace(p.ExtraConfig["reasoning_format"])
+	if reasoningFormat == "" {
+		reasoningFormat = "native"
+	}
+	if reasoningFormat != "native" && (reasoningFormat != "think-tags" || protocol != "openai-chat") {
+		return nil, fmt.Errorf("unsupported reasoning format %q for %s", reasoningFormat, protocol)
+	}
+	return &LLMConfig{ReasoningFormat: reasoningFormat, GenerationPolicy: strings.TrimSpace(p.ExtraConfig["generation_policy"]), Protocol: protocol, SupportsVision: p.SupportsVision, ModelName: modelName, BaseURL: p.BaseURL, APIKey: p.APIKey, Provider: p.Provider, Headers: p.CustomHeaders, ReasoningEffort: strings.TrimSpace(p.ExtraConfig["reasoning_effort"]), ThinkingControl: chat.EffectiveThinkingControl(&chat.ChatConfig{ModelName: modelName, Provider: p.Provider, BaseURL: p.BaseURL, ExtraConfig: p.ExtraConfig})}, nil
 }

@@ -18,6 +18,7 @@ def empty_dict_when_none(value: Any) -> Any:
 
 
 class LLMConfig(BaseModel):
+    reasoning_format: Literal["native", "think-tags"] = "native"
     generation_policy: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     thinking_control: str = "none"

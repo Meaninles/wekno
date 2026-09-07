@@ -394,11 +394,6 @@ const agentAllowedTools = computed<string[]>(() => {
   return currentAgentConfig.value?.allowed_tools || [];
 });
 
-const isDocumentProcessingAgent = computed(() => {
-  const agentType = currentAgentConfig.value?.agent_type;
-  return hasAgentConfig.value && agentType === 'general-agent';
-});
-
 // 从 KB 对象里抽能力位，优先用 backend 显式的 capabilities 字段；否则回退到 indexing_strategy，
 // 最后拿 kb.type === 'faq' 兜底。shared / owned / agent-scope 三路的 KB 响应结构一致。
 const kbToScopeCaps = (kb: any): Partial<ScopeCapabilities> => {
@@ -1379,19 +1374,17 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
       : null;
     mentionAvailableKbIds.value = availableKbs.map((kb: any) => String(kb.id));
 
-    if (!isDocumentProcessingAgent.value) {
-      const kbs = availableKbs.filter((kb: any) =>
-        !q || (kb.name && kb.name.toLowerCase().includes(q.toLowerCase()))
-      );
-      kbItems = kbs.map((kb: any) => ({
-        id: kb.id,
-        name: kb.name,
-        type: 'kb' as const,
-        kbType: kb.type || 'document',
-        count: kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count || 0),
-        orgName: kb.org_name || sharedAgentOrgName.value || undefined
-      }));
-    }
+    const kbs = availableKbs.filter((kb: any) =>
+      !q || (kb.name && kb.name.toLowerCase().includes(q.toLowerCase()))
+    );
+    kbItems = kbs.map((kb: any) => ({
+      id: kb.id,
+      name: kb.name,
+      type: 'kb' as const,
+      kbType: kb.type || 'document',
+      count: kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count || 0),
+      orgName: kb.org_name || sharedAgentOrgName.value || undefined
+    }));
   }
 
   // Fetch Files from API
@@ -1401,7 +1394,7 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
   //      （比如 wiki-qa 全是 wiki_* 工具，用户 @ 的文件根本进不到任何工具里，就没必要展示）。
   let fileItems: any[] = [];
   const kbModeAllowsFiles = !hasAgentConfig.value || agentKBSelectionMode.value !== 'none';
-  const toolsAllowFiles = !hasAgentConfig.value || isDocumentProcessingAgent.value || toolsConsumeFiles(agentAllowedTools.value);
+  const toolsAllowFiles = !hasAgentConfig.value || toolsConsumeFiles(agentAllowedTools.value);
   const shouldLoadFiles = kbModeAllowsFiles && toolsAllowFiles;
 
   // 空关键词时显式请求最近文件；有关键词时返回匹配文件。
@@ -1820,10 +1813,6 @@ const onMentionSelect = (item: any) => {
     return;
   }
   if (item.type === 'kb') {
-    if (isDocumentProcessingAgent.value) {
-      MessagePlugin.warning('文档处理智能体只支持选择具体文件，请输入关键词搜索文档');
-      return;
-    }
     settingsStore.addKnowledgeBase(item.id);
   } else if (item.type === 'file') {
     settingsStore.addFile(item.id);

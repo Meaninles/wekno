@@ -20,6 +20,8 @@ builtin_agents:
       description: Concise, evidence-based answers with source citations.
   config:
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     agent_type: knowledge-qa
     system_prompt_id: progressive_rag_agent
     thinking: true
@@ -67,6 +69,8 @@ builtin_agents:
       description: MySQL/PostgreSQL 데이터 소스를 바인딩하고 SQL로 분석하며 요청 시 구조화 차트를 생성하는 데이터 분석 에이전트
   config:
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     agent_type: data-analysis
     system_prompt_id: data_analyst
     thinking: true
@@ -122,6 +126,8 @@ builtin_agents:
       description: 지식 베이스 또는 업로드한 CSV/Excel 파일을 DuckDB SQL로 분석하고 요청 시 구조화 차트를 생성하는 에이전트
   config:
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     agent_type: table-analysis
     system_prompt_id: table_analyst
     thinking: true
@@ -179,6 +185,8 @@ builtin_agents:
       description: WeKnora 검색, 도구, MCP, Skills 및 데이터베이스 소스를 재사용하는 범용 에이전트
   config:
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     agent_type: general-agent
     system_prompt_id: general_agent
     thinking: true
@@ -243,6 +251,8 @@ builtin_agents:
       description: Word / Excel / PDF / PPT 문서를 직접 생성하거나 수정하는 문서 처리 에이전트
   config:
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     agent_type: document-processing-agent
     system_prompt_id: document_agent
     thinking: true
@@ -338,6 +348,8 @@ builtin_agents:
       description: 위키 지식 베이스에서 답변하는 데 특화된 에이전트
   config:
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     agent_type: wiki-qa
     system_prompt_id: wiki_researcher
     thinking: true
@@ -382,6 +394,8 @@ builtin_agents:
   config:
     agent_type: custom
     agent_mode: agent
+    image_upload_enabled: true
+    audio_upload_enabled: true
     system_prompt_id: wiki_fixer
     thinking: false
     temperature: 0.7

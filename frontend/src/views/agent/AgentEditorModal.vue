@@ -945,7 +945,7 @@
                 </div>
 
                 <!-- 知识库配置 -->
-                <div v-show="currentSection === 'knowledge' && canConfigureKnowledgeBase" class="section">
+                <div v-show="currentSection === 'knowledge'" class="section">
                   <div class="section-header">
                     <h2>{{ $t('agent.editor.knowledgeConfig') }}</h2>
                     <p class="section-description">{{ $t('agent.editor.knowledgeConfigDesc') }}</p>
@@ -1340,7 +1340,7 @@ import {
 } from '@/config/contextualGuides';
 import { useI18n } from 'vue-i18n';
 import { MessagePlugin } from 'tdesign-vue-next';
-import { BUILTIN_GENERAL_AGENT_ID, createAgent, updateAgent, resetBuiltinAgentConfig, listIMChannels, type CustomAgent, type PlaceholderDefinition, type PlaceholdersResponse, type AgentTypePreset, type AgentType, type AgentTypeKBFilter, type KBCapabilities, type DocumentTemplateConfig, type DocumentTemplateFile, type DocumentTemplateFormatConfig, type KnowledgeManagementConfig } from '@/api/agent';
+import { createAgent, updateAgent, resetBuiltinAgentConfig, listIMChannels, type CustomAgent, type PlaceholderDefinition, type PlaceholdersResponse, type AgentTypePreset, type AgentType, type AgentTypeKBFilter, type KBCapabilities, type DocumentTemplateConfig, type DocumentTemplateFile, type DocumentTemplateFormatConfig, type KnowledgeManagementConfig } from '@/api/agent';
 import { type ModelConfig } from '@/api/model';
 import { type AgentNotReadyReasonKey, agentRequiresRerankModel } from '@/utils/agent-readiness';
 import { type MCPService } from '@/api/mcp-service';
@@ -1648,14 +1648,9 @@ const toolGroups = computed(() => [
 const myKbOptions = computed(() => kbOptions.value.filter(kb => !kb.shared));
 const sharedKbOptions = computed(() => kbOptions.value.filter(kb => kb.shared));
 
-const isSimpleChatAgent = computed(() =>
-  formData.value.id === BUILTIN_GENERAL_AGENT_ID || editorAgent.value?.id === BUILTIN_GENERAL_AGENT_ID
-);
-const canConfigureKnowledgeBase = computed(() => !isSimpleChatAgent.value);
-
 // 根据知识库配置动态计算是否有知识库能力
 const hasKnowledgeBase = computed(() => {
-  return canConfigureKnowledgeBase.value && kbSelectionMode.value !== 'none';
+  return kbSelectionMode.value !== 'none';
 });
 
 const showRerankModelField = computed(() => {
@@ -1865,9 +1860,7 @@ const navItems = computed(() => {
     items.push({ key: 'conversation', icon: 'chat', label: t('agent.editor.conversationSettings') });
   }
   // 知识库与检索
-  if (canConfigureKnowledgeBase.value) {
-    items.push({ key: 'knowledge', icon: 'folder', label: t('agent.editor.knowledgeConfig') });
-  }
+  items.push({ key: 'knowledge', icon: 'folder', label: t('agent.editor.knowledgeConfig') });
   if (isAgentMode.value && canUseDatabaseSources.value) {
     items.push({ key: 'database', icon: 'server', label: '数据源' });
   }
@@ -2031,7 +2024,9 @@ const defaultFormData = {
     agent_type: 'knowledge-qa' as AgentType,
     system_prompt_id: '' as string,
     // 图片上传/多模态设置
-    image_upload_enabled: false,
+    image_upload_enabled: true,
+    audio_upload_enabled: true,
+    asr_model_id: '',
     vlm_model_id: '',
     image_storage_provider: '',
     // 文件类型限制
@@ -2073,6 +2068,13 @@ const applyDefaultChatModelIfEmpty = () => {
     )
   if (!formData.value.config.model_id && chat?.id) {
     formData.value.config.model_id = chat.id
+  }
+  for (const [field, type] of [['vlm_model_id', 'VLLM'], ['asr_model_id', 'ASR']] as const) {
+    if (!formData.value.config[field]) {
+      const model = allModels.value.find(m => m.type === type && m.is_default)
+        || allModels.value.find(m => m.type === type);
+      if (model) formData.value.config[field] = model.id;
+    }
   }
 }
 
@@ -2805,17 +2807,6 @@ const canResetBuiltinAgent = computed(() => {
   return editorMode.value === 'edit' && isBuiltinAgent.value && !!formData.value.id && !props.readOnly;
 });
 
-const enforceNoKnowledgeBaseConfig = () => {
-  formData.value.config.kb_selection_mode = 'none';
-  formData.value.config.knowledge_bases = [];
-  if (kbSelectionMode.value !== 'none') {
-    kbSelectionMode.value = 'none';
-  }
-  if (currentSection.value === 'knowledge' || currentSection.value === 'retrieval') {
-    currentSection.value = 'basic';
-  }
-};
-
 const normalizeAgentFormData = (agent: CustomAgent) => {
   const agentData = JSON.parse(JSON.stringify(agent));
 
@@ -2979,10 +2970,6 @@ watch(() => props.visible, async (val) => {
 
 // 初始化知识库选择模式
 const initKbSelectionMode = () => {
-  if (!canConfigureKnowledgeBase.value) {
-    enforceNoKnowledgeBaseConfig();
-    return;
-  }
   if (formData.value.config.kb_selection_mode) {
     // 如果有保存的模式，直接使用
     kbSelectionMode.value = formData.value.config.kb_selection_mode;
@@ -3045,10 +3032,6 @@ const fillBuiltinAgentDefaults = () => {
 
 // 监听知识库选择模式变化
 watch(kbSelectionMode, (mode) => {
-  if (!canConfigureKnowledgeBase.value) {
-    enforceNoKnowledgeBaseConfig();
-    return;
-  }
   if (isKnowledgeBaseManager.value && mode !== 'selected') {
     kbSelectionMode.value = 'selected';
     formData.value.config.kb_selection_mode = 'selected';
@@ -3076,12 +3059,6 @@ watch(
     syncKnowledgeManagementTools();
   },
 );
-
-watch(canConfigureKnowledgeBase, (canConfigure) => {
-  if (!canConfigure) {
-    enforceNoKnowledgeBaseConfig();
-  }
-});
 
 // 监听 MCP 选择模式变化
 watch(mcpSelectionMode, (mode) => {
@@ -3598,10 +3575,6 @@ const validateKnowledgeBaseManagerBeforeSave = (): boolean => {
 };
 
 const handleSave = async () => {
-  if (!canConfigureKnowledgeBase.value) {
-    enforceNoKnowledgeBaseConfig();
-  }
-
   // 验证必填项（内置智能体不验证名称和系统提示词）
   if (!isBuiltinAgent.value) {
     if (!formData.value.name || !formData.value.name.trim()) {

@@ -14,6 +14,7 @@ from agentscope.model import AnthropicChatModel, DeepSeekChatModel, OpenAIChatMo
 
 from .contracts import RunRequest
 from .control import Control
+from .reasoning import TaggedReasoningOpenAIChatModel
 
 
 class Admission:
@@ -199,7 +200,11 @@ async def model_for(payload: RunRequest, control: Control, *, transport=None, mo
         "anthropic": (AnthropicChatModel, AnthropicCredential),
     }
     cls, credential_cls = classes[config.protocol]
-    if config.provider == "deepseek" and config.protocol == "openai-chat":
+    if config.reasoning_format == "think-tags":
+        if config.protocol != "openai-chat":
+            raise ValueError("Tagged reasoning requires the OpenAI Chat wire protocol")
+        cls = TaggedReasoningOpenAIChatModel
+    if config.provider == "deepseek" and config.protocol == "openai-chat" and config.reasoning_format == "native":
         cls, credential_cls = DeepSeekChatModel, DeepSeekCredential
     values = {"max_tokens": runtime.max_completion_tokens or 8192}
     # A secondary model has its own capabilities. The primary agent's
@@ -214,7 +219,7 @@ async def model_for(payload: RunRequest, control: Control, *, transport=None, mo
     # Explicit provider parameters are validated; silently dropping them would
     # change configured model behavior and can invalidate thinking signatures.
     extra = dict(config.extra_body)
-    if cls is OpenAIChatModel and thinking is not None:
+    if issubclass(cls, OpenAIChatModel) and thinking is not None:
         if config.thinking_control == "enable_thinking":
             extra["enable_thinking"] = thinking
         elif config.thinking_control == "thinking_type":
@@ -224,7 +229,7 @@ async def model_for(payload: RunRequest, control: Control, *, transport=None, mo
     for key in tuple(extra):
         if key in cls.Parameters.model_fields:
             values[key] = extra.pop(key)
-    if extra and cls is not OpenAIChatModel:
+    if extra and not issubclass(cls, OpenAIChatModel):
         raise ValueError(f"Unsupported parameters for {cls.__name__}: {sorted(extra)}")
     timeout = httpx.Timeout(runtime.llm_call_timeout or 300, connect=15, pool=15)
     async with httpx.AsyncClient(transport=transport or GovernedTransport(control, lease_factory=lambda c: Admission(c, model_role)), timeout=timeout) as client:
@@ -232,6 +237,6 @@ async def model_for(payload: RunRequest, control: Control, *, transport=None, mo
                       model=config.model_name, parameters=cls.Parameters(**values), stream=True, max_retries=0,
                       context_size=runtime.max_context_tokens, client_kwargs={"http_client": client, "max_retries": 2,
                                                                             "default_headers": config.headers})
-        if cls is OpenAIChatModel:
+        if issubclass(cls, OpenAIChatModel):
             kwargs["extra_body"] = extra
         yield cls(**kwargs)

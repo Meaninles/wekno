@@ -57,15 +57,22 @@ var noAuthAPI = map[string][]string{
 	"/api/v1/custom/iam/sso/url":             {"GET"},
 	"/api/v1/custom/iam/sso/callback":        {"GET"},
 	"/api/v1/custom/auth-security/challenge": {"GET"},
-	// General-agent sidecar tool callbacks are authenticated by a dedicated
-	// internal API key in the custom handler. The global bearer-token middleware
-	// must not intercept this exact callback path, otherwise the sidecar cannot
-	// call back into WeKnora tools such as KB/Web/MCP/Skills/DB.
-	"/api/v1/custom/general-agent/internal/tools/call": {"POST"},
-	"/api/v1/custom/general-agent/internal/model/call": {"POST"},
+	// The runtime validates its dedicated internal key in each handler. Keep
+	// exact routes here so account JWT validation does not intercept that key.
+	"/api/v1/custom/agent-runtime/internal/tools/call":      {"POST"},
+	"/api/v1/custom/agent-runtime/internal/models/lease":    {"GET"},
+	"/api/v1/custom/agent-runtime/internal/runs/claim":      {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/heartbeat":  {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/checkpoint": {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/prefetch":   {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/events":     {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/validate":   {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/commit":     {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/fail":       {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/status":     {"POST"},
 	// Agent artifact delivery uses the same dedicated internal API key. Keep
 	// the bypass exact: no sibling path or other method becomes public.
-	"/api/v1/custom/general-agent/internal/artifacts/upload": {"POST"},
+	"/api/v1/custom/agent-runtime/internal/artifacts/upload": {"POST"},
 	// MCP OAuth provider redirect: the third-party authorization server
 	// redirects the browser here without a WeKnora bearer token. The request
 	// is authenticated by the opaque, single-use `state` parameter instead.

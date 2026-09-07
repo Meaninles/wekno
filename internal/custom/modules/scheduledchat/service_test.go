@@ -210,7 +210,7 @@ func TestScheduledLastRequestStateKeepsRequestCapabilities(t *testing.T) {
 		ID:       "agent-data",
 		TenantID: 20,
 		Config: types.CustomAgentConfig{
-			AgentMode: types.AgentModeSmartReasoning,
+			AgentMode: types.AgentModeUnified,
 		},
 	}
 	ctx := RequestContext{
@@ -278,7 +278,7 @@ func TestBackfillScheduledSessionLastRequestStates(t *testing.T) {
 		TenantID: 7,
 		Name:     "数据分析",
 		Config: types.CustomAgentConfig{
-			AgentMode: types.AgentModeSmartReasoning,
+			AgentMode: types.AgentModeUnified,
 		},
 	}
 	if err := db.Create(agent).Error; err != nil {

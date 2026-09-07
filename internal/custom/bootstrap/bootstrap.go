@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	customadmin "github.com/Tencent/WeKnora/internal/custom/modules/admin"
 	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
+	"github.com/Tencent/WeKnora/internal/custom/modules/agentruntime"
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
@@ -33,7 +34,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
-	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 	"github.com/Tencent/WeKnora/internal/custom/modules/impreview"
@@ -77,7 +77,7 @@ type Handlers struct {
 	SessionState         *sessionstate.Handler
 	SkillHub             *skillhub.Handler
 	DBAnalytics          *dbanalytics.Handler
-	GeneralAgent         *generalagent.Handler
+	AgentRuntime         *agentruntime.Handler
 	AnswerFeedback       *answerfeedback.Handler
 	BuiltinAgentDefaults *builtinagentdefaults.Handler
 	ChatShare            *chatshare.Handler
@@ -101,7 +101,7 @@ type Handlers struct {
 	builtinAgentDefaultsService *builtinagentdefaults.Service
 	chatShareService            *chatshare.Service
 	dbAnalyticsService          *dbanalytics.Service
-	generalAgentService         *generalagent.Service
+	agentRuntimeService         *agentruntime.Service
 	kbManagerService            *kbmanager.Service
 	knowledgeFolderService      *knowledgefolders.Service
 	mobileDocumentService       *mobiledocument.Service
@@ -165,16 +165,18 @@ func NewHandlers(
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
-	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
+	agentRuntimeService := agentruntime.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
+	sessionHandler.SetRuntimeStreamControl(agentruntime.NewHandler(agentRuntimeService).Resume, agentruntime.NewHandler(agentRuntimeService).Stop)
+	agentRuntimeService.SetAdmission(admissionManager)
 	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
-	chatShareService.SetArtifactStore(generalAgentService.ArtifactStore())
+	chatShareService.SetArtifactStore(agentRuntimeService.ArtifactStore())
 	kbManagerService := kbmanager.NewService(
 		db,
 		knowledgeBaseService,
 		knowledgeService,
 		kbShareService,
 		tenantService,
-		generalAgentService,
+		agentRuntimeService,
 	)
 	knowledgeFolderService := knowledgefolders.NewService(
 		db,
@@ -185,7 +187,7 @@ func NewHandlers(
 	)
 	mobileArtifactRepository := mobiledocument.NewArtifactRepository(
 		db,
-		generalAgentService.ArtifactStore(),
+		agentRuntimeService.ArtifactStore(),
 	)
 	mobileDocumentService := mobiledocument.NewService(
 		knowledgeService,
@@ -221,7 +223,7 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
-	generalAgentService.SetProfessionalSkillProvider(skillHubService)
+	agentRuntimeService.SetProfessionalSkillProvider(skillHubService)
 	derivativeControlService := derivativecontrol.NewService(
 		db,
 		redisClient,
@@ -285,7 +287,7 @@ func NewHandlers(
 		if err := dbAnalyticsService.Migrate(ctx); err != nil {
 			return nil, err
 		}
-		if err := generalAgentService.Migrate(ctx); err != nil {
+		if err := agentRuntimeService.Migrate(ctx); err != nil {
 			return nil, err
 		}
 		if err := kbManagerService.Migrate(ctx); err != nil {
@@ -380,7 +382,8 @@ func NewHandlers(
 		return err
 	})
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
-	appservice.RegisterSessionDeletedHook(generalAgentService.DeleteSessionArtifacts)
+	appservice.RegisterSessionDeletedHook(agentRuntimeService.DeleteSessionArtifacts)
+	appservice.RegisterAgentRuntime(agentRuntimeService.Run)
 	appservice.RegisterSessionDeletedHook(chatUploadService.DeleteSessionUploads)
 	appservice.RegisterKnowledgeDeleteCompletedHook(knowledgeFolderService.OnKnowledgeDeleteCompleted)
 	appservice.RegisterDerivativeChatResolver(derivativeControlService.ResolveChatModel)
@@ -390,11 +393,6 @@ func NewHandlers(
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
 	sessionhandler.RegisterChatQueueAdmissionHook(chatQueueManager.Admit)
-	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
-	sessionhandler.RegisterAgentQARunner(types.AgentTypeKnowledgeBaseManager, generalAgentService.Run)
-	sessionhandler.RegisterAgentQARunner(types.AgentTypeDocumentProcessingAgent, generalAgentService.Run)
-	sessionhandler.RegisterAgentQARunner(types.AgentTypeDataAnalysis, generalAgentService.Run)
-	sessionhandler.RegisterAgentQARunner(types.AgentTypeTableAnalysis, generalAgentService.Run)
 	appservice.RegisterRuntimeToolRecognizer(func(_ context.Context, config *types.AgentConfig, toolName string) bool {
 		if config == nil {
 			return false
@@ -460,7 +458,7 @@ func NewHandlers(
 			SourceTenantID: config.AgentTenantID,
 			SourceIDs:      append([]string(nil), config.DBDataSources...),
 		}
-		allowChart := types.IsClaudeSDKAgentType(config.AgentType)
+		allowChart := types.HasWorkspaceCapabilities(config.AgentType)
 		if allowed[dbanalytics.ToolDBCatalog] {
 			registry.RegisterTool(dbanalytics.NewCatalogTool(dbAnalyticsService, scope))
 		}
@@ -485,7 +483,7 @@ func NewHandlers(
 		SessionState:                sessionstate.NewHandler(sessionStateService),
 		SkillHub:                    skillhub.NewHandler(skillHubService, db),
 		DBAnalytics:                 dbanalytics.NewHandler(dbAnalyticsService),
-		GeneralAgent:                generalagent.NewHandler(generalAgentService),
+		AgentRuntime:                agentruntime.NewHandler(agentRuntimeService),
 		AnswerFeedback:              answerfeedback.NewHandler(answerFeedbackService, messageService),
 		BuiltinAgentDefaults:        builtinagentdefaults.NewHandler(builtinAgentDefaultsService),
 		ChatShare:                   chatshare.NewHandler(chatShareService),
@@ -508,7 +506,7 @@ func NewHandlers(
 		builtinAgentDefaultsService: builtinAgentDefaultsService,
 		chatShareService:            chatShareService,
 		dbAnalyticsService:          dbAnalyticsService,
-		generalAgentService:         generalAgentService,
+		agentRuntimeService:         agentRuntimeService,
 		kbManagerService:            kbManagerService,
 		knowledgeFolderService:      knowledgeFolderService,
 		mobileDocumentService:       mobileDocumentService,
@@ -546,10 +544,8 @@ func customMigrationsEnabled() bool {
 }
 
 func supportsDBAnalyticsRuntimeTools(agentType string) bool {
-	return agentType == types.AgentTypeDataAnalysis ||
-		agentType == types.AgentTypeGeneralAgent ||
-		agentType == types.AgentTypeKnowledgeBaseManager ||
-		agentType == types.AgentTypeDocumentProcessingAgent
+	return agentType == types.AgentTypeDataAnalysis || agentType == types.AgentTypeGeneralAgent ||
+		agentType == types.AgentTypeDocumentProcessingAgent || agentType == types.AgentTypeKnowledgeBaseManager
 }
 
 func runtimeHasPermission(scope *types.KnowledgeManagementRuntimeScope, permission string) bool {
@@ -596,8 +592,8 @@ func StartSchedulers(handlers *Handlers) {
 	if handlers.kbManagerService != nil {
 		handlers.kbManagerService.Start()
 	}
-	if handlers.generalAgentService != nil {
-		handlers.generalAgentService.StartArtifactHousekeeping()
+	if handlers.agentRuntimeService != nil {
+		handlers.agentRuntimeService.StartArtifactHousekeeping()
 	}
 }
 
@@ -640,8 +636,8 @@ func RegisterMaintenanceSchedulers(
 			if handlers.kbManagerService != nil {
 				handlers.kbManagerService.Start()
 			}
-			if handlers.generalAgentService != nil {
-				handlers.generalAgentService.StartArtifactHousekeeping()
+			if handlers.agentRuntimeService != nil {
+				handlers.agentRuntimeService.StartArtifactHousekeeping()
 			}
 			if handlers.chatUploadService != nil {
 				handlers.chatUploadService.Start(ctx)
@@ -652,8 +648,8 @@ func RegisterMaintenanceSchedulers(
 			if handlers.chatUploadService != nil {
 				handlers.chatUploadService.Stop()
 			}
-			if handlers.generalAgentService != nil {
-				handlers.generalAgentService.StopArtifactHousekeeping()
+			if handlers.agentRuntimeService != nil {
+				handlers.agentRuntimeService.StopArtifactHousekeeping()
 			}
 			if handlers.kbManagerService != nil {
 				handlers.kbManagerService.Stop()
@@ -669,10 +665,10 @@ func RegisterMaintenanceSchedulers(
 }
 
 func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers, uploadGuard gin.HandlerFunc, sessionGuard gin.HandlerFunc) {
-	if embed == nil || handlers == nil || handlers.GeneralAgent == nil {
+	if embed == nil || handlers == nil || handlers.AgentRuntime == nil {
 		return
 	}
-	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.GeneralAgent.DownloadEmbedArtifact)
+	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.AgentRuntime.DownloadEmbedArtifact)
 	if handlers.SessionTitles != nil && sessionGuard != nil {
 		handlers.SessionTitles.Register(embed.Group("", sessionGuard))
 	}
@@ -743,11 +739,12 @@ func RegisterRoutes(
 			ssoRoutes.GET("/url", handlers.IAM.GetSSOAuthorizationURL)
 			ssoRoutes.GET("/callback", handlers.IAM.SSOCallback)
 		}
-		generalAgentInternalRoutes := customPublic.Group("/general-agent/internal")
+		agentRuntimeInternalRoutes := customPublic.Group("/agent-runtime/internal")
 		{
-			generalAgentInternalRoutes.POST("/tools/call", handlers.GeneralAgent.CallTool)
-			generalAgentInternalRoutes.POST("/model/call", handlers.GeneralAgent.CallModel)
-			generalAgentInternalRoutes.POST("/artifacts/upload", handlers.GeneralAgent.UploadArtifact)
+			agentRuntimeInternalRoutes.POST("/tools/call", handlers.AgentRuntime.CallTool)
+			agentRuntimeInternalRoutes.POST("/runs/:operation", handlers.AgentRuntime.RunControl)
+			agentRuntimeInternalRoutes.GET("/models/lease", handlers.AgentRuntime.ModelLease)
+			agentRuntimeInternalRoutes.POST("/artifacts/upload", handlers.AgentRuntime.UploadArtifact)
 		}
 		authSecurityRoutes := customPublic.Group("/auth-security")
 		{
@@ -1008,9 +1005,9 @@ func RegisterRoutes(
 		dbAnalyticsRoutes.PUT("/agents/:agent_id/bindings", handlers.DBAnalytics.SetAgentBindings)
 	}
 
-	generalAgentRoutes := v1.Group("/custom/general-agent")
+	agentRuntimeRoutes := v1.Group("/custom/agent-runtime")
 	{
-		generalAgentRoutes.GET("/artifacts/:id/download", handlers.GeneralAgent.DownloadArtifact)
+		agentRuntimeRoutes.GET("/artifacts/:id/download", handlers.AgentRuntime.DownloadArtifact)
 	}
 
 	answerFeedbackRoutes := v1.Group("/custom/answer-feedback")

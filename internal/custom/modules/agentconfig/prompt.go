@@ -32,7 +32,7 @@ func NormalizePrompts(cfg types.CustomAgentConfig, templates *config.PromptTempl
 		return id, body
 	}
 	cfg.SystemPromptID, cfg.SystemPrompt = canonical(cfg.SystemPromptID, cfg.SystemPrompt, templates.SystemPrompt, templates.AgentSystemPrompt)
-	cfg.ContextTemplateID, cfg.ContextTemplate = canonical(cfg.ContextTemplateID, cfg.ContextTemplate, templates.ContextTemplate)
+
 	return cfg, nil
 }
 
@@ -69,6 +69,6 @@ func ResolvePrompts(cfg types.CustomAgentConfig, templates *config.PromptTemplat
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ContextTemplate, err = resolve(cfg.ContextTemplateID, cfg.ContextTemplate, "context_template_id", templates.ContextTemplate)
+
 	return cfg, err
 }

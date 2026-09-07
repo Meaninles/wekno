@@ -1,7 +1,6 @@
 package skills
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -327,67 +326,6 @@ See [GUIDE.md](GUIDE.md) for more info.
 
 	t.Logf("Loaded files: GUIDE.md=%d bytes, hello.py=%d bytes (isScript=%v)",
 		len(file.Content), len(scriptFile.Content), scriptFile.IsScript)
-}
-
-func TestManagerIntegration(t *testing.T) {
-	// Create a temporary skills directory
-	tmpDir, err := os.MkdirTemp("", "skills-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create a test skill directory
-	skillDir := filepath.Join(tmpDir, "test-skill")
-	if err := os.MkdirAll(skillDir, 0755); err != nil {
-		t.Fatalf("Failed to create skill dir: %v", err)
-	}
-
-	// Write SKILL.md
-	skillContent := `---
-name: test-skill
-description: A test skill for manager integration testing.
----
-# Test Skill
-
-Integration test content.
-`
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0644); err != nil {
-		t.Fatalf("Failed to write SKILL.md: %v", err)
-	}
-
-	// Create manager with config
-	config := &ManagerConfig{
-		SkillDirs:     []string{tmpDir},
-		AllowedSkills: []string{}, // Allow all
-		Enabled:       true,
-	}
-
-	manager := NewManager(config, nil) // No sandbox for this test
-
-	// Initialize
-	ctx := context.Background()
-	if err := manager.Initialize(ctx); err != nil {
-		t.Fatalf("Failed to initialize manager: %v", err)
-	}
-
-	// Get all metadata
-	metadata := manager.GetAllMetadata()
-	if len(metadata) != 1 {
-		t.Fatalf("Expected 1 skill, got %d", len(metadata))
-	}
-
-	// Load skill
-	skill, err := manager.LoadSkill(ctx, "test-skill")
-	if err != nil {
-		t.Fatalf("Failed to load skill: %v", err)
-	}
-
-	if skill.Name != "test-skill" {
-		t.Errorf("Expected skill name 'test-skill', got '%s'", skill.Name)
-	}
-
-	t.Logf("Manager integration test passed: %d skills discovered", len(metadata))
 }
 
 func TestIsScript(t *testing.T) {

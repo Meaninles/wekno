@@ -169,37 +169,8 @@ export function deriveKbFilterFromTools(
   return { any_of: Array.from(caps) };
 }
 
-/**
- * Implicit KB capability requirement for the "quick-answer" (RAG) agent
- * mode. Quick-answer drives retrieval purely through vector/keyword chunk
- * search and ships with NO `allowed_tools`, so the tool-derived filter
- * alone would let wiki-only KBs through even though they can't contribute
- * anything to a RAG answer. Treat this as a property of the agent MODE.
- */
-const QUICK_ANSWER_KB_FILTER: { any_of: KBCapability[] } = {
-  any_of: ['vector', 'keyword'],
-};
-
-/**
- * Agent-mode aware version of `deriveKbFilterFromTools`: unions the
- * tool-derived `any_of` with the implicit requirement of `agentMode`
- * (currently: quick-answer → vector|keyword).
- *
- * Returns `null` when neither the agent mode nor the tools impose any
- * capability constraint (i.e. any KB is acceptable).
- */
-export function deriveKbFilterForAgent(
-  agentMode: string | undefined | null,
-  allowedTools: string[] | undefined | null,
-): { any_of: KBCapability[] } | null {
-  const caps = new Set<KBCapability>();
-  if (agentMode === 'quick-answer') {
-    QUICK_ANSWER_KB_FILTER.any_of.forEach(c => caps.add(c));
-  }
-  const fromTools = deriveKbFilterFromTools(allowedTools || []);
-  fromTools?.any_of.forEach(c => caps.add(c));
-  if (caps.size === 0) return null;
-  return { any_of: Array.from(caps) };
+export function deriveKbFilterForAgent(_mode: string | undefined | null, tools: string[] | undefined | null): { any_of: KBCapability[] } | null {
+  return deriveKbFilterFromTools(tools || []);
 }
 
 /**

@@ -11,7 +11,6 @@ import (
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
@@ -500,63 +499,8 @@ func (s *sessionService) GenerateTitle(ctx context.Context,
 		return "", stderrors.New("no user message found")
 	}
 
-	// Use provided modelID, or fallback to first available interactive model.
-	// Model selection or generation failure never triggers a second model call;
-	// the local fallback below guarantees a durable non-empty title.
-	if modelID == "" {
-		models, err := s.modelService.ListModels(ctx)
-		if err != nil {
-			logger.Warnf(ctx, "Unable to list title models, using local fallback: %v", err)
-		}
-		for _, model := range models {
-			if model == nil {
-				continue
-			}
-			if model.IsInteractiveChatModel() {
-				modelID = model.ID
-				logger.Infof(ctx, "Using first available KnowledgeQA model for title: %s", modelID)
-				break
-			}
-		}
-		if modelID == "" {
-			logger.Warn(ctx, "No interactive model found for title, using local fallback")
-		}
-	} else {
-		logger.Infof(ctx, "Using specified model for title generation: %s", modelID)
-	}
-
+	// Titles are a local projection of the user question; no auxiliary model call.
 	title := sessiontitle.Fallback(message.Content)
-	if modelID != "" {
-		if titleModel, modelErr := s.modelService.GetChatModel(ctx, modelID); modelErr != nil {
-			logger.Warnf(ctx, "Unable to load title model %s, using local fallback: %v", modelID, modelErr)
-		} else {
-			titlePrompt := types.RenderPromptPlaceholders(s.cfg.Conversation.GenerateSessionTitlePrompt, types.PlaceholderValues{
-				"language": types.LanguageNameFromContext(ctx),
-			})
-			thinking := false
-			response, generateErr := titleModel.Chat(ctx, []chat.Message{
-				{Role: "system", Content: titlePrompt},
-				{Role: "user", Content: message.Content},
-			}, &chat.ChatOptions{
-				Temperature:         0.3,
-				MaxCompletionTokens: 64,
-				Thinking:            &thinking,
-			})
-			if generateErr != nil {
-				logger.Warnf(ctx, "Title model failed, using local fallback: %v", generateErr)
-			} else if normalized := sessiontitle.NormalizeModelTitle(response.Content); normalized != "" {
-				title = normalized
-			} else {
-				logger.Warnf(ctx, "Title model returned empty/thinking-only content; using local fallback")
-			}
-		}
-	}
-
-	// The model may have consumed the caller's entire auxiliary timeout. Title
-	// persistence is a short, local database operation and must still commit the
-	// already-derived deterministic fallback in that case. WithoutCancel keeps
-	// tenant/request values while preventing an expired model context from
-	// silently leaving the session titled "New conversation" forever.
 	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer persistCancel()
 	updated, err := s.sessionRepo.UpdateTitleIfEmpty(

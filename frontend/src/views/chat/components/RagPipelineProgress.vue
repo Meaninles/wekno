@@ -176,7 +176,7 @@ import {
   isKnowledgeSearchToolName,
   isWebSearchToolName,
 } from '@/utils/agent-tool-display'
-import { RAG_PIPELINE_TOOL_NAMES } from '@/utils/rag-pipeline-history'
+import { RETRIEVAL_TOOL_NAMES } from '@/custom/modules/agentstream/retrievalTools'
 import {
   formatCompletedRunDuration,
   isSimpleCompletedConversation,
@@ -261,7 +261,7 @@ const steps = computed(() => {
       return (
         event.type === 'tool_call' &&
         typeof event.tool_name === 'string' &&
-        RAG_PIPELINE_TOOL_NAMES.has(event.tool_name)
+        RETRIEVAL_TOOL_NAMES.has(event.tool_name)
       )
     })
     .map((event) => {

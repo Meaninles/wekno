@@ -59,10 +59,10 @@
                 <span
                   v-if="agentMeta(ch.agent_id)?.is_builtin"
                   class="builtin-avatar"
-                  :class="agentMeta(ch.agent_id)?.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'"
+                  :class="agentMeta(ch.agent_id)?.config?.agent_mode === 'agent' ? 'agent' : 'normal'"
                 >
                   <t-icon
-                    :name="agentMeta(ch.agent_id)?.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                    :name="agentMeta(ch.agent_id)?.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                     size="10px"
                   />
                 </span>

@@ -1,3 +1,4 @@
+import { publicFailure } from "../failures/failures";
 import type { App } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 
@@ -16,21 +17,6 @@ const recentMessages = new Map<string, number>();
 
 const originalCloseAll = MessagePlugin.closeAll?.bind(MessagePlugin);
 
-function getLocale() {
-  if (typeof localStorage !== "undefined") {
-    const stored = localStorage.getItem("locale");
-    if (stored) return stored;
-  }
-  if (typeof navigator !== "undefined") return navigator.language || "";
-  return "";
-}
-
-function promptTooLongMessage() {
-  return getLocale().toLowerCase().startsWith("zh")
-    ? "本次请求内容过长，请减少输入、附件或检索范围后重试。"
-    : "The request is too long. Reduce the input, attachments, or search scope and try again.";
-}
-
 function toPlainText(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -42,19 +28,7 @@ function toPlainText(value: unknown): string {
 }
 
 export function normalizeUserFacingError(value: unknown): string {
-  const message = toPlainText(value).trim();
-  if (!message) return "";
-
-  if (
-    /prompt exceeds max length/i.test(message) ||
-    /maximum context length/i.test(message) ||
-    /context length exceeded/i.test(message) ||
-    /exceeds? (the )?(maximum )?(token|context)/i.test(message)
-  ) {
-    return promptTooLongMessage();
-  }
-
-  return message;
+  return publicFailure(value).message;
 }
 
 function getContent(params: NotifyParams): string {

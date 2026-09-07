@@ -22,7 +22,7 @@ func TestRefreshBuiltinAgentMetadataUsesCurrentRegistry(t *testing.T) {
 				IsBuiltin:   true,
 				TenantID:    tenantID,
 				Config: types.CustomAgentConfig{
-					AgentMode:      types.AgentModeSmartReasoning,
+					AgentMode:      types.AgentModeUnified,
 					AgentType:      types.AgentTypeGeneralAgent,
 					SystemPrompt:   "最新系统提示词",
 					SystemPromptID: "general_agent",
@@ -42,7 +42,7 @@ func TestRefreshBuiltinAgentMetadataUsesCurrentRegistry(t *testing.T) {
 		IsBuiltin:   true,
 		TenantID:    10002,
 		Config: types.CustomAgentConfig{
-			AgentMode:      types.AgentModeSmartReasoning,
+			AgentMode:      types.AgentModeUnified,
 			AgentType:      types.AgentTypeGeneralAgent,
 			SystemPrompt:   "旧系统提示词",
 			SystemPromptID: "legacy_general_agent",
@@ -87,22 +87,22 @@ func TestNormalizeCustomAgentDataSourceConfig_GeneralAgentPreservesDBSourcesAndT
 	}, agent.Config.AllowedTools)
 }
 
-func TestNormalizeCustomAgentDataSourceConfig_LegacyDataAnalysisStillRequiresSource(t *testing.T) {
+func TestNormalizeCustomAgentDataSourceConfig_GeneralAllowsOptionalSources(t *testing.T) {
 	agent := &types.CustomAgent{
 		Config: types.CustomAgentConfig{
-			AgentType:     types.AgentTypeDataAnalysis,
+			AgentType:     types.AgentTypeGeneralAgent,
 			DBDataSources: []string{"", "   "},
 			AllowedTools:  []string{tools.ToolDBCatalog, tools.ToolDBSchema, tools.ToolDBQuery},
 		},
 	}
 
-	assert.ErrorIs(t, normalizeCustomAgentDataSourceConfig(agent), ErrAgentDatabaseSourcesRequired)
+	assert.NoError(t, normalizeCustomAgentDataSourceConfig(agent))
 }
 
 func TestNormalizeCustomAgentDataSourceConfig_NonDBAgentStripsDBSourcesAndTools(t *testing.T) {
 	agent := &types.CustomAgent{
 		Config: types.CustomAgentConfig{
-			AgentType:     types.AgentTypeRAGQA,
+			AgentType:     types.AgentTypeKnowledgeQA,
 			DBDataSources: []string{"source-a"},
 			AllowedTools: []string{
 				tools.ToolKnowledgeSearch,

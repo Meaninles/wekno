@@ -13,7 +13,7 @@ import (
 type EmbedChannel struct {
 	ID                     string         `json:"id"                  gorm:"type:varchar(36);primaryKey"`
 	TenantID               uint64         `json:"tenant_id"           gorm:"not null;index:idx_embed_channels_tenant"`
-	AgentID                string         `json:"agent_id"            gorm:"type:varchar(36);not null;index:idx_embed_channels_agent;default:'builtin-quick-answer'"`
+	AgentID                string         `json:"agent_id"            gorm:"type:varchar(36);not null;index:idx_embed_channels_agent;default:'builtin-knowledge-qa'"`
 	Name                   string         `json:"name"                gorm:"type:varchar(255);not null;default:''"`
 	Enabled                bool           `json:"enabled"             gorm:"not null;default:true"`
 	PublishToken           string         `json:"-"                   gorm:"type:varchar(64);not null;default:''"`
@@ -44,7 +44,7 @@ func (ch *EmbedChannel) BeforeCreate(tx *gorm.DB) error {
 		ch.ID = uuid.New().String()
 	}
 	if ch.AgentID == "" {
-		ch.AgentID = BuiltinQuickAnswerID
+		ch.AgentID = BuiltinKnowledgeQAID
 	}
 	if ch.RateLimitPerMinute <= 0 {
 		ch.RateLimitPerMinute = 30

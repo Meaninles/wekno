@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Tencent/WeKnora/internal/agent"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiprompts"
 	"github.com/Tencent/WeKnora/internal/custom/modules/llmjson"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
@@ -99,12 +99,12 @@ func (s *wikiIngestService) extractCandidateSlugs(
 	granularity := batchCtx.ExtractionGranularity.Normalize()
 	result, err := s.generateCombinedExtraction(
 		ctx, chatModel, "candidate slug extraction",
-		agent.WikiCandidateSlugPrompt, map[string]string{
+		wikiprompts.WikiCandidateSlugPrompt, map[string]string{
 			"Content":             content,
 			"Language":            lang,
 			"PreviousSlugs":       prevSlugsText,
 			"Granularity":         string(granularity),
-			"GranularityGuidance": agent.WikiGranularityGuidance(string(granularity)),
+			"GranularityGuidance": wikiprompts.WikiGranularityGuidance(string(granularity)),
 		},
 	)
 	if err != nil {
@@ -367,7 +367,7 @@ func (s *wikiIngestService) classifyChunkCitations(
 		batchIdx := bi
 		eg.Go(func() error {
 			chunksXML := renderChunksXML(batch)
-			raw, err := s.generateWithTemplate(ectx, chatModel, agent.WikiChunkCitationPrompt, map[string]string{
+			raw, err := s.generateWithTemplate(ectx, chatModel, wikiprompts.WikiChunkCitationPrompt, map[string]string{
 				"CandidateSlugs": candidatesXML,
 				"ChunksXML":      chunksXML,
 				"Language":       lang,

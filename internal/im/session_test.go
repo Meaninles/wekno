@@ -155,7 +155,7 @@ func TestBuildIMLastRequestStateFromAgent(t *testing.T) {
 	agent := &types.CustomAgent{
 		ID: "agent-1",
 		Config: types.CustomAgentConfig{
-			AgentMode:        types.AgentModeSmartReasoning,
+			AgentMode:        types.AgentModeUnified,
 			ModelID:          "model-1",
 			KnowledgeBases:   []string{"kb-agent"},
 			WebSearchEnabled: true,
@@ -185,7 +185,7 @@ func TestBuildIMLastRequestStateKeepsExplicitKBs(t *testing.T) {
 	agent := &types.CustomAgent{
 		ID: "agent-1",
 		Config: types.CustomAgentConfig{
-			AgentMode:      types.AgentModeQuickAnswer,
+			AgentMode:      types.AgentModeUnified,
 			ModelID:        "model-1",
 			KnowledgeBases: []string{"kb-agent"},
 		},
@@ -193,8 +193,8 @@ func TestBuildIMLastRequestStateKeepsExplicitKBs(t *testing.T) {
 
 	state := buildIMLastRequestState(agent.ID, agent, []string{"kb-explicit"})
 
-	if state.AgentEnabled {
-		t.Fatal("AgentEnabled = true, want false for quick-answer agent")
+	if !state.AgentEnabled {
+		t.Fatal("AgentEnabled = true, want true for the unified harness")
 	}
 	if !reflect.DeepEqual(state.KnowledgeBaseIDs, []string{"kb-explicit"}) {
 		t.Fatalf("KnowledgeBaseIDs = %#v, want [kb-explicit]", state.KnowledgeBaseIDs)

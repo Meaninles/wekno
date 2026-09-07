@@ -1,5 +1,7 @@
 <template>
     <div class="bot_msg" :class="{ 'is-embedded': embeddedMode }">
+    <FailureNotice v-if="replyFailure" :failure="replyFailure" />
+    <template v-else>
         <div style="display: flex;flex-direction: column; gap:8px">
             <!-- 显示@的知识库和文件（非 Agent 模式下显示） -->
             <div v-if="!session.isAgentMode && mentionedItems && mentionedItems.length > 0" class="mentioned_items">
@@ -69,6 +71,7 @@
             <div v-if="isImgLoading" class="img_loading"><t-loading size="small"></t-loading><span>{{
                 $t('common.loading') }}</span></div>
         </div>
+    </template>
         <picturePreview :reviewImg="reviewImg" :reviewUrl="reviewUrl" @closePreImg="closePreImg"></picturePreview>
         <Teleport to="body">
             <ChatCitationFloat v-if="!shareMode" :float="citationFloat" :on-enter="cancelCitationClose"
@@ -77,6 +80,8 @@
     </div>
 </template>
 <script setup>
+import FailureNotice from '@/custom/modules/failures/FailureNotice.vue';
+import { messageFailure } from '@/custom/modules/failures/failures';
 import { onMounted, onBeforeUnmount, watch, computed, ref, nextTick, onUpdated } from 'vue';
 import 'katex/dist/katex.min.css';
 import deepThink from './deepThink.vue';
@@ -415,6 +420,7 @@ onBeforeUnmount(() => {
         parentMd.value.removeEventListener('click', handleSourceCitationClick, true);
     }
 });
+const replyFailure = computed(() => messageFailure(props.session || {}));
 </script>
 <style lang="less" scoped>
 @import '../../../components/css/chat-markdown.less';

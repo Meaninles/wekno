@@ -16,7 +16,7 @@ $mainEnv = Join-Path $MainWorktree ".env"
 $evalEnv = Join-Path $PSScriptRoot "eval.env"
 $runtimeCompose = Join-Path $repoRoot "custom\tests\runtime_profile_e2e\docker-compose.yml"
 $infraCompose = Join-Path $repoRoot "docker-compose.dev.yml"
-$agentCompose = Join-Path $repoRoot "custom\docker-compose.general-agent.yml"
+$agentCompose = Join-Path $repoRoot "custom\docker-compose.agent-runtime.yml"
 $platformCompose = Join-Path $PSScriptRoot "docker-compose.yml"
 
 function Invoke-Docker {
@@ -79,7 +79,7 @@ function Main-ComposePrefix {
     $common = @("compose", "--env-file", (Join-Path $mainRootResolved ".env"))
     switch ($Kind) {
         "infra" { return $common + @("-p", "weknora", "-f", (Join-Path $mainRootResolved "docker-compose.dev.yml")) }
-        "agents" { return $common + @("-p", "weknora", "-f", (Join-Path $mainRootResolved "custom\docker-compose.general-agent.yml")) }
+        "agents" { return $common + @("-p", "weknora", "-f", (Join-Path $mainRootResolved "custom\docker-compose.agent-runtime.yml")) }
         "runtime" { return $common + @("-p", "weknora-runtime-profile-e2e", "-f", (Join-Path $mainRootResolved "custom\tests\runtime_profile_e2e\docker-compose.yml")) }
         default { throw "unknown main compose kind: $Kind" }
     }
@@ -151,13 +151,13 @@ function Start-EvalStack {
     Invoke-Docker -DockerArgs $infraArgs
 
     if ($Action -eq "rebuild") {
-        # Build the two Python agents serially so Docker does not saturate CPU,
+        # Build the harness and its tool workspace image serially to bound CPU,
         # memory and disk on a development laptop.
         Invoke-Docker -DockerArgs ((Eval-ComposePrefix "agents") + @(
-            "build", "weknora-custom-general-agent"
+            "build", "agent-runtime"
         ))
         Invoke-Docker -DockerArgs ((Eval-ComposePrefix "agents") + @(
-            "build", "weknora-custom-document-processing-agent"
+            "build", "agent-workspace-image"
         ))
     }
     Invoke-Docker -DockerArgs ((Eval-ComposePrefix "agents") + @("up", "-d"))
@@ -196,10 +196,10 @@ function Start-MainStack {
     Invoke-Docker -DockerArgs $infraArgs
     if ($Action -eq "rebuild") {
         Invoke-Docker -DockerArgs ((Main-ComposePrefix "agents") + @(
-            "build", "weknora-custom-general-agent"
+            "build", "agent-runtime"
         ))
         Invoke-Docker -DockerArgs ((Main-ComposePrefix "agents") + @(
-            "build", "weknora-custom-document-processing-agent"
+            "build", "agent-workspace-image"
         ))
     }
     Invoke-Docker -DockerArgs ((Main-ComposePrefix "agents") + @("up", "-d"))

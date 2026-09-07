@@ -70,7 +70,7 @@ func NewAddDocumentTool(service *Service, scope ToolScope) *AddDocumentTool {
 	return &AddDocumentTool{
 		BaseTool: agenttools.NewBaseTool(
 			ToolAddDocument,
-			"Add one whole document to WeKnora and start native parsing in the background. The source MUST be a current-run create_artifact file_token or input file id; URL and filesystem-path ingestion are forbidden. Standalone add requires whole-KB turn scope. Once the tool confirms the document was added, report that immediate outcome without waiting for parsing; do not claim parsing or enrichment completed.",
+			"Add one whole document to WeKnora and start native parsing in the background. The source MUST be a current-run publish_artifact file_token or input file id; URL and filesystem-path ingestion are forbidden. Standalone add requires whole-KB turn scope. Once the tool confirms the document was added, report that immediate outcome without waiting for parsing unless the user explicitly asks to wait; use kb_mutation_status to verify completion and never claim unverified parsing or enrichment completion.",
 			utils.GenerateSchema[AddDocumentRequest](),
 		),
 		service: service,

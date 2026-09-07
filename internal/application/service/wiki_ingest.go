@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Tencent/WeKnora/internal/agent"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiprompts"
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
@@ -2530,7 +2530,7 @@ func (s *wikiIngestService) rebuildIndexPage(
 		if docSummaries.Len() == 0 {
 			docSummaries.WriteString("(no documents yet)")
 		}
-		generatedIntro, genErr := s.generateWithTemplate(ctx, chatModel, agent.WikiIndexIntroPrompt, map[string]string{
+		generatedIntro, genErr := s.generateWithTemplate(ctx, chatModel, wikiprompts.WikiIndexIntroPrompt, map[string]string{
 			"DocumentSummaries": framing + docSummaries.String(),
 			"Language":          lang,
 		})
@@ -2548,7 +2548,7 @@ func (s *wikiIngestService) rebuildIndexPage(
 		// would re-flood the context every batch, and the
 		// change-description block already encodes the "what just
 		// changed" signal the prompt is asking for.
-		updatedIntro, genErr := s.generateWithTemplate(ctx, chatModel, agent.WikiIndexIntroUpdatePrompt, map[string]string{
+		updatedIntro, genErr := s.generateWithTemplate(ctx, chatModel, wikiprompts.WikiIndexIntroUpdatePrompt, map[string]string{
 			"ExistingIntro":     existingIntro,
 			"ChangeDescription": changeDesc.String(),
 			"DocumentSummaries": "",
@@ -2834,7 +2834,7 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 		writeDedupItemXML(&newBuf, item.Slug, item.Name, "concept", item.Aliases)
 	}
 
-	dedupeJSON, err := s.generateWithTemplate(ctx, chatModel, agent.WikiDeduplicationPrompt, map[string]string{
+	dedupeJSON, err := s.generateWithTemplate(ctx, chatModel, wikiprompts.WikiDeduplicationPrompt, map[string]string{
 		"NewItems":      newBuf.String(),
 		"ExistingPages": existingBuf.String(),
 	})

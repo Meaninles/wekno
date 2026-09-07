@@ -17,7 +17,6 @@ import (
 	"github.com/chromedp/chromedp"
 
 	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/utils"
 )
@@ -29,13 +28,12 @@ const (
 
 var webFetchTool = BaseTool{
 	name: ToolWebFetch,
-	description: `Fetch detailed web content from previously discovered URLs and analyze it with an LLM.
+	description: `Fetch detailed source text from previously discovered URLs.
 
 ## Usage
 - Receive one or more {url, prompt} combinations
 - Fetch web page content and convert to Markdown text
-- Use prompt to call small model for analysis and summary (if model is available)
-- Return summary result and original content fragment
+- Return original page text as evidence for the current agent context; no additional model call
 
 ## When to Use
 - **MANDATORY**: After web_search returns results, if content is truncated or incomplete, use web_fetch to get full page content
@@ -80,13 +78,12 @@ type webFetchItemResult struct {
 // WebFetchTool fetches web page content and summarizes it using an LLM
 type WebFetchTool struct {
 	BaseTool
-	client    *http.Client
-	chatModel chat.Chat
-	maxItems  int
+	client   *http.Client
+	maxItems int
 }
 
 // NewWebFetchTool creates a new web_fetch tool instance
-func NewWebFetchTool(chatModel chat.Chat, maxItems ...int) *WebFetchTool {
+func NewWebFetchTool(maxItems ...int) *WebFetchTool {
 	// Use SSRF-safe HTTP client to prevent redirect-based SSRF attacks
 	ssrfConfig := utils.DefaultSSRFSafeHTTPClientConfig()
 	ssrfConfig.Timeout = webFetchTimeout
@@ -96,10 +93,9 @@ func NewWebFetchTool(chatModel chat.Chat, maxItems ...int) *WebFetchTool {
 	}
 
 	return &WebFetchTool{
-		BaseTool:  webFetchTool,
-		client:    utils.NewSSRFSafeHTTPClient(ssrfConfig),
-		chatModel: chatModel,
-		maxItems:  limit,
+		BaseTool: webFetchTool,
+		client:   utils.NewSSRFSafeHTTPClient(ssrfConfig),
+		maxItems: limit,
 	}
 }
 
@@ -350,18 +346,8 @@ func (t *WebFetchTool) executeFetch(
 		"method":         method,
 	}
 	params := webFetchParams{URL: displayURL, Prompt: vp.Prompt}
-	var summary string
-	var summaryErr error
-	summary, summaryErr = t.processWithLLM(ctx, params, textContent)
-	if summaryErr != nil {
-		logger.Warnf(ctx, "[Tool][WebFetch] LLM 处理失败 url=%s err=%v", displayURL, summaryErr)
-	} else if summary != "" {
-		resultData["summary"] = summary
-	}
-
-	output := t.buildOutputText(params, textContent, summary, summaryErr)
-
-	return output, resultData, summaryErr
+	output := t.buildOutputText(params, textContent, "", nil)
+	return output, resultData, nil
 }
 
 // normalizeGitHubURL normalizes a GitHub URL
@@ -374,39 +360,6 @@ func (t *WebFetchTool) normalizeGitHubURL(source string) string {
 }
 
 // processWithLLM processes the content with an LLM
-func (t *WebFetchTool) processWithLLM(ctx context.Context, params webFetchParams, content string) (string, error) {
-	if t.chatModel == nil {
-		return "", fmt.Errorf("chat model not available for web_fetch")
-	}
-
-	systemMessage := "You are an intelligent assistant skilled at reading web page content. Answer the user's request based on the provided web page text. Never fabricate information that does not appear in the text."
-	userTemplate := `User request:
-%s
-
-Web page content:
-%s`
-
-	messages := []chat.Message{
-		{
-			Role:    "system",
-			Content: systemMessage,
-		},
-		{
-			Role:    "user",
-			Content: fmt.Sprintf(userTemplate, params.Prompt, content),
-		},
-	}
-
-	response, err := t.chatModel.Chat(ctx, messages, &chat.ChatOptions{
-		Temperature: 0.3,
-		MaxTokens:   1024,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(response.Content), nil
-}
 
 // buildOutputText builds the output text for a web fetch item
 func (t *WebFetchTool) buildOutputText(params webFetchParams, content string, summary string, summaryErr error) string {

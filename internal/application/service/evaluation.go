@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -31,7 +32,8 @@ type EvaluationService struct {
 	knowledgeBaseService interfaces.KnowledgeBaseService // Service for knowledge base operations
 	knowledgeService     interfaces.KnowledgeService     // Service for knowledge operations
 	sessionService       interfaces.SessionService       // Service for chat sessions
-	modelService         interfaces.ModelService         // Service for model operations
+	messageService       interfaces.MessageService
+	modelService         interfaces.ModelService // Service for model operations
 
 	evaluationMemoryStorage *evaluationMemoryStorage // In-memory storage for evaluation tasks
 }
@@ -43,6 +45,7 @@ func NewEvaluationService(
 	knowledgeService interfaces.KnowledgeService,
 	sessionService interfaces.SessionService,
 	modelService interfaces.ModelService,
+	messageService interfaces.MessageService,
 ) interfaces.EvaluationService {
 	evaluationMemoryStorage := newEvaluationMemoryStorage()
 	return &EvaluationService{
@@ -51,6 +54,7 @@ func NewEvaluationService(
 		knowledgeBaseService:    knowledgeBaseService,
 		knowledgeService:        knowledgeService,
 		sessionService:          sessionService,
+		messageService:          messageService,
 		modelService:            modelService,
 		evaluationMemoryStorage: evaluationMemoryStorage,
 	}
@@ -328,6 +332,48 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 	return detail, nil
 }
 
+// runQA uses the same persisted conversation and harness as every product entry.
+func (e *EvaluationService) runQA(ctx context.Context, chat *types.ChatManage, kbID string) error {
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	session, err := e.sessionService.CreateSession(ctx, &types.Session{TenantID: tenantID, UserID: types.SessionOwnerIDFromContext(ctx), Title: "Evaluation"})
+	if err != nil {
+		return err
+	}
+	defer e.sessionService.DeleteSession(context.WithoutCancel(ctx), session.ID)
+	userMessage, err := e.messageService.CreateMessage(ctx, &types.Message{SessionID: session.ID, Role: "user", Content: chat.Query, IsCompleted: true})
+	if err != nil {
+		return err
+	}
+	assistant, err := e.messageService.CreateMessage(ctx, &types.Message{SessionID: session.ID, Role: "assistant"})
+	if err != nil {
+		return err
+	}
+	profile := types.GetBuiltinAgent(types.BuiltinKnowledgeQAID, tenantID)
+	profile.Config.ModelID = chat.ChatModelID
+	profile.Config.KBSelectionMode, profile.Config.KnowledgeBases = "selected", []string{kbID}
+	profile.Config.RerankModelID, profile.Config.RerankTopK = chat.RerankModelID, chat.RerankTopK
+	profile.Config.EmbeddingTopK = chat.EmbeddingTopK
+	profile.Config.VectorThreshold, profile.Config.KeywordThreshold = chat.VectorThreshold, chat.KeywordThreshold
+	profile.Config.RerankThreshold = chat.RerankThreshold
+	bus := event.NewEventBus()
+	bus.On(event.EventAgentReferences, func(_ context.Context, ev event.Event) error {
+		if data, ok := ev.Data.(event.AgentReferencesData); ok {
+			chat.SearchResult = data.References
+			chat.RerankResult = data.References
+		}
+		return nil
+	})
+	bus.On(event.EventAgentComplete, func(_ context.Context, ev event.Event) error {
+		if data, ok := ev.Data.(event.AgentCompleteData); ok {
+			chat.ChatResponse = &types.ChatResponse{Content: data.FinalAnswer, FinishReason: "stop"}
+		}
+		return nil
+	})
+	return e.sessionService.AgentQA(ctx, &types.QARequest{Session: session, Query: chat.Query,
+		UserMessageID: userMessage.ID, AssistantMessageID: assistant.ID,
+		SummaryModelID: chat.ChatModelID, KnowledgeBaseIDs: []string{kbID}, CustomAgent: profile}, bus)
+}
+
 // EvalDataset performs the actual evaluation of a dataset
 // Processes each QA pair in parallel and records metrics
 func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.EvaluationDetail, knowledgeBaseID string) error {
@@ -409,7 +455,7 @@ func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.Evalu
 
 			// Execute knowledge QA pipeline
 			logger.Infof(ctx, "Running knowledge QA for question: %s", qaPair.Question)
-			err = e.sessionService.KnowledgeQAByEvent(ctx, chatManage, types.Pipline["rag"])
+			err := e.runQA(ctx, chatManage, knowledgeBaseID)
 			if err != nil {
 				logger.Errorf(ctx, "Failed to process question %d: %v", i, err)
 				return err

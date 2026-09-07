@@ -206,7 +206,7 @@ export default {
       steps: {
         mode: {
           title: "选择运行模式",
-          desc: "「普通模式」适合固定流程的快速问答；「智能推理」可调用工具、多步思考，适合复杂任务。",
+          desc: "「普通模式」适合固定流程的知识问答；「知识问答」可调用工具、多步思考，适合复杂任务。",
         },
         agentType: {
           title: "选择智能体类型",
@@ -214,7 +214,7 @@ export default {
         },
         name: {
           title: "命名与描述",
-          desc: "取一个易识别的名称。智能推理模式下系统可能已预填默认名称，可按需修改。",
+          desc: "取一个易识别的名称。知识问答模式下系统可能已预填默认名称，可按需修改。",
         },
         navModel: {
           title: "绑定对话模型",
@@ -246,7 +246,7 @@ export default {
         },
         navTools: {
           title: "工具与 MCP（可选）",
-          desc: "智能推理模式下可勾选内置工具、MCP 服务等，扩展搜索、计算等能力。",
+          desc: "知识问答模式下可勾选内置工具、MCP 服务等，扩展搜索、计算等能力。",
         },
         submit: {
           title: "保存智能体",
@@ -2049,13 +2049,13 @@ export default {
       multiTurn: "多轮对话",
     },
     type: {
-      normal: "快速问答",
-      agent: "智能推理",
+      normal: "知识问答",
+      agent: "智能体",
       custom: "自定义",
     },
     mode: {
-      normal: "快速问答",
-      agent: "智能推理",
+      normal: "知识问答",
+      agent: "智能体",
     },
     features: {
       webSearch: "支持网络搜索",
@@ -2280,13 +2280,9 @@ export default {
     },
     // 内置智能体信息
     builtinInfo: {
-      quickAnswer: {
-        name: "快速问答",
-        description: "基于知识库的 RAG 问答，快速准确地回答问题",
-      },
-      smartReasoning: {
-        name: "智能推理",
-        description: "ReAct 推理框架，支持多步思考和工具调用",
+      knowledgeQA: {
+        name: "知识问答",
+        description: "基于可靠资料给出简洁明确的回答，支持必要的检索和核实",
       },
       deepResearcher: {
         name: "深度研究员",
@@ -4092,8 +4088,8 @@ export default {
     placeholderWebOnly: "输入问题，将结合网络搜索回答",
     placeholderKbAndWeb: "输入问题，将基于知识库和网络搜索回答",
     placeholderAgent: "向 {name} 提问",
-    agentMode: "智能推理",
-    normalMode: "快速问答",
+    agentMode: "知识问答",
+    normalMode: "知识问答",
     normalModeDesc: "基于知识库的 RAG 问答",
     agentModeDesc: "多步思考，深度分析",
     agentNotReadyTooltip: "Agent 未就绪，请先在设置中完成配置",
@@ -4110,8 +4106,8 @@ export default {
     agentNotReadyDetail: "智能体「{agentName}」未就绪，需要配置以下内容：{reasons}",
     sharedAgentNotReadyDetail: "共享智能体「{agentName}」尚未就绪（缺少：{reasons}），请联系分享方管理员完成配置。",
     builtinAgentNotReadyDetail: "内置智能体「{agentName}」未就绪，需要配置以下内容：{reasons}",
-    builtinAgentSettingName: "智能推理",
-    builtinNormalSettingName: "快速问答",
+    builtinAgentSettingName: "知识问答",
+    builtinNormalSettingName: "知识问答",
     webSearch: {
       toggleOn: "开启网络搜索",
       toggleOff: "关闭网络搜索",
@@ -4135,8 +4131,8 @@ export default {
       selectKnowledge: "请先选择知识库!",
       replying: "正在回复中，请稍后再试!",
       fileInfoLoading: "正在读取所选文件信息，请稍后再试。",
-      agentSwitchedOn: "已切换到智能推理",
-      agentSwitchedOff: "已切换到快速问答",
+      agentSwitchedOn: "已切换到知识问答",
+      agentSwitchedOff: "已切换到知识问答",
       agentSelected: "已选择智能体「{name}」",
       agentEnabled: "Agent 模式已启用",
       agentDisabled: "Agent 模式已禁用",
@@ -5720,7 +5716,6 @@ export default {
         wikiQa: "未启用 Wiki",
         hybridRagWiki: "未启用任何检索能力",
         dataAnalysis: "需启用 RAG（不支持 FAQ）",
-        quickAnswer: "快速问答模式需启用 RAG 检索",
         generic: "不适用于当前类型",
       },
       kbIncompatibleWarn: "已选的 {count} 个知识库不适用于当前类型，请手动调整",

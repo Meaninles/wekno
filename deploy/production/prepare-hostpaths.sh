@@ -11,7 +11,7 @@ fi
 
 nodes=(10.14.201.1 10.14.201.2 10.14.201.7)
 scratch_root=/mnt/weknora-data/weknora-v2-scratch
-roles=(api parse docreader derivative wiki maintenance migration general-agent document-agent)
+roles=(api parse docreader derivative wiki maintenance migration)
 backup_root=/mnt/weknora-data/weknora-db-backups
 
 for node in "${nodes[@]}"; do

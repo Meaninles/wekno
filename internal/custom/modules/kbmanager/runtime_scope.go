@@ -17,7 +17,7 @@ func (c *Configurator) ConfigureRuntime(ctx context.Context, req *types.QAReques
 	}
 	manager := req.CustomAgent.Config.KnowledgeManagement
 	if manager == nil {
-		return fmt.Errorf("知识库管理智能体缺少权限配置")
+		return fmt.Errorf("知识库管理智能体尚未配置管理权限")
 	}
 	configured := compactUnique(req.CustomAgent.Config.KnowledgeBases)
 	configuredSet := make(map[string]bool, len(configured))
@@ -25,9 +25,29 @@ func (c *Configurator) ConfigureRuntime(ctx context.Context, req *types.QAReques
 		configuredSet[id] = true
 	}
 
-	explicit := len(req.KnowledgeBaseIDs) > 0 || len(req.KnowledgeIDs) > 0 || len(req.TagScopes) > 0
-	whole := configured
 	documents := make(map[string]string)
+	var inputs []string
+	for _, knowledgeID := range compactUnique(req.KnowledgeIDs) {
+		if c == nil || c.knowledgeService == nil {
+			return fmt.Errorf("无法校验本轮选择的文档：知识库服务未初始化")
+		}
+		knowledge, err := c.knowledgeService.GetKnowledgeByIDOnly(ctx, knowledgeID)
+		if err != nil || knowledge == nil {
+			return fmt.Errorf("本轮选择的文档不存在或已删除：%s", knowledgeID)
+		}
+		// Current and historical chat uploads are read-only input sources. They
+		// must never expand or narrow the agent's configured mutation targets.
+		if c.isSessionInput(ctx, req.Session, knowledge) {
+			inputs = append(inputs, knowledge.ID)
+			continue
+		}
+		if !configuredSet[knowledge.KnowledgeBaseID] {
+			return fmt.Errorf("本轮选择的文档不在该智能体配置范围内：%s", knowledgeID)
+		}
+		documents[knowledge.ID] = knowledge.KnowledgeBaseID
+	}
+	explicit := len(req.KnowledgeBaseIDs) > 0 || len(documents) > 0 || len(req.TagScopes) > 0
+	whole := configured
 	parents := make(map[string]bool)
 	if explicit {
 		whole = nil
@@ -44,19 +64,8 @@ func (c *Configurator) ConfigureRuntime(ctx context.Context, req *types.QAReques
 				return fmt.Errorf("本轮选择的标签不在该智能体配置的知识库范围内：%s", kbID)
 			}
 		}
-		if c == nil || c.knowledgeService == nil {
-			return fmt.Errorf("无法校验本轮选择的文档：知识库服务未初始化")
-		}
-		for _, knowledgeID := range compactUnique(req.KnowledgeIDs) {
-			knowledge, err := c.knowledgeService.GetKnowledgeByIDOnly(ctx, knowledgeID)
-			if err != nil || knowledge == nil {
-				return fmt.Errorf("本轮选择的文档不存在或已删除：%s", knowledgeID)
-			}
-			if !configuredSet[knowledge.KnowledgeBaseID] {
-				return fmt.Errorf("本轮选择的文档不在该智能体配置范围内：%s", knowledgeID)
-			}
-			documents[knowledge.ID] = knowledge.KnowledgeBaseID
-			parents[knowledge.KnowledgeBaseID] = true
+		for _, kbID := range documents {
+			parents[kbID] = true
 		}
 	}
 	for _, kbID := range whole {
@@ -71,7 +80,7 @@ func (c *Configurator) ConfigureRuntime(ctx context.Context, req *types.QAReques
 	}
 
 	config.KnowledgeBases = compactUnique(whole)
-	config.KnowledgeIDs = sortedKeys(documents)
+	config.KnowledgeIDs = append(sortedKeys(documents), inputs...)
 	config.KnowledgeManagement = &types.KnowledgeManagementRuntimeScope{
 		ExplicitSelection:     explicit,
 		WholeKnowledgeBaseIDs: compactUnique(whole),
@@ -80,6 +89,15 @@ func (c *Configurator) ConfigureRuntime(ctx context.Context, req *types.QAReques
 		ReadOnlyTagScope:      len(req.TagScopes) > 0,
 	}
 	return nil
+}
+
+func (c *Configurator) isSessionInput(ctx context.Context, session *types.Session, knowledge *types.Knowledge) bool {
+	if c == nil || c.kbService == nil || session == nil || session.ID == "" || knowledge.TenantID != session.TenantID {
+		return false
+	}
+	kb, err := c.kbService.GetKnowledgeBaseByIDOnly(ctx, knowledge.KnowledgeBaseID)
+	return err == nil && kb != nil && kb.IsTemporary && kb.ChatSessionID == session.ID &&
+		kb.TenantID == session.TenantID && kb.AllowsPrivateAccess(ctx)
 }
 
 // platformMutationPermissions mirrors the native knowledge handlers: a caller

@@ -1,6 +1,6 @@
+import { publicFailure } from '@/custom/modules/failures/failures'
 import { markRaw, nextTick, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ensureRagPipelineHistoryStream, shouldRestoreQuickAnswerHistory } from '@/utils/rag-pipeline-history'
 import { normalizeUserFacingError } from '@/custom/modules/safeMessage/install'
 import {
   addLiveInteractiveEvent,
@@ -260,51 +260,6 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     return true
   }
 
-  /** Quick-answer sessions: restore flags lost after history reload. */
-  const restoreQuickAnswerFlags = (item: ChatMessage, pairedUser?: ChatMessage) => {
-    if (!shouldRestoreQuickAnswerHistory(item)) return
-
-    const existingStream = Array.isArray(item.agentEventStream)
-      ? item.agentEventStream as Array<Record<string, unknown>>
-      : []
-    const hasPersistedPipeline = existingStream.some((event) =>
-      event.type === 'tool_call' &&
-      (event.tool_name === 'query_understand' ||
-        event.tool_name === 'knowledge_search' ||
-        event.tool_name === 'search_knowledge' ||
-        event.tool_name === 'web_search'),
-    )
-    const hasReferences = Array.isArray(item.knowledge_references) && item.knowledge_references.length > 0
-    const mentions = Array.isArray(pairedUser?.mentioned_items)
-      ? pairedUser.mentioned_items as ChatMessage[]
-      : []
-    const hasRetrievalMention = mentions.some((mention) =>
-      ['kb', 'file', 'tag'].includes(String(mention.type || '')),
-    )
-    const hasAttachments = Array.isArray(pairedUser?.attachments) && pairedUser.attachments.length > 0
-    if (!hasPersistedPipeline && !hasReferences && !hasRetrievalMention && !hasAttachments) {
-      item.isRagMode = false
-      return
-    }
-
-    item.isRagMode = true
-    if (
-      item.agent_steps &&
-      Array.isArray(item.agent_steps) &&
-      item.agent_steps.length > 0
-    ) {
-      item.isAgentMode = true
-      item.hideContent = true
-    }
-    ensureRagPipelineHistoryStream(
-      item as Parameters<typeof ensureRagPipelineHistoryStream>[0],
-      String(pairedUser?.content || ''),
-    )
-    if (item.isRagMode && item.agentEventStream) {
-      item.agentEventStream = markRaw(item.agentEventStream as object)
-    }
-  }
-
   const recomposeAgentAnswer = (message: ChatMessage) => {
     const stream = message.agentEventStream as Array<{
       type?: string
@@ -543,14 +498,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         item.hideContent = true
       }
 
-      restoreQuickAnswerFlags(
-        item,
-        item.request_id
-          ? usersByRequestID.get(String(item.request_id)) || messagesList.find(
-              (message) => message.role === 'user' && message.request_id === item.request_id,
-            )
-          : undefined,
-      )
+
 
       if (item.content) {
         const content = String(item.content)
@@ -609,6 +557,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     if (message) {
       if (payload.id && !message.request_id) message.request_id = payload.id
       message.content = payload.content
+      if (payload.error_code) message.error_code = payload.error_code
       message.thinking = payload.thinking
       message.thinkContent = payload.thinkContent
       message.showThink = payload.showThink
@@ -1082,6 +1031,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
               content: errorMsg,
               done: true,
             })
+            message.error_code = publicFailure(errorMsg, dataPayload?.error_code).code
             message.content = errorMsg
             message.is_completed = true
             isReplying.value = false
@@ -1094,6 +1044,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         } else if (responseType === 'error') {
           const errorMsg = normalizeUserFacingError(data.content || t('chat.processError'))
           appendAgentErrorEvent(message, errorMsg)
+          message.error_code = publicFailure(errorMsg).code
           message.content = errorMsg
           message.is_completed = true
           isReplying.value = false
@@ -1106,6 +1057,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         break
       }
       case 'answer': {
+        if (dataPayload?.replace) supersedeAgentAnswers(message)
         message.thinking = false
         const eventId = dataPayload?.event_id as string | undefined
         if (!message.agentEventStream) message.agentEventStream = []

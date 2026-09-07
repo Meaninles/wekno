@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FailureNotice from '@/custom/modules/failures/FailureNotice.vue';
+import { messageFailure } from '@/custom/modules/failures/failures';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import { getChunkByIdOnly } from "@/api/knowledge-base";
@@ -619,7 +621,7 @@ const artifactFileTypeLabel = (file: GeneralAgentArtifactFile) => {
 const artifactDownloadUrl = (file: GeneralAgentArtifactFile) => {
   if (file.download_url) return file.download_url;
   if (!file.artifact_id) return "";
-  return `/api/v1/custom/general-agent/artifacts/${encodeURIComponent(file.artifact_id)}/download`;
+  return `/api/v1/custom/agent-runtime/artifacts/${encodeURIComponent(file.artifact_id)}/download`;
 };
 
 const canPreviewArtifact = (file: GeneralAgentArtifactFile) =>
@@ -1105,6 +1107,7 @@ onBeforeUnmount(() => {
     window.removeEventListener("popstate", handlePopState);
   }
 });
+const replyFailure = computed(() => messageFailure(props.message));
 </script>
 
 <template>
@@ -1136,6 +1139,7 @@ onBeforeUnmount(() => {
         <p>{{ message.content }}</p>
       </div>
 
+      <div v-else-if="replyFailure" class="assistant-card"><FailureNotice :failure="replyFailure" /></div>
       <div v-else class="assistant-card">
         <ChatQueueStatusCard
           v-if="

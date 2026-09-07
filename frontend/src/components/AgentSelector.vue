@@ -21,9 +21,9 @@
               :class="{ selected: isPinnedAgentSelected(item) }"
               @mouseenter="onPinnedOptionEnter(item, $event)" @mouseleave="onOptionLeave"
               @click="selectPinnedAgent(item)">
-              <div v-if="item.agent.id === BUILTIN_QUICK_ANSWER_ID || item.agent.id === BUILTIN_SMART_REASONING_ID"
-                class="builtin-icon" :class="item.agent.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'">
-                <TIcon :name="item.agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+              <div v-if="item.agent.id === BUILTIN_KNOWLEDGE_QA_ID"
+                class="builtin-icon" :class="item.agent.config?.agent_mode === 'agent' ? 'agent' : 'normal'">
+                <TIcon :name="item.agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                   size="13px" />
               </div>
               <div v-else-if="item.agent.avatar" class="builtin-avatar">{{ item.agent.avatar }}</div>
@@ -52,9 +52,9 @@
             <div v-for="agent in builtinAgents" :key="agent.id" class="agent-option"
               :class="{ selected: isMyAgentSelected(agent) }" @mouseenter="onOptionEnter(agent, $event)"
               @mouseleave="onOptionLeave" @click="selectAgent(agent)">
-              <div v-if="agent.id === BUILTIN_QUICK_ANSWER_ID || agent.id === BUILTIN_SMART_REASONING_ID"
-                class="builtin-icon" :class="agent.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'">
-                <TIcon :name="agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+              <div v-if="agent.id === BUILTIN_KNOWLEDGE_QA_ID"
+                class="builtin-icon" :class="agent.config?.agent_mode === 'agent' ? 'agent' : 'normal'">
+                <TIcon :name="agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                   size="13px" />
               </div>
               <div v-else-if="agent.avatar" class="builtin-avatar">{{ agent.avatar }}</div>
@@ -149,10 +149,10 @@
         <div class="agent-detail-content">
           <div class="detail-header">
             <template
-              v-if="activeDetail.agent.id === BUILTIN_QUICK_ANSWER_ID || activeDetail.agent.id === BUILTIN_SMART_REASONING_ID">
+              v-if="activeDetail.agent.id === BUILTIN_KNOWLEDGE_QA_ID">
               <div class="builtin-icon detail-icon"
-                :class="activeDetail.agent.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'">
-                <TIcon :name="activeDetail.agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                :class="activeDetail.agent.config?.agent_mode === 'agent' ? 'agent' : 'normal'">
+                <TIcon :name="activeDetail.agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                   size="14px" />
               </div>
             </template>
@@ -186,8 +186,7 @@
 
           <div class="detail-tags">
             <span class="detail-tag">
-              {{ activeDetail.agent.config?.agent_mode === 'smart-reasoning' ? $t('agent.type.agent') :
-                $t('agent.type.normal') }}
+              {{ activeDetail.agent.name }}
             </span>
             <span v-if="getKbCapability(activeDetail.agent)" class="detail-tag">{{ getKbCapability(activeDetail.agent)
               }}</span>
@@ -223,7 +222,7 @@ import { ref, computed, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { Icon as TIcon } from 'tdesign-vue-next';
-import { type CustomAgent, BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from '@/api/agent';
+import { type CustomAgent, BUILTIN_KNOWLEDGE_QA_ID } from '@/api/agent';
 import AgentAvatar from '@/components/AgentAvatar.vue';
 import { useOrganizationStore } from '@/stores/organization';
 import { useSettingsStore } from '@/stores/settings';
@@ -293,15 +292,7 @@ const agentsList = computed(() => props.agents ?? []);
 
 const localizedBuiltinAgents = computed(() => {
   const apiBuiltins = agentsList.value.filter(a => a.is_builtin);
-  return apiBuiltins.map(agent => {
-    if (agent.id === BUILTIN_QUICK_ANSWER_ID) {
-      return { ...agent, name: t('input.normalMode'), description: t('input.normalModeDesc') };
-    }
-    if (agent.id === BUILTIN_SMART_REASONING_ID) {
-      return { ...agent, name: t('input.agentMode'), description: t('input.agentModeDesc') };
-    }
-    return agent;
-  });
+  return apiBuiltins;
 });
 
 const builtinAgents = computed(() =>
@@ -468,7 +459,7 @@ const formatAgentNotReadyReasons = (
 };
 
 const getAgentNotReadyReasonKeysFor = (agent: CustomAgent, sourceTenantId?: string) => {
-  const isAgentMode = agent.config?.agent_mode === 'smart-reasoning';
+  const isAgentMode = agent.config?.agent_mode === 'agent';
   const isSharedAgent = !!sourceTenantId;
   return getAgentNotReadyReasonKeys(agent.config, modelsList.value, {
     isAgentMode,

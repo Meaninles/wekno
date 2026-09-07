@@ -136,7 +136,7 @@ jq -e \
     (.data.ANTHROPIC_BASE_URL | @base64d) == "http://live-gateway:4000" and
     (.data.ANTHROPIC_MODEL | @base64d) == "/models/live-model" and
     (.data.ANTHROPIC_API_KEY | @base64d) == $expected and
-    (.data.WEKNORA_SANDBOX_ALLOW_NETWORK | @base64d) == "true" and
+    (.data | has("WEKNORA_SANDBOX_ALLOW_NETWORK") | not) and
     (.data | has("ANTHROPIC_AUTH_TOKEN") | not)
   ' "${secret_json}" >/dev/null
 

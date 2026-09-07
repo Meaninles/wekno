@@ -16,8 +16,7 @@ EXPECTED_NORMAL_REPLICAS = {
     "weknora-wiki-worker": 2,
     "weknora-maintenance": 2,
     "weknora-docreader": 3,
-    "weknora-general-agent": 2,
-    "weknora-document-processing-agent": 2,
+    "weknora-agent-runtime": 2,
     "weknora-frontend": 2,
     "weknora-mobile-web": 2,
 }
@@ -27,8 +26,7 @@ SUSPENDED_DEPLOYMENTS = {
     "weknora-wiki-worker",
     "weknora-maintenance",
     "weknora-docreader",
-    "weknora-general-agent",
-    "weknora-document-processing-agent",
+    "weknora-agent-runtime",
 }
 EXPECTED_SCRATCH_PATHS = {
     "/mnt/weknora-data/weknora-v2-scratch/api",
@@ -37,8 +35,6 @@ EXPECTED_SCRATCH_PATHS = {
     "/mnt/weknora-data/weknora-v2-scratch/derivative",
     "/mnt/weknora-data/weknora-v2-scratch/wiki",
     "/mnt/weknora-data/weknora-v2-scratch/maintenance",
-    "/mnt/weknora-data/weknora-v2-scratch/general-agent",
-    "/mnt/weknora-data/weknora-v2-scratch/document-agent",
 }
 IMAGE_RE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 EXPECTED_ROLE_ENV = {
@@ -56,7 +52,7 @@ EXPECTED_ROLE_ENV = {
     },
 }
 EXPECTED_TOOL_CALLBACK_URL = (
-    "http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call"
+    "http://app:8080/api/v1/custom/agent-runtime/internal/tools/call"
 )
 
 
@@ -109,26 +105,8 @@ def has_env(document: str, name: str, value: str) -> bool:
 
 
 def validate_agent_callback(document: str, errors: list[str]) -> None:
-    pod_ip = re.search(
-        r'(?m)^\s*- name:\s*POD_IP\s*$\n'
-        r'^\s+valueFrom:\s*$\n'
-        r'^\s+fieldRef:\s*$\n'
-        r'^\s+fieldPath:\s*status\.podIP\s*$',
-        document,
-    )
-    callback = re.search(
-        r'(?m)^\s*- name:\s*CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL\s*$\n'
-        rf'^\s+value:\s*"?{re.escape(EXPECTED_TOOL_CALLBACK_URL)}"?\s*$',
-        document,
-    )
-    if pod_ip is None:
-        errors.append("weknora-app does not inject POD_IP from status.podIP")
-    if callback is None:
-        errors.append(
-            "weknora-app tool callback is not pinned to the originating API Pod"
-        )
-    if pod_ip is not None and callback is not None and pod_ip.start() > callback.start():
-        errors.append("weknora-app defines POD_IP after the callback that expands it")
+    if not has_env(document, "AGENT_RUNTIME_TOOL_CALLBACK_URL", EXPECTED_TOOL_CALLBACK_URL):
+        errors.append("weknora-app must use the load-balanced durable agent control endpoint")
 
 
 def validate_workloads(

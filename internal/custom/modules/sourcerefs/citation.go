@@ -61,6 +61,30 @@ func NewRegistry() *Registry {
 	}
 }
 
+// RestoreRegistry preserves issued handles when a run moves to another API.
+// New evidence is registered under the run transaction lock, so concurrent
+// tools cannot issue the same handle for different sources.
+func RestoreRegistry(refs []*types.SearchResult) *Registry {
+	r := NewRegistry()
+	for _, ref := range refs {
+		if ref == nil {
+			continue
+		}
+		id := ref.Metadata[MetadataCitationID]
+		n, err := strconv.Atoi(strings.TrimPrefix(id, "S"))
+		if err != nil || n < 1 {
+			continue
+		}
+		if n >= r.next {
+			r.next = n + 1
+		}
+		r.byKey[CitationKey(ref)] = id
+		r.refs[id] = canonicalEvidenceSnapshot(ref)
+		r.sources[id] = citationSourceFromRef(id, ref)
+	}
+	return r
+}
+
 func AssignCitationIDs(refs []*types.SearchResult) []*CitationSource {
 	registry := NewRegistry()
 	return registry.Register(refs)
@@ -268,7 +292,7 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 }
 
 const citationUseInstruction = `[CITATION_USE]
-Cite source-supported claims with the matching provided cite_exactly handle, placed beside the supported text. Use only current registered IDs; validated reused evidence receives current IDs. Omit citations for unsupported claims and disclose material evidence gaps.
+Cite source-supported claims with the matching provided cite_exactly handle, placed beside the supported text. The final answer must retain these literal tags, including inside tables and quotations; a document title or article number alone is not a clickable citation. Before finishing, check that conclusions drawn from this evidence have their matching handles. Use only current registered IDs; validated reused evidence receives current IDs. Omit citations for unsupported claims and disclose material evidence gaps. If these sources do not answer the question, say so without attaching an unrelated source. Do not copy the missing-citation formatting of earlier assistant messages.
 [/CITATION_USE]`
 
 // TerminalCitationInstruction returns the single shared, positive final-output

@@ -22,7 +22,6 @@ var (
 	ErrCannotModifyBuiltin          = errors.New("cannot modify built-in agent basic info")
 	ErrCannotDeleteBuiltin          = errors.New("cannot delete built-in agent")
 	ErrAgentNameRequired            = errors.New("agent name is required")
-	ErrAgentDatabaseSourcesRequired = errors.New("data-analysis agents must bind at least one data source")
 	ErrAgentDocumentTemplateInvalid = errors.New("document template config is invalid")
 	// ErrAgentCustomConfigInvalid wraps validation failures returned by custom
 	// agent-type normalizers so the HTTP layer can consistently return 400.
@@ -36,14 +35,8 @@ var dbAnalysisToolNames = map[string]bool{
 }
 
 func agentSupportsDBDataSources(agentType string) bool {
-	return agentType == types.AgentTypeDataAnalysis ||
-		agentType == types.AgentTypeGeneralAgent ||
-		agentType == types.AgentTypeKnowledgeBaseManager ||
-		agentType == types.AgentTypeDocumentProcessingAgent
-}
-
-func agentRequiresDBDataSources(agentType string) bool {
-	return agentType == types.AgentTypeDataAnalysis
+	return agentType == types.AgentTypeDataAnalysis || agentType == types.AgentTypeGeneralAgent ||
+		agentType == types.AgentTypeKnowledgeBaseManager || agentType == types.AgentTypeDocumentProcessingAgent
 }
 
 func normalizeCustomAgentDataSourceConfig(agent *types.CustomAgent) error {
@@ -52,9 +45,7 @@ func normalizeCustomAgentDataSourceConfig(agent *types.CustomAgent) error {
 	}
 	if agentSupportsDBDataSources(agent.Config.AgentType) {
 		agent.Config.DBDataSources = compactStringList(agent.Config.DBDataSources)
-		if agentRequiresDBDataSources(agent.Config.AgentType) && len(agent.Config.DBDataSources) == 0 {
-			return ErrAgentDatabaseSourcesRequired
-		}
+
 		return nil
 	}
 	agent.Config.DBDataSources = nil
@@ -75,6 +66,9 @@ func normalizeCustomAgentDataSourceConfig(agent *types.CustomAgent) error {
 func normalizeCustomAgentDocumentTemplateConfig(agent *types.CustomAgent) error {
 	if agent == nil {
 		return nil
+	}
+	if !types.IsKnownAgentType(agent.Config.AgentType) {
+		return fmt.Errorf("%w: unsupported agent type %s", ErrAgentCustomConfigInvalid, agent.Config.AgentType)
 	}
 	if err := types.NormalizeCustomAgentDocumentTemplateConfig(&agent.Config); err != nil {
 		return fmt.Errorf("%w: %v", ErrAgentDocumentTemplateInvalid, err)
@@ -112,10 +106,6 @@ func refreshBuiltinAgentManagedPrompt(agent *types.CustomAgent, defaultAgent *ty
 	if defaultAgent.Config.SystemPromptID != "" {
 		agent.Config.SystemPromptID = defaultAgent.Config.SystemPromptID
 		agent.Config.SystemPrompt = defaultAgent.Config.SystemPrompt
-	}
-	if defaultAgent.Config.ContextTemplateID != "" {
-		agent.Config.ContextTemplateID = defaultAgent.Config.ContextTemplateID
-		agent.Config.ContextTemplate = defaultAgent.Config.ContextTemplate
 	}
 }
 
@@ -195,7 +185,7 @@ func (s *customAgentService) CreateAgent(ctx context.Context, agent *types.Custo
 
 	// Ensure agent mode is set for user-created agents
 	if agent.Config.AgentMode == "" {
-		agent.Config.AgentMode = types.AgentModeQuickAnswer
+		agent.Config.AgentMode = types.AgentModeUnified
 	}
 
 	// Cannot create built-in agents
@@ -821,7 +811,7 @@ func (s *customAgentService) GetSuggestedQuestions(
 	// retrieve a wiki page, so surfacing wiki-derived suggestions would lure
 	// the user into asking questions the agent will then answer with empty
 	// context. Smart-reasoning agents that opt in to wiki tools keep this.
-	if agent.Config.AgentMode != types.AgentModeQuickAnswer && s.wikiPageRepo != nil {
+	if s.wikiPageRepo != nil {
 		for groupTenantID, groupKBIDs := range kbGroups {
 			if len(groupKBIDs) == 0 {
 				continue

@@ -1020,7 +1020,7 @@ func RegisterCustomAgentRoutes(r *gin.RouterGroup, agentHandler *handler.CustomA
 	{
 		// Get placeholder definitions (must be before /:id to avoid conflict) — Viewer+
 		agents.GET("/placeholders", g.Viewer(), agentHandler.GetPlaceholders)
-		// List smart-reasoning agent type presets (rag-qa / wiki-qa / hybrid / custom) — Viewer+
+		// List unified agent agent type presets (knowledge-qa / wiki-qa / hybrid / custom) — Viewer+
 		agents.GET("/type-presets", g.Viewer(), agentHandler.GetAgentTypePresets)
 		// Create custom agent — Contributor+
 		agents.POST("", g.Contributor(), agentHandler.CreateAgent)

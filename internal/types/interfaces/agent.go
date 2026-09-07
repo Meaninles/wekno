@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/Tencent/WeKnora/internal/event"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -20,19 +18,6 @@ type AgentStreamEvent struct {
 }
 
 // AgentEngine defines the interface for agent execution engine
-type AgentEngine interface {
-	// SetCurrentTurnContext supplies attachments and request-local metadata;
-	// Execute receives the exact user-authored query separately.
-	SetCurrentTurnContext(content string)
-	// Execute executes the agent with conversation history and returns a stream of events
-	// imageURLs is optional - when provided, images are passed to the LLM as multimodal content
-	Execute(
-		ctx context.Context,
-		sessionID, messageID, query string,
-		llmContext []chat.Message,
-		imageURLs ...[]string,
-	) (*types.AgentState, error)
-}
 
 // AgentToolRegistry is the subset of the native tool registry needed by
 // alternate agent runtimes. Keeping this interface in types/interfaces avoids
@@ -48,14 +33,6 @@ type AgentService interface {
 	// CreateAgentEngine creates an agent engine with the given configuration and EventBus.
 	// Conversation history is loaded by the caller (see service.LoadAgentHistory) and
 	// passed into AgentEngine.Execute; the engine itself is stateless across turns.
-	CreateAgentEngine(
-		ctx context.Context,
-		config *types.AgentConfig,
-		chatModel chat.Chat,
-		rerankModel rerank.Reranker,
-		eventBus *event.EventBus,
-		sessionID, assistantMessageID string,
-	) (AgentEngine, error)
 
 	// CreateToolRegistry builds the exact same native/custom/MCP tool registry
 	// used by CreateAgentEngine, so custom agent runtimes can reuse WeKnora's
@@ -64,7 +41,6 @@ type AgentService interface {
 	CreateToolRegistry(
 		ctx context.Context,
 		config *types.AgentConfig,
-		chatModel chat.Chat,
 		rerankModel rerank.Reranker,
 		sessionID string,
 	) (AgentToolRegistry, error)

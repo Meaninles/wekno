@@ -24,8 +24,6 @@ const (
 	ToolWebSearch           = "web_search"
 	ToolWebFetch            = "web_fetch"
 	// Skills-related tools (only available when skills are enabled)
-	ToolExecuteSkillScript = "execute_skill_script"
-	ToolReadSkill          = "read_skill"
 	// Wiki-related tools (only available when wiki KBs are in scope)
 	ToolWikiReadPage      = "wiki_read_page"
 	ToolWikiWritePage     = "wiki_write_page"
@@ -67,8 +65,6 @@ func AvailableToolDefinitions() []AvailableTool {
 		{Name: ToolDBCatalog, Label: "数据库目录", Description: "查看已绑定 MySQL/PostgreSQL 数据源中的可分析表"},
 		{Name: ToolDBSchema, Label: "数据库结构", Description: "查看数据库表结构、字段说明、样本值和语义类型"},
 		{Name: ToolDBQuery, Label: "数据源分析", Description: "对已绑定数据源执行只读 SQL 分析"},
-		{Name: ToolReadSkill, Label: "读取技能", Description: "按需读取技能内容以学习专业能力"},
-		{Name: ToolExecuteSkillScript, Label: "执行技能脚本", Description: "在沙箱环境中执行技能脚本"},
 		{Name: ToolWikiReadPage, Label: "读取Wiki页面", Description: "读取指定的Wiki页面内容"},
 		{Name: ToolWikiSearch, Label: "搜索Wiki", Description: "在Wiki中搜索页面"},
 		{Name: ToolWikiReadSourceDoc, Label: "精读源文档", Description: "使用知识点深入阅读特定原始文档"},

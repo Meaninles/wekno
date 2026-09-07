@@ -77,24 +77,3 @@ func TestApplyPerRequestMCPScope_NoneIgnoresMentionAndDoesNotPin(t *testing.T) {
 	assert.Equal(t, "none", cfg.MCPSelectionMode)
 	assert.Empty(t, cfg.PinnedMCPServiceIDs)
 }
-
-func TestApplyPerRequestSkillScope_SelectedEmptyIntersectionDisables(t *testing.T) {
-	cfg := &types.AgentConfig{SkillsEnabled: true, AllowedSkills: []string{"a", "b"}}
-	applyPerRequestSkillScope(context.Background(), cfg, "selected", []string{"c"})
-	assert.False(t, cfg.SkillsEnabled)
-	assert.Empty(t, cfg.PinnedSkillNames)
-}
-
-func TestApplyPerRequestSkillScope_AllPinsMentioned(t *testing.T) {
-	cfg := &types.AgentConfig{SkillsEnabled: true}
-	applyPerRequestSkillScope(context.Background(), cfg, "all", []string{"analysis", "analysis"})
-	assert.True(t, cfg.SkillsEnabled)
-	assert.Equal(t, []string{"analysis"}, cfg.AllowedSkills)
-	assert.Equal(t, []string{"analysis"}, cfg.PinnedSkillNames)
-}
-
-func TestApplyPerRequestSkillScope_NoneIgnores(t *testing.T) {
-	cfg := &types.AgentConfig{SkillsEnabled: true, AllowedSkills: []string{"a"}}
-	applyPerRequestSkillScope(context.Background(), cfg, "none", []string{"a"})
-	assert.Empty(t, cfg.PinnedSkillNames)
-}

@@ -56,9 +56,7 @@ func (c *Configurator) NormalizeAgentConfig(ctx context.Context, agent *types.Cu
 	fail := func(format string, args ...any) error {
 		return fmt.Errorf("%w: %s", appservice.ErrAgentCustomConfigInvalid, fmt.Sprintf(format, args...))
 	}
-	if agent.Config.AgentMode != types.AgentModeSmartReasoning {
-		return fail("知识库管理智能体必须使用智能推理模式")
-	}
+
 	if agent.Config.KBSelectionMode != "selected" {
 		return fail("知识库管理智能体必须选择指定知识库，不能选择全部或不使用知识库")
 	}

@@ -673,48 +673,10 @@ func (s *Service) executeRun(runID string) {
 		return nil
 	})
 
-	agentMode := agent.IsAgentMode()
-	if !agentMode {
-		var completionHandled bool
-		eventBus.On(event.EventAgentThought, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentThoughtData)
-			if ok && data.Content != "" {
-				appendQuickAnswerReasoning(assistantMsg, data.Content)
-			}
-			return nil
-		})
-		eventBus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentFinalAnswerData)
-			if !ok {
-				return nil
-			}
-			assistantMsg.Content += data.Content
-			if data.IsFallback {
-				assistantMsg.IsFallback = true
-			}
-			if data.Done && !completionHandled {
-				completionHandled = true
-				s.completeAssistantMessage(runCtx, assistantMsg, renderedPrompt)
-				_ = eventBus.Emit(runCtx, event.Event{
-					Type:      event.EventAgentComplete,
-					SessionID: session.ID,
-					Data: event.AgentCompleteData{
-						FinalAnswer:                assistantMsg.Content,
-						KnowledgeRefs:              []*types.SearchResult(assistantMsg.KnowledgeReferences),
-						KnowledgeRefsAuthoritative: true,
-						MessageID:                  assistantMsg.ID,
-					},
-				})
-				complete()
-			}
-			return nil
-		})
-	} else {
-		eventBus.On(event.EventAgentComplete, func(ctx context.Context, evt event.Event) error {
-			complete()
-			return nil
-		})
-	}
+	eventBus.On(event.EventAgentComplete, func(ctx context.Context, evt event.Event) error {
+		complete()
+		return nil
+	})
 
 	qaReq := &types.QARequest{
 		Session:            session,
@@ -735,13 +697,10 @@ func (s *Service) executeRun(runID string) {
 		Attachments:        attachments,
 	}
 
-	var serviceErr error
-	if agentMode {
-		serviceErr = sessionhandler.RunAgentQA(execCtx, s.sessionService, qaReq, eventBus)
+	serviceErr := sessionhandler.RunAgentQA(execCtx, s.sessionService, qaReq, eventBus)
+	if serviceErr == nil {
 		s.completeAssistantMessage(runCtx, assistantMsg, renderedPrompt)
 		complete()
-	} else {
-		serviceErr = s.sessionService.KnowledgeQA(execCtx, qaReq, eventBus)
 	}
 	if serviceErr != nil {
 		if execCtx.Err() != nil {
@@ -1253,7 +1212,7 @@ func (s *Service) prepareRequestMedia(
 		if agent == nil || !agent.Config.ImageUploadEnabled {
 			return nil, nil, "", nil, fmt.Errorf("image upload is not enabled for this agent")
 		}
-		if types.IsClaudeSDKAgentType(agent.Config.AgentType) && strings.TrimSpace(agent.Config.VLMModelID) == "" {
+		if types.HasWorkspaceCapabilities(agent.Config.AgentType) && strings.TrimSpace(agent.Config.VLMModelID) == "" {
 			return nil, nil, "", nil, fmt.Errorf("general agent image upload requires a configured VLM model")
 		}
 		if s.fileService == nil {
@@ -1262,9 +1221,6 @@ func (s *Service) prepareRequestMedia(
 		tenantID, _ := types.TenantIDFromContext(ctx)
 		if err := sessionhandler.SaveImageAttachments(ctx, s.fileService, images, tenantID, agent.Config.ImageStorageProvider); err != nil {
 			return nil, nil, "", nil, err
-		}
-		if strings.TrimSpace(agent.Config.VLMModelID) != "" {
-			sessionhandler.AnalyzeImageAttachments(ctx, s.modelService, images, agent.Config.VLMModelID, query)
 		}
 	}
 	imageURLs, imageDescription := sessionhandler.ExtractImageURLsAndOCRText(images)

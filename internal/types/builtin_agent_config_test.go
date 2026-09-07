@@ -12,17 +12,17 @@ func TestBuiltinWikiFixerUsesWriteCapableRuntime(t *testing.T) {
 	}
 }
 
-func TestBuiltinSmartReasoningUsesStableFactualRAGDefaults(t *testing.T) {
+func TestBuiltinKnowledgeQAUsesStableFactualRAGDefaults(t *testing.T) {
 	if err := LoadBuiltinAgentsConfig("../../config"); err != nil {
 		t.Fatalf("load built-in agent config: %v", err)
 	}
 
-	agent := GetBuiltinAgent(BuiltinSmartReasoningID, 10000)
+	agent := GetBuiltinAgent(BuiltinKnowledgeQAID, 10000)
 	if agent == nil {
-		t.Fatal("smart-reasoning built-in agent is missing")
+		t.Fatal("knowledge-qa built-in agent is missing")
 	}
-	if agent.Config.AgentType != AgentTypeRAGQA {
-		t.Fatalf("agent type = %q, want %q", agent.Config.AgentType, AgentTypeRAGQA)
+	if agent.Config.AgentType != AgentTypeKnowledgeQA {
+		t.Fatalf("agent type = %q, want %q", agent.Config.AgentType, AgentTypeKnowledgeQA)
 	}
 	if agent.Config.Temperature != 0 {
 		t.Fatalf("temperature = %v, want deterministic factual RAG default 0", agent.Config.Temperature)

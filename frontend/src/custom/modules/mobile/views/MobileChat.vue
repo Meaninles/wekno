@@ -29,17 +29,7 @@ import type {
   KnowledgeFolderBreadcrumb,
   KnowledgeFolderOption,
 } from "@/custom/modules/knowledgeFolders/types";
-import {
-  BUILTIN_DATA_ANALYST_ID,
-  BUILTIN_DOCUMENT_PROCESSING_ID,
-  BUILTIN_GENERAL_AGENT_ID,
-  BUILTIN_QUICK_ANSWER_ID,
-  BUILTIN_SIMPLE_CHAT_ID,
-  BUILTIN_SMART_REASONING_ID,
-  BUILTIN_TABLE_ANALYST_ID,
-  BUILTIN_WIKI_RESEARCHER_ID,
-  type CustomAgent,
-} from "@/api/agent";
+import { BUILTIN_GENERAL_AGENT_ID, BUILTIN_KNOWLEDGE_QA_ID, type CustomAgent } from "@/api/agent";
 import { listSkills, type SkillInfo } from "@/api/skill";
 import type { ModelConfig } from "@/api/model";
 import { useChatStreamHandler } from "@/composables/useChatStreamHandler";
@@ -320,18 +310,12 @@ const rawSelectedSkillNames = computed(() =>
     ...(settingsStore.settings.selectedSkills || []),
   ]),
 );
-const selectedAgentId = computed(() => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID);
+const selectedAgentId = computed(() => settingsStore.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID);
 const selectedModelId = computed(() => settingsStore.conversationModels.selectedChatModelId || "");
 
 const fallbackBuiltinAgentNames: Record<string, string> = {
-  [BUILTIN_QUICK_ANSWER_ID]: "快速问答",
-  [BUILTIN_SIMPLE_CHAT_ID]: "简单对话",
-  [BUILTIN_SMART_REASONING_ID]: "智能推理",
-  [BUILTIN_WIKI_RESEARCHER_ID]: "维基问答",
-  [BUILTIN_DATA_ANALYST_ID]: "数据分析",
-  [BUILTIN_TABLE_ANALYST_ID]: "表格分析",
+  [BUILTIN_KNOWLEDGE_QA_ID]: "知识问答",
   [BUILTIN_GENERAL_AGENT_ID]: "通用智能体",
-  [BUILTIN_DOCUMENT_PROCESSING_ID]: "文档处理",
 };
 
 const selectedAgent = computed(() => {
@@ -341,22 +325,13 @@ const selectedAgent = computed(() => {
     id: selectedAgentId.value,
     name: fallbackBuiltinAgentNames[selectedAgentId.value] || selectedAgentId.value,
     is_builtin: selectedAgentId.value.startsWith("builtin-"),
-    config: { agent_mode: settingsStore.isAgentStreamMode ? "smart-reasoning" : "quick-answer" },
+    config: { agent_mode: 'agent' as const },
   } as CustomAgent;
 });
 
 const mobileAgentRows = computed<CustomAgent[]>(() => {
-  const quickAgent = {
-    id: BUILTIN_QUICK_ANSWER_ID,
-    name: "快速问答",
-    description: "知识库问答模式",
-    is_builtin: true,
-    config: {},
-  } as CustomAgent;
-  const merged = [
-    quickAgent,
-    ...agents.value.filter((agent) => agent.id !== BUILTIN_QUICK_ANSWER_ID),
-  ];
+  const merged = agents.value;
+
   return sortPinnedFirstByRecency(
     merged,
     Array.from(agentPins.pinnedKeys.value),
@@ -772,7 +747,7 @@ const loadResources = async () => {
   try {
     await chatResources.prefetchChatInput();
     if (!settingsStore.selectedAgentSourceTenantId && !agents.value.some(agent => agent.id === selectedAgentId.value)) {
-      const available = agents.value.find(agent => agent.id === BUILTIN_QUICK_ANSWER_ID) || agents.value[0];
+      const available = agents.value.find(agent => agent.id === BUILTIN_KNOWLEDGE_QA_ID) || agents.value[0];
       if (available) selectAgent(available);
     }
     ensureDefaultModel();
@@ -1274,7 +1249,7 @@ const deleteMobileSession = async (item: any) => {
 const selectAgent = (agent: CustomAgent) => {
   settingsStore.selectAgent(agent.id, null);
   const mode = agent.config?.agent_mode;
-  settingsStore.toggleAgent(mode === "smart-reasoning");
+  settingsStore.toggleAgent(mode === "agent");
   if (agent.config?.web_search_enabled !== undefined) {
     settingsStore.toggleWebSearch(agent.config.web_search_enabled === true);
   }

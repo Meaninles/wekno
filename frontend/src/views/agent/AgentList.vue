@@ -155,8 +155,8 @@
             </div>
             <div v-show="!isAgentRowHidden(agent)" class="agent-card" :class="{
               'is-builtin': agent.is_builtin,
-              'agent-mode-normal': agent.config?.agent_mode === 'quick-answer',
-              'agent-mode-agent': agent.config?.agent_mode === 'smart-reasoning',
+              'agent-mode-normal': false,
+              'agent-mode-agent': agent.config?.agent_mode === 'agent',
               'shared-agent-card': !agent.isMine
             }" @click="handleCardClick(agent)">
               <!-- 装饰星星 -->
@@ -186,8 +186,8 @@
               <div class="card-header">
                 <div class="card-header-left">
                   <div v-if="agent.is_builtin" class="builtin-avatar"
-                    :class="agent.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'">
-                    <t-icon :name="agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                    :class="agent.config?.agent_mode === 'agent' ? 'agent' : 'normal'">
+                    <t-icon :name="agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                       size="18px" />
                   </div>
                   <div v-else-if="agent.avatar" class="builtin-avatar agent-emoji">{{ agent.avatar }}</div>
@@ -252,11 +252,11 @@
                       class="disabled-badge">{{
                         $t('agent.disabled') }}</t-tag>
                     <t-tooltip
-                      :content="agent.config?.agent_mode === 'smart-reasoning' ? $t('agent.mode.agent') : $t('agent.mode.normal')"
+                      :content="agent.config?.agent_mode === 'agent' ? $t('agent.mode.agent') : $t('agent.mode.normal')"
                       placement="top">
                       <div class="feature-badge"
-                        :class="{ 'mode-normal': agent.config?.agent_mode === 'quick-answer', 'mode-agent': agent.config?.agent_mode === 'smart-reasoning' }">
-                        <t-icon :name="agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                        :class="{ 'mode-normal': false, 'mode-agent': agent.config?.agent_mode === 'agent' }">
+                        <t-icon :name="agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                           size="14px" />
                       </div>
                     </t-tooltip>
@@ -357,8 +357,8 @@
             </div>
             <div v-show="!isAgentRowHidden(agent)" class="agent-card" :class="{
               'is-builtin': agent.is_builtin,
-              'agent-mode-normal': agent.config?.agent_mode === 'quick-answer',
-              'agent-mode-agent': agent.config?.agent_mode === 'smart-reasoning'
+              'agent-mode-normal': false,
+              'agent-mode-agent': agent.config?.agent_mode === 'agent'
             }" @click="handleCardClick(agent)">
               <!-- 装饰星星 -->
               <div class="card-decoration">
@@ -388,8 +388,8 @@
                 <div class="card-header-left">
                   <!-- 内置智能体使用简洁图标 -->
                   <div v-if="agent.is_builtin" class="builtin-avatar"
-                    :class="agent.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'">
-                    <t-icon :name="agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                    :class="agent.config?.agent_mode === 'agent' ? 'agent' : 'normal'">
+                    <t-icon :name="agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                       size="18px" />
                   </div>
                   <div v-else-if="agent.avatar" class="builtin-avatar agent-emoji">{{ agent.avatar }}</div>
@@ -443,11 +443,11 @@
                     <t-tag v-if="agent.disabled_by_me" theme="default" size="small" class="disabled-badge">{{
                       $t('agent.disabled') }}</t-tag>
                     <t-tooltip
-                      :content="agent.config?.agent_mode === 'smart-reasoning' ? $t('agent.mode.agent') : $t('agent.mode.normal')"
+                      :content="agent.config?.agent_mode === 'agent' ? $t('agent.mode.agent') : $t('agent.mode.normal')"
                       placement="top">
                       <div class="feature-badge"
-                        :class="{ 'mode-normal': agent.config?.agent_mode === 'quick-answer', 'mode-agent': agent.config?.agent_mode === 'smart-reasoning' }">
-                        <t-icon :name="agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                        :class="{ 'mode-normal': false, 'mode-agent': agent.config?.agent_mode === 'agent' }">
+                        <t-icon :name="agent.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                           size="14px" />
                       </div>
                     </t-tooltip>
@@ -544,8 +544,8 @@
                 :name="isAgentSectionCollapsed('sharedReadonly') ? 'chevron-right' : 'chevron-down'" size="14px" />
             </div>
             <div v-show="!isSpaceAgentCollapsed(shared)" class="agent-card shared-agent-card" :class="{
-              'agent-mode-normal': shared.agent?.config?.agent_mode === 'quick-answer',
-              'agent-mode-agent': shared.agent?.config?.agent_mode === 'smart-reasoning'
+              'agent-mode-normal': false,
+              'agent-mode-agent': shared.agent?.config?.agent_mode === 'agent'
             }" @click="handleSpaceAgentCardClick(shared)">
               <div class="card-decoration">
                 <svg class="star-icon" width="24" height="24" viewBox="0 0 20 20" fill="none"
@@ -596,12 +596,12 @@
                     <t-tag v-if="shared.disabled_by_me" theme="default" size="small" class="disabled-badge">{{
                       $t('agent.disabled') }}</t-tag>
                     <t-tooltip
-                      :content="shared.agent?.config?.agent_mode === 'smart-reasoning' ? $t('agent.mode.agent') : $t('agent.mode.normal')"
+                      :content="shared.agent?.config?.agent_mode === 'agent' ? $t('agent.mode.agent') : $t('agent.mode.normal')"
                       placement="top">
                       <div class="feature-badge"
-                        :class="{ 'mode-normal': shared.agent?.config?.agent_mode === 'quick-answer', 'mode-agent': shared.agent?.config?.agent_mode === 'smart-reasoning' }">
+                        :class="{ 'mode-normal': false, 'mode-agent': shared.agent?.config?.agent_mode === 'agent' }">
                         <t-icon
-                          :name="shared.agent?.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                          :name="shared.agent?.config?.agent_mode === 'agent' ? 'control-platform' : 'chat'"
                           size="14px" />
                       </div>
                     </t-tooltip>

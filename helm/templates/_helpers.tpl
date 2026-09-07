@@ -141,19 +141,11 @@ Return the mobile web image with tag.
 {{/*
 Return the custom agent images with tags.
 */}}
-{{- define "weknora.generalAgent.image" -}}
-{{- if .Values.generalAgent.image.digest }}
-{{- printf "%s@%s" .Values.generalAgent.image.repository .Values.generalAgent.image.digest }}
+{{- define "weknora.agentRuntime.image" -}}
+{{- if .Values.agentRuntime.image.digest }}
+{{- printf "%s@%s" .Values.agentRuntime.image.repository .Values.agentRuntime.image.digest }}
 {{- else }}
-{{- printf "%s:%s" .Values.generalAgent.image.repository .Values.generalAgent.image.tag }}
-{{- end }}
-{{- end }}
-
-{{- define "weknora.documentProcessingAgent.image" -}}
-{{- if .Values.documentProcessingAgent.image.digest }}
-{{- printf "%s@%s" .Values.documentProcessingAgent.image.repository .Values.documentProcessingAgent.image.digest }}
-{{- else }}
-{{- printf "%s:%s" .Values.documentProcessingAgent.image.repository .Values.documentProcessingAgent.image.tag }}
+{{- printf "%s:%s" .Values.agentRuntime.image.repository .Values.agentRuntime.image.tag }}
 {{- end }}
 {{- end }}
 

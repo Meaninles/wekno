@@ -19,8 +19,8 @@ test('mobile composer auto-grows after DOM value updates', () => {
 
 test('mobile composer keeps knowledge base as the second config shortcut', () => {
   const configRail = source.slice(
-    source.indexOf('<div class="config-rail">'),
-    source.indexOf('<div class="input-row">'),
+    source.indexOf('<div class="config-rail"'),
+    source.indexOf('<div class="input-row"'),
   )
   const agentPosition = configRail.indexOf("openSheet('agent')")
   const knowledgePosition = configRail.indexOf("openSheet('context')")

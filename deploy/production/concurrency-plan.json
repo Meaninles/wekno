@@ -38,7 +38,9 @@
     {
       "key": "qwen27_chat",
       "model": "Qwen3.6-27B",
-      "resource_kinds": ["chat"],
+      "resource_kinds": [
+        "chat"
+      ],
       "name_regex": "(?i)(^|/models/)Qwen3\\.6-27B$",
       "use": "primary interactive chat",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -70,7 +72,9 @@
     {
       "key": "deepseek_v4_flash_chat",
       "model": "DeepSeek-V4-Flash",
-      "resource_kinds": ["chat"],
+      "resource_kinds": [
+        "chat"
+      ],
       "name_regex": "(?i)(^|/models/)DeepSeek-V4-Flash$",
       "use": "secondary interactive chat",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -102,7 +106,10 @@
     {
       "key": "qwen35_chat_derivative",
       "model": "Qwen3.6-35B-A3B",
-      "resource_kinds": ["chat", "derivative"],
+      "resource_kinds": [
+        "chat",
+        "derivative"
+      ],
       "name_regex": "(?i)(^|/models/)Qwen3\\.6-35B-A3B$",
       "use": "interactive fallback and durable derivative work",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -132,7 +139,9 @@
     {
       "key": "qwen3_embedding",
       "model": "Qwen3-Embedding-8B",
-      "resource_kinds": ["embedding"],
+      "resource_kinds": [
+        "embedding"
+      ],
       "name_regex": "(?i)(^|/models/)Qwen3-Embedding-8B$",
       "use": "document embedding",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -162,7 +171,9 @@
     {
       "key": "bge_reranker",
       "model": "bge-reranker-v2-m3",
-      "resource_kinds": ["rerank"],
+      "resource_kinds": [
+        "rerank"
+      ],
       "name_regex": "(?i)(^|/models/)bge-reranker-v2-m3$",
       "use": "interactive retrieval reranking",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -192,7 +203,9 @@
     {
       "key": "qwen3_vl",
       "model": "Qwen3-VL-32B",
-      "resource_kinds": ["vlm"],
+      "resource_kinds": [
+        "vlm"
+      ],
       "name_regex": "(?i)(^|/models/)Qwen3-VL-32B$",
       "use": "document OCR and image caption",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -222,7 +235,9 @@
     {
       "key": "qwen25_omni_asr",
       "model": "Qwen2.5-Omni-7B",
-      "resource_kinds": ["asr"],
+      "resource_kinds": [
+        "asr"
+      ],
       "name_regex": "(?i)(^|/models/)Qwen2\\.5-Omni-7B$",
       "use": "audio transcription",
       "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
@@ -252,72 +267,289 @@
   ],
   "database_connections": {
     "steady_components": [
-      {"name": "api", "replicas": 3, "max_open_per_replica": 6},
-      {"name": "parse", "replicas": 3, "max_open_per_replica": 5},
-      {"name": "derivative", "replicas": 2, "max_open_per_replica": 4},
-      {"name": "wiki", "replicas": 2, "max_open_per_replica": 4},
-      {"name": "maintenance", "replicas": 2, "max_open_per_replica": 3}
+      {
+        "name": "api",
+        "replicas": 3,
+        "max_open_per_replica": 6
+      },
+      {
+        "name": "parse",
+        "replicas": 3,
+        "max_open_per_replica": 5
+      },
+      {
+        "name": "derivative",
+        "replicas": 2,
+        "max_open_per_replica": 4
+      },
+      {
+        "name": "wiki",
+        "replicas": 2,
+        "max_open_per_replica": 4
+      },
+      {
+        "name": "maintenance",
+        "replicas": 2,
+        "max_open_per_replica": 3
+      }
     ],
     "migration_job_max_open": 3
   },
   "nodes": [
     {
       "name": "10.14.201.1",
-      "allocatable": {"cpu_m": 7910, "memory_mib": 28469.715},
-      "fixed_cluster_requests": {"cpu_m": 330, "memory_mib": 400},
+      "allocatable": {
+        "cpu_m": 7910,
+        "memory_mib": 28469.715
+      },
+      "fixed_cluster_requests": {
+        "cpu_m": 330,
+        "memory_mib": 400
+      },
       "workloads": [
-        {"name": "api", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 1500, "memory_limit_mib": 3072},
-        {"name": "parse", "cpu_request_m": 1000, "memory_request_mib": 2048, "cpu_limit_m": 3000, "memory_limit_mib": 5120},
-        {"name": "docreader", "cpu_request_m": 750, "memory_request_mib": 1024, "cpu_limit_m": 4000, "memory_limit_mib": 4096},
-        {"name": "derivative", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
-        {"name": "maintenance", "cpu_request_m": 150, "memory_request_mib": 384, "cpu_limit_m": 750, "memory_limit_mib": 1024},
-        {"name": "general-agent", "cpu_request_m": 250, "memory_request_mib": 768, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
-        {"name": "document-agent", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 2500, "memory_limit_mib": 4096},
-        {"name": "frontend", "cpu_request_m": 100, "memory_request_mib": 128, "cpu_limit_m": 500, "memory_limit_mib": 512},
-        {"name": "mobile-web", "cpu_request_m": 50, "memory_request_mib": 64, "cpu_limit_m": 300, "memory_limit_mib": 512}
+        {
+          "name": "api",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1280,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 3072
+        },
+        {
+          "name": "parse",
+          "cpu_request_m": 1000,
+          "memory_request_mib": 2048,
+          "cpu_limit_m": 3000,
+          "memory_limit_mib": 5120
+        },
+        {
+          "name": "docreader",
+          "cpu_request_m": 750,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 4000,
+          "memory_limit_mib": 4096
+        },
+        {
+          "name": "derivative",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 2048
+        },
+        {
+          "name": "maintenance",
+          "cpu_request_m": 150,
+          "memory_request_mib": 384,
+          "cpu_limit_m": 750,
+          "memory_limit_mib": 1024
+        },
+        {
+          "name": "agent-runtime",
+          "cpu_request_m": 250,
+          "memory_request_mib": 512,
+          "cpu_limit_m": 2000,
+          "memory_limit_mib": 2048
+        },
+        {
+          "name": "frontend",
+          "cpu_request_m": 100,
+          "memory_request_mib": 128,
+          "cpu_limit_m": 500,
+          "memory_limit_mib": 512
+        },
+        {
+          "name": "mobile-web",
+          "cpu_request_m": 50,
+          "memory_request_mib": 64,
+          "cpu_limit_m": 300,
+          "memory_limit_mib": 512
+        },
+        {
+          "name": "agent-workspaces",
+          "cpu_request_m": 600,
+          "memory_request_mib": 1536,
+          "cpu_limit_m": 12000,
+          "memory_limit_mib": 12288
+        }
       ]
     },
     {
       "name": "10.14.201.2",
-      "allocatable": {"cpu_m": 7910, "memory_mib": 28469.684},
-      "fixed_cluster_requests": {"cpu_m": 330, "memory_mib": 400},
+      "allocatable": {
+        "cpu_m": 7910,
+        "memory_mib": 28469.684
+      },
+      "fixed_cluster_requests": {
+        "cpu_m": 330,
+        "memory_mib": 400
+      },
       "workloads": [
-        {"name": "api", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 1500, "memory_limit_mib": 3072},
-        {"name": "parse", "cpu_request_m": 1000, "memory_request_mib": 2048, "cpu_limit_m": 3000, "memory_limit_mib": 5120},
-        {"name": "docreader", "cpu_request_m": 750, "memory_request_mib": 1024, "cpu_limit_m": 4000, "memory_limit_mib": 4096},
-        {"name": "wiki", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
-        {"name": "maintenance", "cpu_request_m": 150, "memory_request_mib": 384, "cpu_limit_m": 750, "memory_limit_mib": 1024},
-        {"name": "general-agent", "cpu_request_m": 250, "memory_request_mib": 768, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
-        {"name": "document-agent", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 2500, "memory_limit_mib": 4096},
-        {"name": "frontend", "cpu_request_m": 100, "memory_request_mib": 128, "cpu_limit_m": 500, "memory_limit_mib": 512},
-        {"name": "mobile-web", "cpu_request_m": 50, "memory_request_mib": 64, "cpu_limit_m": 300, "memory_limit_mib": 512}
+        {
+          "name": "api",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1280,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 3072
+        },
+        {
+          "name": "parse",
+          "cpu_request_m": 1000,
+          "memory_request_mib": 2048,
+          "cpu_limit_m": 3000,
+          "memory_limit_mib": 5120
+        },
+        {
+          "name": "docreader",
+          "cpu_request_m": 750,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 4000,
+          "memory_limit_mib": 4096
+        },
+        {
+          "name": "wiki",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 2048
+        },
+        {
+          "name": "maintenance",
+          "cpu_request_m": 150,
+          "memory_request_mib": 384,
+          "cpu_limit_m": 750,
+          "memory_limit_mib": 1024
+        },
+        {
+          "name": "agent-runtime",
+          "cpu_request_m": 250,
+          "memory_request_mib": 512,
+          "cpu_limit_m": 2000,
+          "memory_limit_mib": 2048
+        },
+        {
+          "name": "frontend",
+          "cpu_request_m": 100,
+          "memory_request_mib": 128,
+          "cpu_limit_m": 500,
+          "memory_limit_mib": 512
+        },
+        {
+          "name": "mobile-web",
+          "cpu_request_m": 50,
+          "memory_request_mib": 64,
+          "cpu_limit_m": 300,
+          "memory_limit_mib": 512
+        },
+        {
+          "name": "agent-workspaces",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1280,
+          "cpu_limit_m": 10000,
+          "memory_limit_mib": 10240
+        }
       ]
     },
     {
       "name": "10.14.201.7",
-      "allocatable": {"cpu_m": 7910, "memory_mib": 28469.699},
-      "fixed_cluster_requests": {"cpu_m": 330, "memory_mib": 400},
+      "allocatable": {
+        "cpu_m": 7910,
+        "memory_mib": 28469.699
+      },
+      "fixed_cluster_requests": {
+        "cpu_m": 330,
+        "memory_mib": 400
+      },
       "workloads": [
-        {"name": "api", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 1500, "memory_limit_mib": 3072},
-        {"name": "parse", "cpu_request_m": 1000, "memory_request_mib": 2048, "cpu_limit_m": 3000, "memory_limit_mib": 5120},
-        {"name": "docreader", "cpu_request_m": 750, "memory_request_mib": 1024, "cpu_limit_m": 4000, "memory_limit_mib": 4096},
-        {"name": "derivative", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
-        {"name": "wiki", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048}
+        {
+          "name": "api",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1280,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 3072
+        },
+        {
+          "name": "parse",
+          "cpu_request_m": 1000,
+          "memory_request_mib": 2048,
+          "cpu_limit_m": 3000,
+          "memory_limit_mib": 5120
+        },
+        {
+          "name": "docreader",
+          "cpu_request_m": 750,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 4000,
+          "memory_limit_mib": 4096
+        },
+        {
+          "name": "derivative",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 2048
+        },
+        {
+          "name": "wiki",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1024,
+          "cpu_limit_m": 1500,
+          "memory_limit_mib": 2048
+        },
+        {
+          "name": "agent-workspaces",
+          "cpu_request_m": 500,
+          "memory_request_mib": 1280,
+          "cpu_limit_m": 10000,
+          "memory_limit_mib": 10240
+        }
       ]
     },
     {
       "name": "10.14.201.6",
-      "allocatable": {"cpu_m": 7910, "memory_mib": 13165.699},
-      "fixed_cluster_requests": {"cpu_m": 2110, "memory_mib": 3124},
+      "allocatable": {
+        "cpu_m": 7910,
+        "memory_mib": 13165.699
+      },
+      "fixed_cluster_requests": {
+        "cpu_m": 2110,
+        "memory_mib": 3124
+      },
       "workloads": [
-        {"name": "postgres", "cpu_request_m": 3000, "memory_request_mib": 8192, "cpu_limit_m": 6000, "memory_limit_mib": 12288}
+        {
+          "name": "postgres",
+          "cpu_request_m": 3000,
+          "memory_request_mib": 8192,
+          "cpu_limit_m": 6000,
+          "memory_limit_mib": 12288
+        }
       ]
     },
     {
       "name": "10.14.201.54",
-      "allocatable": {"cpu_m": 7910, "memory_mib": 13165.711},
-      "fixed_cluster_requests": {"cpu_m": 2610, "memory_mib": 3636},
+      "allocatable": {
+        "cpu_m": 7910,
+        "memory_mib": 13165.711
+      },
+      "fixed_cluster_requests": {
+        "cpu_m": 2610,
+        "memory_mib": 3636
+      },
       "workloads": []
     }
-  ]
+  ],
+  "agent_runtime": {
+    "worker_replicas": 2,
+    "concurrency_per_worker": 8,
+    "maximum_active_workspaces": 16,
+    "per_workspace_requests": {
+      "cpu_m": 100,
+      "memory_mib": 256
+    },
+    "per_workspace_limits": {
+      "cpu_m": 2000,
+      "memory_mib": 2048
+    },
+    "workspace_pvcs_per_run": 2,
+    "workspace_storage_gib_per_pvc": 4,
+    "scheduling": "document-worker nodes; scheduler enforces requests, limits are not a reservation"
+  }
 }

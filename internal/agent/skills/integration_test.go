@@ -1,7 +1,6 @@
 package skills
 
 import (
-	"context"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -90,69 +89,6 @@ func TestExampleSkillsIntegration(t *testing.T) {
 }
 
 // TestManagerWithExampleSkills tests the Manager with example skills
-func TestManagerWithExampleSkills(t *testing.T) {
-	// Get the path to examples/skills
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("Failed to get current file path")
-	}
-
-	skillsDir := filepath.Join(filepath.Dir(filename), "..", "..", "..", "examples", "skills")
-
-	// Create manager
-	config := &ManagerConfig{
-		SkillDirs:     []string{skillsDir},
-		AllowedSkills: []string{}, // Allow all
-		Enabled:       true,
-	}
-
-	manager := NewManager(config, nil)
-
-	// Initialize
-	ctx := context.Background()
-	if err := manager.Initialize(ctx); err != nil {
-		t.Fatalf("Failed to initialize manager: %v", err)
-	}
-
-	// Get metadata for system prompt
-	metadata := manager.GetAllMetadata()
-	if len(metadata) == 0 {
-		t.Skip("No example skills found")
-	}
-
-	t.Logf("Manager discovered %d skills for system prompt injection", len(metadata))
-
-	// Simulate what the agent would do:
-	// 1. First, get metadata (Level 1 - already in system prompt)
-	for _, m := range metadata {
-		t.Logf("Level 1 (metadata): %s - %s", m.Name, truncate(m.Description, 50))
-	}
-
-	// 2. When user request matches, load full skill instructions (Level 2)
-	skill, err := manager.LoadSkill(ctx, "pdf-processing")
-	if err != nil {
-		t.Fatalf("Failed to load skill: %v", err)
-	}
-
-	t.Logf("Level 2 (instructions): Loaded %d characters of instructions", len(skill.Instructions))
-
-	// 3. If skill references additional files, read them (Level 3)
-	formsContent, err := manager.ReadSkillFile(ctx, "pdf-processing", "FORMS.md")
-	if err != nil {
-		t.Fatalf("Failed to read skill file: %v", err)
-	}
-
-	t.Logf("Level 3 (resources): Loaded FORMS.md with %d characters", len(formsContent))
-
-	// Test GetSkillInfo
-	info, err := manager.GetSkillInfo(ctx, "pdf-processing")
-	if err != nil {
-		t.Fatalf("Failed to get skill info: %v", err)
-	}
-
-	t.Logf("Skill info: name=%s, files=%d", info.Name, len(info.Files))
-}
-
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s

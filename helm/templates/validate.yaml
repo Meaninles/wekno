@@ -17,7 +17,7 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
   {{- if and (eq $storageType "obs") (eq $envName "OBS_PATH_PREFIX") }}
     {{- $knowledgePrefix = toString (.value | default "") }}
   {{- end }}
-  {{- if eq $envName "CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX" }}
+  {{- if eq $envName "AGENT_RUNTIME_ORIGINAL_INPUT_PATH_PREFIX" }}
     {{- $originalInputPrefix = toString (.value | default "") }}
   {{- end }}
 {{- end }}
@@ -75,7 +75,7 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
 {{- if ne (empty .Values.app.connections.redis.tls.certFile) (empty .Values.app.connections.redis.tls.keyFile) }}
   {{- fail "Redis TLS certFile and keyFile must be configured together" }}
 {{- end }}
-{{- range $name, $scratch := dict "app" .Values.app.scratch "docreader" .Values.docreader.scratch "generalAgent" .Values.generalAgent.scratch "documentProcessingAgent" .Values.documentProcessingAgent.scratch }}
+{{- range $name, $scratch := dict "app" .Values.app.scratch "docreader" .Values.docreader.scratch }}
   {{- $volumeType := ($scratch.volumeType | default "emptyDir") }}
   {{- if not (has $volumeType (list "emptyDir" "ephemeral" "hostPath")) }}
     {{- fail (printf "%s.scratch.volumeType must be emptyDir, ephemeral or hostPath" $name) }}
@@ -84,15 +84,12 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
     {{- fail (printf "%s ephemeral scratch requires scratch.ephemeral.storageClassName" $name) }}
   {{- end }}
 {{- end }}
-{{- if or .Values.generalAgent.enabled .Values.documentProcessingAgent.enabled }}
+{{- if .Values.agentRuntime.enabled }}
   {{- if not .Values.app.agentIntegration.enabled }}
     {{- fail "enabling an Agent pool requires app.agentIntegration.enabled=true" }}
   {{- end }}
 {{- end }}
 {{- if .Values.app.agentIntegration.enabled }}
-  {{- if ne (toString .Values.app.agentIntegration.toolCallbackURL) "http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call" }}
-    {{- fail "Agent tool callbacks must use http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call because active runs are process-local" }}
-  {{- end }}
   {{- $artifactProvider := lower (toString .Values.app.agentIntegration.artifactStorage.provider) }}
   {{- if not (has $artifactProvider (list "minio" "obs")) }}
     {{- fail "app.agentIntegration.artifactStorage.provider must be minio or obs" }}
@@ -108,7 +105,7 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
     {{- fail "artifactStorage.pathPrefix must be weknora/__weknora_private_agent_artifacts_v1__/deployment/<lowercase-dns-label>/namespace/<canonical-uuid>/" }}
   {{- end }}
   {{- if and (has $storageType (list "minio" "obs")) (empty $originalInputPrefix) }}
-    {{- fail "object-backed Agent integration requires CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX in app.extraEnv" }}
+    {{- fail "object-backed Agent integration requires AGENT_RUNTIME_ORIGINAL_INPUT_PATH_PREFIX in app.extraEnv" }}
   {{- end }}
   {{- if and (not (empty $originalInputPrefix)) (not (regexMatch "^weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/[a-z]([a-z0-9-]{0,61}[a-z0-9])?/namespace/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/$" $originalInputPrefix)) }}
     {{- fail "original-input path prefix must be weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/<lowercase-dns-label>/namespace/<canonical-uuid>/" }}
@@ -116,12 +113,6 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
   {{- if or (empty .Values.app.agentIntegration.apiKeySecret.name) (empty .Values.app.agentIntegration.apiKeySecret.key) }}
     {{- fail "app.agentIntegration.apiKeySecret name and key are required" }}
   {{- end }}
-{{- end }}
-{{- if and .Values.generalAgent.enabled (or (empty .Values.generalAgent.apiKeySecret.name) (empty .Values.generalAgent.apiKeySecret.key)) }}
-  {{- fail "generalAgent.apiKeySecret name and key are required" }}
-{{- end }}
-{{- if and .Values.documentProcessingAgent.enabled (or (empty .Values.documentProcessingAgent.apiKeySecret.name) (empty .Values.documentProcessingAgent.apiKeySecret.key)) }}
-  {{- fail "documentProcessingAgent.apiKeySecret name and key are required" }}
 {{- end }}
 {{- if and .Values.app.enabled .Values.app.runtimeRoles.enabled }}
   {{- if ne (lower (toString .Values.app.runtimeRoles.environment)) "production" }}

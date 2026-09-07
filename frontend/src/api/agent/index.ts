@@ -1,17 +1,6 @@
 import { get, post, put, del } from "../../utils/request";
 
-// 智能体配置
-// 智能推理下的智能体类型预设 ID
-// 'rag-qa'       : 经典文档/FAQ 分块 RAG
-// 'wiki-qa'      : Wiki 图谱导航问答
-// 'hybrid-rag-wiki': Wiki + 分块混合检索
-// 'data-analysis': 数据分析（通用运行时 + MySQL/PostgreSQL + SQL）
-// 'table-analysis': 表格分析（通用运行时 + CSV/Excel + DuckDB SQL）
-// 'general-agent': 通用智能体（通用运行时 + WeKnora 能力桥）
-// 'document-processing-agent': 文档处理（通用运行时 + 文档产物能力）
-// 'knowledge-base-manager': 知识库管理（通用运行时 + 文档新增/先增后删替换/删除）
-// 'custom'       : 完全自定义（不应用预设）
-export type AgentType = 'rag-qa' | 'wiki-qa' | 'hybrid-rag-wiki' | 'data-analysis' | 'table-analysis' | 'general-agent' | 'document-processing-agent' | 'knowledge-base-manager' | 'custom';
+export type AgentType = 'knowledge-qa' | 'wiki-qa' | 'hybrid-rag-wiki' | 'data-analysis' | 'table-analysis' | 'general-agent' | 'document-processing-agent' | 'knowledge-base-manager' | 'custom';
 
 export interface KnowledgeManagementPermissionSet {
   add: boolean;
@@ -27,13 +16,12 @@ export interface KnowledgeManagementConfig {
 export interface CustomAgentConfig {
   retrieval_budget?: { candidate_count: number; fusion_count: number; evidence_tokens: number };
   // ===== 基础设置 =====
-  agent_mode?: 'quick-answer' | 'smart-reasoning';  // 运行模式：quick-answer=RAG模式, smart-reasoning=ReAct Agent模式
-  // 智能推理模式下的类型预设，用于一键应用"系统提示词 + 工具 + KB 兼容性"组合
-  // 仅在 agent_mode === 'smart-reasoning' 时生效；quick-answer 模式忽略
+  agent_mode?: 'agent'; // One runtime for every conversation
+  // 知识问答模式下的类型预设，用于一键应用"系统提示词 + 工具 + KB 兼容性"组合
+  // 仅在 agent_mode === 'agent' 时生效；quick-answer 模式忽略
   agent_type?: AgentType;
   system_prompt?: string;           // 统一系统提示词（使用 {{web_search_status}} 占位符动态控制行为）
   system_prompt_id?: string;        // 引用的 prompt template ID（预设会填入此字段）
-  context_template?: string;        // 上下文模板（普通模式）
   document_template?: DocumentTemplateConfig; // 文档处理智能体的 Word/Excel/PDF/PPT 模板设置
   knowledge_management?: KnowledgeManagementConfig; // 知识库管理智能体的默认权限及逐库覆盖
 
@@ -48,7 +36,6 @@ export interface CustomAgentConfig {
   max_iterations?: number;          // 最大迭代次数
   llm_call_timeout?: number;        // LLM调用超时时间（秒）
   allowed_tools?: string[];         // 允许的工具
-  reflection_enabled?: boolean;     // 是否启用反思
   // MCP服务选择模式：all=全部启用的MCP服务, selected=指定服务, none=不使用MCP
   mcp_selection_mode?: 'all' | 'selected' | 'none';
   mcp_services?: string[];          // 选择的MCP服务ID列表
@@ -91,7 +78,6 @@ export interface CustomAgentConfig {
   web_search_enabled?: boolean;
   web_search_provider_id?: string;
   web_search_max_results?: number;
-  claude_sdk_web_search_enabled?: boolean;
   web_fetch_enabled?: boolean;
   web_fetch_top_n?: number;
 
@@ -107,15 +93,7 @@ export interface CustomAgentConfig {
   rerank_threshold?: number;        // 重排阈值
 
   // ===== 高级设置（主要用于普通模式）=====
-  enable_query_expansion?: boolean; // 是否启用查询扩展
-  enable_rewrite?: boolean;         // 是否启用问题改写
-  rewrite_prompt_system?: string;   // 改写系统提示词
-  rewrite_prompt_user?: string;     // 改写用户提示词模板
-  fallback_strategy?: 'fixed' | 'model'; // 兜底策略
-  fallback_response?: string;       // 固定兜底回复
-  fallback_prompt?: string;         // 兜底提示词（模型生成时）
   // 意图提示词：非检索意图（问候、闲聊等）时覆盖主系统提示词
-  intent_prompts?: Record<string, string>;
 
   // ===== 已废弃字段（保留兼容）=====
   welcome_message?: string;
@@ -177,25 +155,9 @@ export interface UpdateAgentRequest {
 }
 
 // 内置智能体 ID（常用的保留常量，便于代码引用）
-export const BUILTIN_QUICK_ANSWER_ID = 'builtin-quick-answer';
-export const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat';
-export const BUILTIN_SMART_REASONING_ID = 'builtin-smart-reasoning';
-export const BUILTIN_WIKI_RESEARCHER_ID = 'builtin-wiki-researcher';
-export const BUILTIN_DEEP_RESEARCHER_ID = 'builtin-deep-researcher';
-export const BUILTIN_DATA_ANALYST_ID = 'builtin-data-analyst';
-export const BUILTIN_TABLE_ANALYST_ID = 'builtin-table-analyst';
+export const BUILTIN_KNOWLEDGE_QA_ID = 'builtin-knowledge-qa';
 export const BUILTIN_GENERAL_AGENT_ID = 'builtin-general-agent';
-export const BUILTIN_DOCUMENT_PROCESSING_ID = 'builtin-document-processing';
-export const BUILTIN_KNOWLEDGE_GRAPH_EXPERT_ID = 'builtin-knowledge-graph-expert';
-
-// AgentMode 常量
-export const AGENT_MODE_QUICK_ANSWER = 'quick-answer';
-export const AGENT_MODE_SMART_REASONING = 'smart-reasoning';
-
-// Deprecated: Use BUILTIN_QUICK_ANSWER_ID instead
-export const BUILTIN_AGENT_NORMAL_ID = BUILTIN_QUICK_ANSWER_ID;
-// Deprecated: Use BUILTIN_SMART_REASONING_ID instead
-export const BUILTIN_AGENT_AGENT_ID = BUILTIN_SMART_REASONING_ID;
+export const AGENT_MODE_UNIFIED = 'agent';
 
 // 获取智能体列表（包括内置智能体）
 // disabled_own_agent_ids: 当前租户在对话下拉中停用的「我的」智能体 ID，仅影响本租户
@@ -204,7 +166,7 @@ export function listAgents(params?: {
    * Optional creator filter; mirrors listKnowledgeBases. Built-in agents
    * (is_builtin=true) are always returned regardless of this filter so
    * the conversation dropdown never silently loses quick-answer /
-   * smart-reasoning when a user picks "Created by me".
+   * agent when a user picks "Created by me".
    */
   creator?: 'all' | 'mine' | 'others';
 }) {
@@ -259,10 +221,6 @@ export interface PlaceholdersResponse {
   all: PlaceholderDefinition[];
   system_prompt: PlaceholderDefinition[];
   agent_system_prompt: PlaceholderDefinition[];
-  context_template: PlaceholderDefinition[];
-  rewrite_system_prompt: PlaceholderDefinition[];
-  rewrite_prompt: PlaceholderDefinition[];
-  fallback_prompt: PlaceholderDefinition[];
 }
 
 // 获取占位符定义
@@ -302,7 +260,6 @@ export interface AgentTypePresetConfig {
   faq_priority_enabled?: boolean;
   faq_direct_answer_threshold?: number;
   web_search_enabled?: boolean;
-  claude_sdk_web_search_enabled?: boolean;
   web_fetch_enabled?: boolean;
   web_fetch_top_n?: number;
   history_turns?: number;
@@ -440,3 +397,19 @@ export function getWeChatQRCode() {
 export function pollWeChatQRCodeStatus(qrcode: string) {
   return post('/api/v1/wechat/qrcode/status', { qrcode }) as unknown as Promise<{ data: WeChatQRCodeStatus }>;
 }
+
+export const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat';
+
+export const BUILTIN_WIKI_RESEARCHER_ID = 'builtin-wiki-researcher';
+
+export const BUILTIN_DEEP_RESEARCHER_ID = 'builtin-deep-researcher';
+
+export const BUILTIN_DATA_ANALYST_ID = 'builtin-data-analyst';
+
+export const BUILTIN_TABLE_ANALYST_ID = 'builtin-table-analyst';
+
+export const BUILTIN_DOCUMENT_PROCESSING_ID = 'builtin-document-processing';
+
+export const BUILTIN_KNOWLEDGE_GRAPH_EXPERT_ID = 'builtin-knowledge-graph-expert';
+
+export const BUILTIN_WIKI_FIXER_ID = 'builtin-wiki-fixer';

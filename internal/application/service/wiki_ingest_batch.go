@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Tencent/WeKnora/internal/agent"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiprompts"
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
@@ -465,10 +465,10 @@ func wikiMapContentCacheKey(
 			language,
 			string(granularity),
 			strings.Join(slugs, "\n"),
-			agent.WikiCandidateSlugPrompt,
-			agent.WikiKnowledgeExtractPrompt,
-			agent.WikiChunkCitationPrompt,
-			agent.WikiSummaryPrompt,
+			wikiprompts.WikiCandidateSlugPrompt,
+			wikiprompts.WikiKnowledgeExtractPrompt,
+			wikiprompts.WikiChunkCitationPrompt,
+			wikiprompts.WikiSummaryPrompt,
 		),
 	}
 }
@@ -2671,7 +2671,7 @@ func (s *wikiIngestService) mapOneDocument(
 			})
 			return
 		}
-		summaryContent, summaryErr = s.generateWithTemplate(summaryCtx, chatModel, agent.WikiSummaryPrompt, map[string]string{
+		summaryContent, summaryErr = s.generateWithTemplate(summaryCtx, chatModel, wikiprompts.WikiSummaryPrompt, map[string]string{
 			"Content":        content,
 			"Language":       lang,
 			"ExtractedSlugs": slugListing,
@@ -3045,7 +3045,7 @@ func (s *wikiIngestService) extractEntitiesAndConceptsNoUpsert(
 
 	result, err := s.generateCombinedExtraction(
 		ctx, chatModel, "legacy combined extraction",
-		agent.WikiKnowledgeExtractPrompt, map[string]string{
+		wikiprompts.WikiKnowledgeExtractPrompt, map[string]string{
 			"Content":       content,
 			"Language":      lang,
 			"PreviousSlugs": prevSlugsText,
@@ -3525,7 +3525,7 @@ func (s *wikiIngestService) reduceSlugUpdates(
 		pageAliases := strings.Join(page.Aliases, ", ")
 
 		var updatedContent string
-		updatedContent, err = s.generateWithTemplate(ctx, chatModel, agent.WikiPageModifyPrompt, map[string]string{
+		updatedContent, err = s.generateWithTemplate(ctx, chatModel, wikiprompts.WikiPageModifyPrompt, map[string]string{
 			"HasAdditions":            hasAdditionsStr,
 			"HasRetractions":          hasRetractionsStr,
 			"PageSlug":                slug,

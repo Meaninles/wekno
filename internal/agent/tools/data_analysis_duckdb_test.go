@@ -65,7 +65,7 @@ func TestTableAnalysisExecuteSingleQueryAllowsCTEUnionAllWithBudget(t *testing.T
 		t.Fatal(err)
 	}
 
-	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent})
 	_, rows, truncated, err := tool.executeSingleQuery(ctx, `
 WITH normalized AS (
 	SELECT category, amount FROM attachment_1
@@ -92,7 +92,7 @@ func TestTableAnalysisExecuteSingleQueryUsesDBQueryStyleLimitBudget(t *testing.T
 		t.Fatal(err)
 	}
 
-	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent})
 	_, rows, truncated, err := tool.executeSingleQuery(ctx, `SELECT id FROM nums ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestTableAnalysisDuckDBValidationAllowsTryCast(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent})
 	validation := tool.validateTableAnalysisSQL(ctx, `SELECT category, TRY_CAST(amount AS INTEGER) AS amount_int FROM attachment_1`, []string{"attachment_1"})
 	if !validation.Valid {
 		t.Fatalf("DuckDB-compatible TRY_CAST should pass table_analysis validation, got %#v", validation.Errors)
@@ -132,7 +132,7 @@ func TestTableAnalysisDuckDBValidationAllowsLLMNormalizedMetricDataset(t *testin
 		t.Fatal(err)
 	}
 
-	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent})
 	validation := tool.validateTableAnalysisSQL(ctx, `SELECT '管理序列' AS seq, 14 AS child_count FROM attachment_1 LIMIT 1`, []string{"attachment_1"})
 	if !validation.Valid {
 		t.Fatalf("LLM-normalized visible metrics should be allowed by SQL validation; source_mapping is enforced at tool-call level, got %#v", validation.Errors)

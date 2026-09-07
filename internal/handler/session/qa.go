@@ -12,44 +12,44 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/usererrors"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // qaRequestContext holds all the common data needed for QA requests
 type qaRequestContext struct {
-	ctx                    context.Context
-	c                      *gin.Context
-	sessionID              string
-	requestID              string
-	receivedAt             time.Time // Wall-clock time the handler started processing the request
-	query                  string
-	session                *types.Session
-	customAgent            *types.CustomAgent
-	assistantMessage       *types.Message
-	knowledgeBaseIDs       []string
-	knowledgeIDs           []string
-	tagScopes              []types.TagScope
-	tagIDs                 []string
-	mcpServiceIDs          []string
-	skillNames             []string
-	professionalSkillNames []string
-	summaryModelID         string
-	webSearchEnabled       bool
-	enableMemory           bool // Whether memory feature is enabled
-	mentionedItems         types.MentionedItems
-	effectiveTenantID      uint64                    // when using shared agent, tenant ID for model/KB/MCP resolution; 0 = use context tenant
-	images                 []ImageAttachment         // Uploaded images with analysis text
-	userMessageID          string                    // Created user message ID (populated after createUserMessage)
-	channel                string                    // Source channel: "web", "api", "im", etc.
-	attachments            types.MessageAttachments  // Processed file attachments
-	originalInputFiles     []types.OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
-	chatQueueTicket        ChatQueueTicket           // Conversation-level model-pool admission lease
+	ctx                       context.Context
+	c                         *gin.Context
+	sessionID                 string
+	requestID                 string
+	receivedAt                time.Time // Wall-clock time the handler started processing the request
+	query                     string
+	session                   *types.Session
+	customAgent               *types.CustomAgent
+	assistantMessage          *types.Message
+	knowledgeBaseIDs          []string
+	knowledgeIDs              []string
+	sessionUploadKnowledgeIDs []string
+	tagScopes                 []types.TagScope
+	tagIDs                    []string
+	mcpServiceIDs             []string
+	skillNames                []string
+	professionalSkillNames    []string
+	summaryModelID            string
+	webSearchEnabled          bool
+	enableMemory              bool // Whether memory feature is enabled
+	mentionedItems            types.MentionedItems
+	effectiveTenantID         uint64                   // when using shared agent, tenant ID for model/KB/MCP resolution; 0 = use context tenant
+	images                    []ImageAttachment        // Uploaded images with analysis text
+	userMessageID             string                   // Created user message ID (populated after createUserMessage)
+	channel                   string                   // Source channel: "web", "api", "im", etc.
+	attachments               types.MessageAttachments // Processed file attachments
+	chatQueueTicket           ChatQueueTicket          // Conversation-level model-pool admission lease
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -83,25 +83,25 @@ func attachmentFileTypeAllowed(fileName string, supportedFileTypes []string) boo
 func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 	imageURLs, imageDescription := extractImageURLsAndOCRText(rc.images)
 	return &types.QARequest{
-		Session:                rc.session,
-		RequestID:              rc.requestID,
-		Query:                  rc.query,
-		AssistantMessageID:     rc.assistantMessage.ID,
-		SummaryModelID:         rc.summaryModelID,
-		CustomAgent:            rc.customAgent,
-		KnowledgeBaseIDs:       rc.knowledgeBaseIDs,
-		KnowledgeIDs:           rc.knowledgeIDs,
-		TagScopes:              rc.tagScopes,
-		MCPServiceIDs:          rc.mcpServiceIDs,
-		SkillNames:             rc.skillNames,
-		ProfessionalSkillNames: append([]string(nil), rc.professionalSkillNames...),
-		ImageURLs:              imageURLs,
-		ImageDescription:       imageDescription,
-		UserMessageID:          rc.userMessageID,
-		WebSearchEnabled:       rc.webSearchEnabled,
-		EnableMemory:           rc.enableMemory,
-		Attachments:            rc.attachments,
-		OriginalInputFiles:     append([]types.OriginalInputFile(nil), rc.originalInputFiles...),
+		Session:                   rc.session,
+		RequestID:                 rc.requestID,
+		Query:                     rc.query,
+		AssistantMessageID:        rc.assistantMessage.ID,
+		SummaryModelID:            rc.summaryModelID,
+		CustomAgent:               rc.customAgent,
+		KnowledgeBaseIDs:          rc.knowledgeBaseIDs,
+		KnowledgeIDs:              rc.knowledgeIDs,
+		SessionUploadKnowledgeIDs: append([]string(nil), rc.sessionUploadKnowledgeIDs...),
+		TagScopes:                 rc.tagScopes,
+		MCPServiceIDs:             rc.mcpServiceIDs,
+		SkillNames:                rc.skillNames,
+		ProfessionalSkillNames:    append([]string(nil), rc.professionalSkillNames...),
+		ImageURLs:                 imageURLs,
+		ImageDescription:          imageDescription,
+		UserMessageID:             rc.userMessageID,
+		WebSearchEnabled:          rc.webSearchEnabled,
+		EnableMemory:              rc.enableMemory,
+		Attachments:               rc.attachments,
 	}
 }
 
@@ -109,13 +109,6 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestContext, *CreateKnowledgeQARequest, error) {
 	receivedAt := time.Now()
 	ctx := logger.CloneContext(c.Request.Context())
-	var originalInputFiles []types.OriginalInputFile
-	keepOriginalInputFiles := false
-	defer func() {
-		if !keepOriginalInputFiles {
-			h.cleanupClaudeOriginalInputFiles(ctx, originalInputFiles)
-		}
-	}()
 	requestID := secutils.SanitizeForLog(c.GetString(types.RequestIDContextKey.String()))
 	logger.Infof(ctx, "[%s] TTFB:start request_id=%s received_at=%d",
 		logPrefix, requestID, receivedAt.UnixMilli())
@@ -187,6 +180,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	// Manual originals are accepted by the session upload endpoint before chat.
 	// The request contains stable handles, never a synchronous document parse.
 	var processedAttachments types.MessageAttachments
+	var sessionUploadKnowledgeIDs []string
 	// Staged sources use the same retrieval and paged tools as knowledge files.
 	if len(request.UploadIDs) > 0 {
 		if h.uploadResolver == nil {
@@ -197,6 +191,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			return nil, nil, errors.NewBadRequestError(err.Error())
 		}
 		processedAttachments = append(processedAttachments, attachments...)
+		sessionUploadKnowledgeIDs = append(sessionUploadKnowledgeIDs, targets...)
 		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, targets...))
 	}
 
@@ -206,6 +201,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			return nil, nil, errors.NewBadRequestError(err.Error())
 		}
 		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, historyTargets...))
+		sessionUploadKnowledgeIDs = append(sessionUploadKnowledgeIDs, historyTargets...)
 	}
 
 	// Resolve enable_memory:
@@ -247,27 +243,26 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			AgentMode:   request.AgentEnabled,
 			Channel:     request.Channel,
 		},
-		knowledgeBaseIDs:       secutils.SanitizeForLogArray(kbIDs),
-		knowledgeIDs:           secutils.SanitizeForLogArray(knowledgeIDs),
-		tagScopes:              tagScopes,
-		tagIDs:                 secutils.SanitizeForLogArray(tagIDs),
-		mcpServiceIDs:          secutils.SanitizeForLogArray(mcpServiceIDs),
-		skillNames:             secutils.SanitizeForLogArray(skillNames),
-		professionalSkillNames: secutils.SanitizeForLogArray(professionalSkillNames),
-		summaryModelID:         secutils.SanitizeForLog(request.SummaryModelID),
-		webSearchEnabled:       request.WebSearchEnabled,
-		enableMemory:           enableMemory,
-		mentionedItems:         convertMentionedItems(request.MentionedItems),
-		effectiveTenantID:      effectiveTenantID,
-		images:                 request.Images,
-		channel:                request.Channel,
-		attachments:            processedAttachments,
-		originalInputFiles:     originalInputFiles,
-		reqAgentEnabled:        request.AgentEnabled,
-		reqAgentID:             request.AgentID,
+		knowledgeBaseIDs:          secutils.SanitizeForLogArray(kbIDs),
+		knowledgeIDs:              secutils.SanitizeForLogArray(knowledgeIDs),
+		tagScopes:                 tagScopes,
+		tagIDs:                    secutils.SanitizeForLogArray(tagIDs),
+		mcpServiceIDs:             secutils.SanitizeForLogArray(mcpServiceIDs),
+		skillNames:                secutils.SanitizeForLogArray(skillNames),
+		professionalSkillNames:    secutils.SanitizeForLogArray(professionalSkillNames),
+		summaryModelID:            secutils.SanitizeForLog(request.SummaryModelID),
+		webSearchEnabled:          request.WebSearchEnabled,
+		enableMemory:              enableMemory,
+		mentionedItems:            convertMentionedItems(request.MentionedItems),
+		effectiveTenantID:         effectiveTenantID,
+		images:                    request.Images,
+		channel:                   request.Channel,
+		attachments:               processedAttachments,
+		sessionUploadKnowledgeIDs: dedupRequestStrings(sessionUploadKnowledgeIDs),
+		reqAgentEnabled:           request.AgentEnabled,
+		reqAgentID:                request.AgentID,
 	}
 
-	keepOriginalInputFiles = true
 	return reqCtx, &request, nil
 }
 
@@ -693,7 +688,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		KnowledgeIDs:     append([]string(nil), reqCtx.knowledgeIDs...),
 	})
 	if rejection != nil || queueErr != nil {
-		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		writeChatQueueRejection(reqCtx.c, rejection, queueErr)
 		return
 	}
@@ -722,7 +716,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			if ticket != nil {
 				ticket.Cancel(context.WithoutCancel(ctx))
 			}
-			h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 			return
 		}
 	}
@@ -733,7 +726,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		if ticket != nil {
 			ticket.Cancel(context.WithoutCancel(ctx))
 		}
-		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
@@ -745,7 +737,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		if ticket != nil {
 			ticket.Cancel(context.WithoutCancel(ctx))
 		}
-		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
@@ -776,135 +767,12 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		streamCtx.eventBus.On(event.EventStop, release)
 	}
 
-	// Normal mode: register completion handler on EventAgentFinalAnswer
-	// (Agent mode handles completion in the defer block instead)
-	if mode == qaModeNormal {
-		var completionHandled bool
-		var quickAnswerHistoryMu sync.Mutex
-
-		// The RAG pipeline emits its query-understanding and retrieval stages as
-		// tool events. Persist the same canonical events that the live SSE client
-		// receives so a history reload does not have to guess whether a knowledge
-		// search happened (or lose its query/result status altogether).
-		streamCtx.eventBus.On(event.EventAgentToolCall, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentToolCallData)
-			if !ok || data.ToolCallID == "" || data.ToolName == "" {
-				return nil
-			}
-			quickAnswerHistoryMu.Lock()
-			recordQuickAnswerToolCall(streamCtx.assistantMessage, data)
-			quickAnswerHistoryMu.Unlock()
-			return nil
-		})
-
-		streamCtx.eventBus.On(event.EventAgentToolResult, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentToolResultData)
-			if !ok || data.ToolName == "" {
-				return nil
-			}
-			quickAnswerHistoryMu.Lock()
-			recordQuickAnswerToolResult(streamCtx.assistantMessage, data)
-			quickAnswerHistoryMu.Unlock()
-			return nil
-		})
-
-		// Persist reasoning_content into agent_steps so historical reload can
-		// reconstruct the thinking card (same shape as Agent-mode steps).
-		// Accumulate on assistantMessage directly so user-initiated stop also
-		// keeps whatever reasoning had streamed before the cancel.
-		streamCtx.eventBus.On(event.EventAgentThought, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentThoughtData)
-			if !ok || data.Content == "" {
-				return nil
-			}
-			quickAnswerHistoryMu.Lock()
-			appendQuickAnswerReasoning(streamCtx.assistantMessage, data.Content)
-			quickAnswerHistoryMu.Unlock()
-			return nil
-		})
-
-		streamCtx.eventBus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentFinalAnswerData)
-			if !ok {
-				return nil
-			}
-			streamCtx.assistantMessage.Content += data.Content
-			if data.IsFallback {
-				streamCtx.assistantMessage.IsFallback = true
-			}
-			if data.Done {
-				if completionHandled {
-					return nil
-				}
-				completionHandled = true
-				// Preserve inspected-source telemetry before final citation
-				// filtering replaces the candidate references with cited-only
-				// references. This path persists before the generic completion
-				// handler runs, so it must set the durable fields here.
-				streamCtx.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
-					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-					sourcerefs.AgentStepsAttemptedRetrieval(streamCtx.assistantMessage.AgentSteps) &&
-						sourcerefs.HasConfiguredEvidenceScope(
-							reqCtx.knowledgeBaseIDs,
-							reqCtx.knowledgeIDs,
-							len(reqCtx.tagScopes),
-							reqCtx.webSearchEnabled,
-							reqCtx.customAgent,
-						),
-				)
-				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
-				_, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
-					streamCtx.assistantMessage.Content,
-					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-				)
-				if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
-					logger.Warnf(streamCtx.asyncCtx,
-						"Knowledge QA observed invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
-						citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
-					)
-				}
-				if citationReport.EvidenceAvailableUncited {
-					logger.Warnf(streamCtx.asyncCtx,
-						"Knowledge QA final answer omitted all current-turn citation handles: available=%d",
-						citationReport.AvailableCount,
-					)
-				}
-				// The exact accumulated SSE text is the production candidate.
-				// Completion-time citation accounting may narrow references, but
-				// must never rewrite the answer stored for history replay.
-				streamCtx.assistantMessage.KnowledgeReferences = types.References(citedRefs)
-				streamCtx.assistantMessage.RetrievalStats.SimpleConversation =
-					len(citedRefs) == 0 && !sourcerefs.HasConfiguredEvidenceScope(
-						reqCtx.knowledgeBaseIDs,
-						reqCtx.knowledgeIDs,
-						len(reqCtx.tagScopes),
-						reqCtx.webSearchEnabled,
-						reqCtx.customAgent,
-					)
-
-				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
-				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
-				quickAnswerHistoryMu.Lock()
-				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx)
-				quickAnswerHistoryMu.Unlock()
-				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
-					Type:      event.EventAgentComplete,
-					SessionID: sessionID,
-					Data: event.AgentCompleteData{
-						FinalAnswer:                 streamCtx.assistantMessage.Content,
-						KnowledgeRefs:               citedRefs,
-						KnowledgeRefsAuthoritative:  true,
-						MessageID:                   streamCtx.assistantMessage.ID,
-						RequestID:                   reqCtx.requestID,
-						TotalDurationMs:             streamCtx.assistantMessage.AgentDurationMs,
-						RetrievalStats:              streamCtx.assistantMessage.RetrievalStats,
-						RetrievalStatsAuthoritative: true,
-					},
-				})
-			}
-			return nil
-		})
-	}
+	// All profiles receive one committed completion from the same runtime.
+	streamCtx.eventBus.On(event.EventAgentComplete, func(ctx context.Context, evt event.Event) error {
+		updateCtx := context.WithValue(context.WithoutCancel(ctx), types.TenantIDContextKey, reqCtx.session.TenantID)
+		h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx)
+		return nil
+	})
 
 	// Execute QA asynchronously
 	go func() {
@@ -930,21 +798,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					},
 				})
 			}
-			// Agent mode: complete the assistant message in defer (normal mode does it via event handler)
-			if mode == qaModeAgent {
-				// Use WithoutCancel so a user-triggered stop (which cancels
-				// asyncCtx) doesn't also cancel the GORM UPDATE that persists
-				// AgentSteps/Content. Without this, cancelled-ctx makes
-				// GORM skip the write and the agent's intermediate steps
-				// (thinking / tool_call history) are lost on page refresh.
-				updateCtx := context.WithValue(
-					context.WithoutCancel(streamCtx.asyncCtx),
-					types.TenantIDContextKey, reqCtx.session.TenantID,
-				)
-				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx)
-				logger.Infof(streamCtx.asyncCtx, "Agent QA service completed for session: %s", sessionID)
-			}
-			h.cleanupClaudeOriginalInputFiles(streamCtx.asyncCtx, reqCtx.originalInputFiles)
 		}()
 
 		if ticket != nil {
@@ -995,9 +848,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			}
 		}
 
-		// Run VLM image analysis if applicable
-		h.runVLMAnalysisIfNeeded(streamCtx, reqCtx, mode)
-
 		// Build QA request and invoke the appropriate service
 		qaReq := reqCtx.buildQARequest()
 
@@ -1008,11 +858,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			serviceErr = h.sessionService.KnowledgeQA(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
 		} else {
 			stageName = "agent_execution"
-			if qaReq.CustomAgent != nil {
-				if runner := agentQARunnerFor(qaReq.CustomAgent.Config.AgentType); runner != nil {
-					stageName = "custom_agent_execution"
-				}
-			}
+
 			serviceErr = RunAgentQA(streamCtx.asyncCtx, h.sessionService, qaReq, streamCtx.eventBus)
 		}
 
@@ -1061,75 +907,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		reqCtx.requestID, streamCtx.eventBus, shouldWaitForTitle)
 }
 
-// runVLMAnalysisIfNeeded runs VLM image analysis within the async goroutine,
-// emitting tool_call/tool_result events so the user can see progress.
-// For normal mode, VLM only runs on the pure-chat path (no KB, no web search);
-// RAG paths defer VLM to the pipeline rewrite step.
-// For agent mode, VLM always runs when images and a VLM model are present.
-func (h *Handler) runVLMAnalysisIfNeeded(streamCtx *sseStreamContext, reqCtx *qaRequestContext, mode qaMode) {
-	if len(reqCtx.images) == 0 || reqCtx.customAgent == nil || reqCtx.customAgent.Config.VLMModelID == "" {
-		return
-	}
-
-	sessionID := reqCtx.sessionID
-
-	// In normal mode, only run VLM for pure-chat path
-	if mode == qaModeNormal {
-		hasRequestKBs := len(reqCtx.knowledgeBaseIDs) > 0 || len(reqCtx.knowledgeIDs) > 0
-		agentWillResolveKBs := false
-		if !hasRequestKBs && reqCtx.customAgent != nil && !reqCtx.customAgent.Config.RetrieveKBOnlyWhenMentioned {
-			switch reqCtx.customAgent.Config.KBSelectionMode {
-			case "all":
-				agentWillResolveKBs = true
-			case "selected", "":
-				agentWillResolveKBs = len(reqCtx.customAgent.Config.KnowledgeBases) > 0
-			case "none":
-				agentWillResolveKBs = false
-			default:
-				agentWillResolveKBs = len(reqCtx.customAgent.Config.KnowledgeBases) > 0
-			}
-		}
-		if hasRequestKBs || agentWillResolveKBs || reqCtx.webSearchEnabled {
-			return // VLM will be handled by the pipeline rewrite step
-		}
-	}
-
-	// Emit VLM tool call/result events
-	toolCallID := uuid.New().String()
-	iteration := 0 // agent mode uses iteration field
-
-	streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
-		Type:      event.EventAgentToolCall,
-		SessionID: sessionID,
-		Data: event.AgentToolCallData{
-			ToolCallID: toolCallID,
-			ToolName:   "image_analysis",
-			Iteration:  iteration,
-		},
-	})
-
-	vlmStart := time.Now()
-	h.analyzeImageAttachments(streamCtx.asyncCtx, reqCtx.images,
-		reqCtx.customAgent.Config.VLMModelID, reqCtx.query)
-
-	outputMsg := "已分析图片内容"
-	if mode == qaModeAgent {
-		outputMsg = "已查看图片内容"
-	}
-	streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
-		Type:      event.EventAgentToolResult,
-		SessionID: sessionID,
-		Data: event.AgentToolResultData{
-			ToolCallID: toolCallID,
-			ToolName:   "image_analysis",
-			Output:     outputMsg,
-			Success:    true,
-			Duration:   time.Since(vlmStart).Milliseconds(),
-			Iteration:  iteration,
-		},
-	})
-}
-
 // persistLastRequestState records the input-bar state the user just sent so
 // that reopening this session restores agent/model/KB/web-search/MCP picks.
 // Pure UI memo — failures are logged but never bubble up; the caller runs
@@ -1170,112 +947,11 @@ func (h *Handler) persistLastRequestState(parentCtx context.Context, reqCtx *qaR
 	}
 }
 
-// appendQuickAnswerReasoning accumulates streamed reasoning_content from
-// KnowledgeQA (fast answer) into a single AgentStep for history replay.
-func appendQuickAnswerReasoning(msg *types.Message, content string) {
-	if content == "" {
-		return
-	}
-	step := ensureQuickAnswerStep(msg, 0)
-	step.ReasoningContent += content
-}
-
-func ensureQuickAnswerStep(msg *types.Message, iteration int) *types.AgentStep {
-	for i := range msg.AgentSteps {
-		if msg.AgentSteps[i].Iteration == iteration {
-			return &msg.AgentSteps[i]
-		}
-	}
-	msg.AgentSteps = append(msg.AgentSteps, types.AgentStep{
-		Iteration: iteration,
-		Timestamp: time.Now(),
-		ToolCalls: make([]types.ToolCall, 0),
-	})
-	return &msg.AgentSteps[len(msg.AgentSteps)-1]
-}
-
-func recordQuickAnswerToolCall(msg *types.Message, data event.AgentToolCallData) {
-	step := ensureQuickAnswerStep(msg, data.Iteration)
-	for i := range step.ToolCalls {
-		if step.ToolCalls[i].ID != data.ToolCallID {
-			continue
-		}
-		step.ToolCalls[i].Name = data.ToolName
-		step.ToolCalls[i].Args = data.Arguments
-		return
-	}
-	step.ToolCalls = append(step.ToolCalls, types.ToolCall{
-		ID:   data.ToolCallID,
-		Name: data.ToolName,
-		Args: data.Arguments,
-	})
-}
-
-func recordQuickAnswerToolResult(msg *types.Message, data event.AgentToolResultData) {
-	step := ensureQuickAnswerStep(msg, data.Iteration)
-	toolIndex := -1
-	for i := range step.ToolCalls {
-		if data.ToolCallID != "" && step.ToolCalls[i].ID == data.ToolCallID {
-			toolIndex = i
-			break
-		}
-	}
-	if toolIndex < 0 {
-		step.ToolCalls = append(step.ToolCalls, types.ToolCall{
-			ID:   data.ToolCallID,
-			Name: data.ToolName,
-			Args: map[string]interface{}{},
-		})
-		toolIndex = len(step.ToolCalls) - 1
-	}
-
-	toolCall := &step.ToolCalls[toolIndex]
-	if toolCall.Name == "" {
-		toolCall.Name = data.ToolName
-	}
-	toolCall.Duration = data.Duration
-	toolCall.Result = &types.ToolResult{
-		Success: data.Success,
-		Output:  data.Output,
-		Data:    data.Data,
-		Error:   data.Error,
-	}
-}
-
 func userFacingAgentErrorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	raw := strings.TrimSpace(err.Error())
-	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "max_turn") ||
-		strings.Contains(lower, "max turns") ||
-		strings.Contains(lower, "maxturns") ||
-		strings.Contains(lower, "turncount") {
-		return "任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数"
-	}
-	if lower == "eof" ||
-		strings.Contains(lower, "unexpected eof") ||
-		strings.Contains(lower, "connection reset") ||
-		strings.Contains(lower, "connection refused") ||
-		strings.Contains(lower, "broken pipe") ||
-		strings.Contains(lower, "server disconnected") ||
-		strings.Contains(lower, "stream ended without result") ||
-		strings.Contains(lower, "general agent stream failed: status=502") ||
-		strings.Contains(lower, "general agent stream failed: status=503") ||
-		strings.Contains(lower, "general agent stream failed: status=504") {
-		return "智能体服务连接中断，请稍后重试"
-	}
-	if strings.Contains(lower, "timeout") ||
-		strings.Contains(lower, "timed out") ||
-		strings.Contains(lower, "deadline exceeded") ||
-		strings.Contains(lower, "api_timeout_ms") {
-		return "任务耗时过长，请将任务拆分为具体子任务逐个执行，或提高智能体LLM调用超时时间"
-	}
-	if strings.Contains(lower, "content block is not a text block") {
-		return "模型服务返回了不兼容的响应格式，请重试或切换模型"
-	}
-	return raw
+	return usererrors.Message(err.Error())
 }
 
 // completeAssistantMessage marks an assistant message as complete, updates it,

@@ -205,7 +205,7 @@ func newKBManagerWorkflowService(t *testing.T, nextStatus string) (*Service, *kb
 		TenantID: 1,
 		Name:     "manager",
 		Config: types.CustomAgentConfig{
-			AgentMode:       types.AgentModeSmartReasoning,
+			AgentMode:       types.AgentModeUnified,
 			AgentType:       types.AgentTypeKnowledgeBaseManager,
 			KBSelectionMode: "selected",
 			KnowledgeBases:  []string{"kb-a"},

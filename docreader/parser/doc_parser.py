@@ -138,7 +138,11 @@ class DocParser(Docx2Parser):
 
         logger.info("Successfully converted DOC to DOCX, using DocxParser")
         # Use existing DocxParser to parse the converted docx
-        document = super(Docx2Parser, self).parse_into_text(docx_content)
+        # Conversion changes the byte format. Passing the original .doc hint
+        # to MarkItDown can silently flatten table cells into e.g. "A312B28".
+        document = Docx2Parser(
+            file_name=Path(self.file_name).stem + ".docx", file_type="docx"
+        ).parse_into_text(docx_content)
         logger.info(f"Extracted {len(document.content)} characters using DocxParser")
         return document
 

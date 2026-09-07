@@ -306,7 +306,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { getCurrentUser } from '@/api/auth'
-import { listAgents, BUILTIN_SMART_REASONING_ID, type CustomAgent } from '@/api/agent'
+import { listAgents, BUILTIN_KNOWLEDGE_QA_ID, type CustomAgent } from '@/api/agent'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import {
   createAPIPrincipalTestToken,
@@ -491,7 +491,7 @@ const requestExample = computed(() => {
     principalHeaders.push(`  -H "${tokenHeaderName.value}: ${t('integrations.api.requestExampleJwtPlaceholder')}"`)
   }
   const commonHeaders = [apiKeyHeader, contentType, ...principalHeaders].join(' \\\n')
-  const agentID = playground.agent_id || BUILTIN_SMART_REASONING_ID
+  const agentID = playground.agent_id || BUILTIN_KNOWLEDGE_QA_ID
 
   const lines: string[] = []
   if (form.mode === 'signed_token') {
@@ -577,8 +577,8 @@ async function loadAgents() {
 
 function ensurePlaygroundAgent() {
   if (playground.agent_id && agents.value.some((agent) => agent.id === playground.agent_id)) return
-  const smartReasoning = agents.value.find((agent) => agent.id === BUILTIN_SMART_REASONING_ID)
-  playground.agent_id = smartReasoning?.id || agents.value[0]?.id || ''
+  const knowledgeQA = agents.value.find((agent) => agent.id === BUILTIN_KNOWLEDGE_QA_ID)
+  playground.agent_id = knowledgeQA?.id || agents.value[0]?.id || ''
 }
 
 function openPlaygroundDrawer() {

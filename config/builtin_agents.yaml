@@ -1,532 +1,454 @@
-# Built-in Agent Configuration with i18n support
-# Each agent has localized name, description, avatar, and config overrides per language.
-# The "default" locale is used as fallback when the user's language is not found.
-
 builtin_agents:
-  - id: "builtin-quick-answer"
-    avatar: ""
-    is_builtin: true
-    i18n:
-      default:
-        name: "Quick Answer"
-        description: "Knowledge base RAG Q&A for fast and accurate answers"
-      zh-CN:
-        name: "快速问答"
-        description: "基于知识库的 RAG 问答，快速准确地回答问题"
-      zh-TW:
-        name: "快速問答"
-        description: "基於知識庫的 RAG 問答，快速準確地回答問題"
-      ja-JP:
-        name: "クイック回答"
-        description: "ナレッジベース RAG Q&A による迅速で正確な回答"
-      ko-KR:
-        name: "빠른 답변"
-        description: "지식 베이스 RAG Q&A를 통한 빠르고 정확한 답변"
-    config:
-      agent_mode: "quick-answer"
-      system_prompt_id: "default_kb"
-      max_iterations: 10
-      # Retrieval and tool orchestration do not replace model reasoning.
-      # The model adapter maps this through its declared provider capability.
-      thinking: true
-      context_template_id: "default_context"
-      # Factual answers should be stable across repeated runs. Retrieval and
-      # answer selection remain semantic/model-owned; lower sampling only
-      # reduces evidence-external variation.
-      temperature: 0.0
-      # Leave enough provider output room for a complete compound answer.
-      max_completion_tokens: 8192
-      web_search_enabled: false
-      web_search_max_results: 5
-      multi_turn_enabled: true
-      history_turns: 5
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      faq_priority_enabled: true
-      faq_direct_answer_threshold: 0.9
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      # Retain broader same-call evidence coverage for compound document questions.
-      # This changes neither tool-call count nor retrieval routing.
-      rerank_top_k: 8
-      rerank_threshold: 0.3
-      enable_query_expansion: true
-      enable_rewrite: true
-      fallback_strategy: "model"
-
-  - id: "builtin-simple-chat"
-    avatar: "💬"
-    is_builtin: true
-    i18n:
-      default:
-        name: "Simple Chat"
-        description: "General chat with web search and file upload support, without default knowledge base scope"
-      zh-CN:
-        name: "简单对话"
-        description: "不默认绑定知识库，支持网络搜索与上传文件、图片、语音的通用对话"
-      zh-TW:
-        name: "簡單對話"
-        description: "不預設綁定知識庫，支援網路搜尋與上傳文件、圖片、語音的一般對話"
-      ja-JP:
-        name: "シンプルチャット"
-        description: "既定のナレッジベースを使わず、Web検索とファイル・画像・音声アップロードに対応した汎用チャット"
-      ko-KR:
-        name: "간단한 대화"
-        description: "기본 지식 베이스 범위 없이 웹 검색과 파일, 이미지, 음성 업로드를 지원하는 일반 대화"
-    config:
-      agent_mode: "quick-answer"
-      system_prompt_id: "simple_chat"
-      thinking: true
-      context_template_id: "default_context"
-      temperature: 0.7
-      max_completion_tokens: 4096
-      max_iterations: 10
-      web_search_enabled: false
-      web_search_max_results: 5
-      multi_turn_enabled: true
-      history_turns: 5
-      kb_selection_mode: "none"
-      retrieve_kb_only_when_mentioned: false
-      faq_priority_enabled: true
-      faq_direct_answer_threshold: 0.9
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      # Retain broader same-call evidence coverage for compound document questions.
-      # This changes neither tool-call count nor retrieval routing.
-      rerank_top_k: 5
-      rerank_threshold: 0.3
-      enable_query_expansion: true
-      enable_rewrite: true
-      fallback_strategy: "model"
-      image_upload_enabled: true
-      audio_upload_enabled: true
-      supported_file_types: []
-
-  - id: "builtin-smart-reasoning"
-    avatar: ""
-    is_builtin: true
-    i18n:
-      default:
-        name: "Smart Reasoning"
-        description: "ReAct reasoning framework with multi-step thinking and tool calling"
-      zh-CN:
-        name: "智能推理"
-        description: "ReAct 推理框架，支持多步思考与工具调用"
-      zh-TW:
-        name: "智能推理"
-        description: "ReAct 推理框架，支援多步思考與工具呼叫"
-      ja-JP:
-        name: "スマート推論"
-        description: "ReAct 推論フレームワーク、マルチステップ思考とツール呼び出し対応"
-      ko-KR:
-        name: "스마트 추론"
-        description: "ReAct 추론 프레임워크, 다단계 사고 및 도구 호출 지원"
-    config:
-      agent_mode: "smart-reasoning"
-      agent_type: "rag-qa"
-      system_prompt_id: "progressive_rag_agent"
-      thinking: true
-      # Factual RAG synthesis should be deterministic. Tool choice and retrieval
-      # remain model-owned; lower sampling only reduces evidence-external prose.
-      temperature: 0.0
-      # DeepSeek reasoning and the visible answer share the output budget.
-      max_completion_tokens: 8192
-      max_iterations: 50
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      allowed_tools:
-        - "knowledge_search"
-        - "grep_chunks"
-        - "list_knowledge_chunks"
-        - "query_knowledge_graph"
-        - "get_document_info"
-      web_search_enabled: false
-      web_search_max_results: 5
-      multi_turn_enabled: true
-      history_turns: 10
-      faq_priority_enabled: true
-      faq_direct_answer_threshold: 0.9
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      # Retain broader same-call evidence coverage for compound document questions.
-      # This changes neither tool-call count nor retrieval routing.
-      rerank_top_k: 8
-      rerank_threshold: 0.3
-
-  - id: "builtin-data-analyst"
-    avatar: "🗄️"
-    is_builtin: true
-    i18n:
-      default:
-        name: "Data Analyst"
-        description: "General-agent runtime data analysis agent for bound MySQL/PostgreSQL sources with SQL and optional structured charts"
-      zh-CN:
-        name: "数据分析"
-        description: "数据分析智能体，支持绑定 MySQL/PostgreSQL 数据源并使用 SQL 分析数据，可按用户要求生成结构化图表"
-      zh-TW:
-        name: "數據分析"
-        description: "數據分析智能體，支援綁定 MySQL/PostgreSQL 資料來源並使用 SQL 分析資料，可按使用者要求生成結構化圖表"
-      ja-JP:
-        name: "データアナリスト"
-        description: "MySQL/PostgreSQL データソースをバインドして SQL 分析し、必要に応じて構造化チャートを生成するデータ分析エージェント"
-      ko-KR:
-        name: "데이터 분석가"
-        description: "MySQL/PostgreSQL 데이터 소스를 바인딩하고 SQL로 분석하며 요청 시 구조화 차트를 생성하는 데이터 분석 에이전트"
-    config:
-      agent_mode: "smart-reasoning"
-      agent_type: "data-analysis"
-      system_prompt_id: "data_analyst"
-      thinking: true
-      temperature: 0.2
-      max_completion_tokens: 8192
-      max_iterations: 100
-      llm_call_timeout: 600
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      db_data_sources: []
-      allowed_tools:
-        - "thinking"
-        - "todo_write"
-        - "db_catalog"
-        - "db_schema"
-        - "db_query"
-        - "grep_chunks"
-        - "knowledge_search"
-        - "list_knowledge_chunks"
-        - "query_knowledge_graph"
-        - "get_document_info"
-        - "database_query"
-      web_search_enabled: false
-      web_search_max_results: 0
-      web_fetch_enabled: true
-      web_fetch_top_n: 3
-      reflection_enabled: true
-      multi_turn_enabled: true
-      history_turns: 10
-      embedding_top_k: 5
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      rerank_top_k: 5
-      rerank_threshold: 0.3
-
-  - id: "builtin-table-analyst"
-    avatar: "📊"
-    is_builtin: true
-    i18n:
-      default:
-        name: "Table Analyst"
-        description: "CSV/Excel table analysis agent with DuckDB SQL and optional structured charts"
-      zh-CN:
-        name: "表格分析"
-        description: "支持从知识库或上传的 CSV/Excel 文件中选择表格，使用 DuckDB SQL 分析并按需生成结构化图表"
-      zh-TW:
-        name: "表格分析"
-        description: "支援從知識庫或上傳的 CSV/Excel 文件中選擇表格，使用 DuckDB SQL 分析並按需生成結構化圖表"
-      ja-JP:
-        name: "テーブル分析"
-        description: "ナレッジベースまたはアップロードされた CSV/Excel を DuckDB SQL で分析し、必要に応じて構造化チャートを生成するエージェント"
-      ko-KR:
-        name: "표 분석"
-        description: "지식 베이스 또는 업로드한 CSV/Excel 파일을 DuckDB SQL로 분석하고 요청 시 구조화 차트를 생성하는 에이전트"
-    config:
-      agent_mode: "smart-reasoning"
-      agent_type: "table-analysis"
-      system_prompt_id: "table_analyst"
-      thinking: true
-      temperature: 0.2
-      max_completion_tokens: 8192
-      max_iterations: 100
-      llm_call_timeout: 600
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      supported_file_types:
-        - "csv"
-        - "xlsx"
-        - "xls"
-      allowed_tools:
-        - "thinking"
-        - "todo_write"
-        - "grep_chunks"
-        - "knowledge_search"
-        - "list_knowledge_chunks"
-        - "query_knowledge_graph"
-        - "get_document_info"
-        - "table_schema"
-        - "table_analysis"
-      web_search_enabled: false
-      web_search_max_results: 0
-      web_fetch_enabled: true
-      web_fetch_top_n: 3
-      reflection_enabled: true
-      multi_turn_enabled: true
-      history_turns: 10
-      faq_priority_enabled: false
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      rerank_top_k: 5
-      rerank_threshold: 0.3
-
-  - id: "builtin-general-agent"
-    avatar: "🧠"
-    is_builtin: true
-    i18n:
-      default:
-        name: "General Agent"
-        description: "General-purpose agent that reuses WeKnora retrieval, tools, MCP, Skills and database sources"
-      zh-CN:
-        name: "通用智能体"
-        description: "通用智能体，通常不单独使用，建议配合一个或多个专业Skill使用。可复用 WeKnora 检索、工具、MCP、Skills 和数据库数据源。"
-      zh-TW:
-        name: "通用智能體"
-        description: "通用智能體，復用 WeKnora 檢索、工具、MCP、Skills 和資料庫來源"
-      ja-JP:
-        name: "汎用エージェント"
-        description: "WeKnora の検索、ツール、MCP、Skills、データベースソースを再利用する汎用エージェント"
-      ko-KR:
-        name: "범용 에이전트"
-        description: "WeKnora 검색, 도구, MCP, Skills 및 데이터베이스 소스를 재사용하는 범용 에이전트"
-    config:
-      agent_mode: "smart-reasoning"
-      agent_type: "general-agent"
-      system_prompt_id: "general_claude_agent"
-      thinking: true
-      temperature: 0.0
-      max_completion_tokens: 8192
-      max_iterations: 18
-      llm_call_timeout: 600
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      db_data_sources: []
-      professional_skills_selection_mode: "selected"
-      selected_professional_skills:
-        - "anysearch-skill"
-        - "find-skill-skillhub"
-      allowed_tools:
-        - "knowledge_search"
-        - "grep_chunks"
-        - "list_knowledge_chunks"
-        - "get_document_info"
-        - "query_knowledge_graph"
-        - "wiki_search"
-        - "wiki_read_page"
-        - "wiki_read_source_doc"
-        - "data_schema"
-        - "data_analysis"
-        - "db_catalog"
-        - "db_schema"
-        - "db_query"
-      web_search_enabled: false
-      web_search_max_results: 5
-      claude_sdk_web_search_enabled: true
-      web_fetch_enabled: true
-      web_fetch_top_n: 3
-      enable_artifacts: true
-      multi_turn_enabled: true
-      history_turns: 10
-      retain_retrieval_history: true
-      faq_priority_enabled: true
-      faq_direct_answer_threshold: 0.9
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      # Retain broader same-call evidence coverage for compound document questions.
-      # This changes neither tool-call count nor retrieval routing.
-      rerank_top_k: 8
-      rerank_threshold: 0.3
-
-  - id: "builtin-document-processing"
-    avatar: "📄"
-    is_builtin: true
-    i18n:
-      default:
-        name: "Document Processing"
-        description: "Document-processing agent that creates or modifies Word, Excel, PDF and PPT files directly"
-      zh-CN:
-        name: "文档处理"
-        description: "文档处理智能体，直接生成或修改 Word / Excel / PDF / PPT 文档"
-      zh-TW:
-        name: "文件處理"
-        description: "文件處理智能體，直接生成或修改 Word / Excel / PDF / PPT 文件"
-      ja-JP:
-        name: "ドキュメント処理"
-        description: "Word / Excel / PDF / PPT を直接作成または編集するドキュメント処理エージェント"
-      ko-KR:
-        name: "문서 처리"
-        description: "Word / Excel / PDF / PPT 문서를 직접 생성하거나 수정하는 문서 처리 에이전트"
-    config:
-      agent_mode: "smart-reasoning"
-      agent_type: "document-processing-agent"
-      system_prompt_id: "document_claude_agent"
-      thinking: true
-      document_template:
-        word:
-          requirement_file:
-            source: "builtin"
-            builtin_id: "gbt9704_2012_word_requirement"
-            file_name: "GB_T_9704_2012_党政机关公文格式_Word模板要求.md"
-            file_type: "md"
-          template_files: []
-        excel:
-          requirement_file:
-            source: "builtin"
-            builtin_id: "gbt9704_2012_excel_requirement"
-            file_name: "GB_T_9704_2012_党政机关公文格式_Excel模板要求.md"
-            file_type: "md"
-          template_files: []
-        pdf:
-          requirement_file:
-            source: "builtin"
-            builtin_id: "gbt9704_2012_pdf_requirement"
-            file_name: "GB_T_9704_2012_党政机关公文格式_PDF模板要求.md"
-            file_type: "md"
-          template_files: []
-        ppt:
-          requirement_file:
-            source: "builtin"
-            builtin_id: "gbt9704_2012_ppt_requirement"
-            file_name: "GB_T_9704_2012_党政机关公文格式_PPT模板要求.md"
-            file_type: "md"
-          template_files: []
-      professional_skills_selection_mode: "selected"
-      selected_professional_skills:
-        - "anysearch-skill"
-        - "find-skill-skillhub"
-      temperature: 0.4
-      max_completion_tokens: 8192
-      max_iterations: 100
-      llm_call_timeout: 600
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      db_data_sources: []
-      allowed_tools:
-        - "thinking"
-        - "todo_write"
-        - "knowledge_search"
-        - "grep_chunks"
-        - "list_knowledge_chunks"
-        - "get_document_info"
-        - "query_knowledge_graph"
-        - "wiki_search"
-        - "wiki_read_page"
-        - "wiki_read_source_doc"
-        - "data_schema"
-        - "data_analysis"
-        - "db_catalog"
-        - "db_schema"
-        - "db_query"
-      web_search_enabled: false
-      web_search_max_results: 5
-      claude_sdk_web_search_enabled: true
-      web_fetch_enabled: true
-      web_fetch_top_n: 3
-      enable_artifacts: true
-      multi_turn_enabled: true
-      history_turns: 10
-      retain_retrieval_history: true
-      faq_priority_enabled: true
-      faq_direct_answer_threshold: 0.9
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      rerank_top_k: 5
-      rerank_threshold: 0.3
-
-  - id: "builtin-wiki-researcher"
-    avatar: "📚"
-    is_builtin: true
-    i18n:
-      default:
-        name: "Wiki Questioner"
-        description: "Specialized agent for answering questions based on Wiki knowledge bases"
-      zh-CN:
-        name: "维基问答"
-        description: "专注于在 Wiki 知识库中回答问题的智能体"
-      zh-TW:
-        name: "維基問答"
-        description: "專注於在 Wiki 知識庫中回答問題的智能體"
-      ja-JP:
-        name: "Wiki 問答"
-        description: "Wikiナレッジベースでの回答問題に特化したエージェント"
-      ko-KR:
-        name: "위키 질문"
-        description: "위키 지식 베이스에서 답변하는 데 특화된 에이전트"
-    config:
-      agent_mode: "smart-reasoning"
-      agent_type: "wiki-qa"
-      system_prompt_id: "wiki_researcher"
-      thinking: true
-      temperature: 0.7
-      max_completion_tokens: 4096
-      max_iterations: 30
-      kb_selection_mode: "all"
-      retrieve_kb_only_when_mentioned: false
-      allowed_tools:
-        - "wiki_search"
-        - "wiki_read_page"
-        - "wiki_read_source_doc"
-        - "wiki_flag_issue"
-      web_search_enabled: false
-      web_search_max_results: 0
-      reflection_enabled: false
-      multi_turn_enabled: true
-      history_turns: 10
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      rerank_top_k: 5
-      rerank_threshold: 0.3
-
-  - id: "builtin-wiki-fixer"
-    avatar: "🔧"
-    is_builtin: true
-    i18n:
-      default:
-        name: "Wiki Fixer"
-        description: "Specialized agent for revising Wiki pages based on inspection issues"
-      zh-CN:
-        name: "维基修订"
-        description: "专门用于根据巡检问题修订 Wiki 页面的智能体"
-      zh-TW:
-        name: "維基修訂"
-        description: "專門用於根據巡檢問題修訂 Wiki 頁面的智能體"
-      ja-JP:
-        name: "Wiki 修訂"
-        description: "検査の問題に基づいてWikiページを修復および最適化するための専用エージェント"
-      ko-KR:
-        name: "위키 수정"
-        description: "검사 문제를 기반으로 Wiki 페이지를 修復하고 最適化하는 전용 에이전트"
-    config:
-      agent_type: "custom"
-      agent_mode: "smart-reasoning"
-      system_prompt_id: "wiki_fixer"
-      thinking: false
-      temperature: 0.7
-      max_completion_tokens: 2048
-      max_iterations: 10
-      kb_selection_mode: "selected"
-      retrieve_kb_only_when_mentioned: false
-      retain_retrieval_history: true
-      allowed_tools:
-        - "wiki_search"
-        - "wiki_read_page"
-        - "wiki_read_source_doc"
-        - "wiki_write_page"
-        - "wiki_replace_text"
-        - "wiki_rename_page"
-        - "wiki_delete_page"
-        - "wiki_read_issue"
-        - "wiki_update_issue"
-      web_search_enabled: false
-      web_search_max_results: 0
-      multi_turn_enabled: true
-      history_turns: 10
-      embedding_top_k: 10
-      keyword_threshold: 0.3
-      vector_threshold: 0.5
-      rerank_top_k: 5
-      rerank_threshold: 0.3
-
+- id: builtin-simple-chat
+  avatar: 💬
+  is_builtin: true
+  i18n:
+    default:
+      name: Simple Chat
+      description: General chat with web search and file upload support, without default knowledge base scope
+    zh-CN:
+      name: 简单对话
+      description: 不默认绑定知识库，支持网络搜索与上传文件、图片、语音的通用对话
+    zh-TW:
+      name: 簡單對話
+      description: 不預設綁定知識庫，支援網路搜尋與上傳文件、圖片、語音的一般對話
+    ja-JP:
+      name: シンプルチャット
+      description: 既定のナレッジベースを使わず、Web検索とファイル・画像・音声アップロードに対応した汎用チャット
+    ko-KR:
+      name: 간단한 대화
+      description: 기본 지식 베이스 범위 없이 웹 검색과 파일, 이미지, 음성 업로드를 지원하는 일반 대화
+  config:
+    agent_mode: agent
+    system_prompt_id: simple_chat
+    thinking: true
+    temperature: 0.7
+    max_completion_tokens: 16384
+    max_iterations: 50
+    web_search_enabled: false
+    web_search_max_results: 5
+    multi_turn_enabled: true
+    history_turns: 5
+    kb_selection_mode: none
+    retrieve_kb_only_when_mentioned: false
+    faq_priority_enabled: true
+    faq_direct_answer_threshold: 0.9
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 5
+    rerank_threshold: 0.3
+    image_upload_enabled: true
+    audio_upload_enabled: true
+    supported_file_types: []
+    agent_type: custom
+- id: builtin-knowledge-qa
+  avatar: ''
+  is_builtin: true
+  i18n:
+    default:
+      name: Knowledge Q&A
+      description: Concise, evidence-based answers with source citations.
+    zh-CN:
+      name: 知识问答
+      description: 基于可靠资料，简洁明确地回答问题，提供必要依据与引用。
+    zh-TW:
+      name: 知識問答
+      description: 基于可靠资料，简洁明确地回答问题，提供必要依据与引用。
+    ja-JP:
+      name: ナレッジ問答
+      description: Concise, evidence-based answers with source citations.
+    ko-KR:
+      name: 지식 질의응답
+      description: Concise, evidence-based answers with source citations.
+  config:
+    agent_mode: agent
+    agent_type: knowledge-qa
+    system_prompt_id: progressive_rag_agent
+    thinking: true
+    temperature: 0.0
+    max_completion_tokens: 16384
+    max_iterations: 15
+    kb_selection_mode: all
+    retrieve_kb_only_when_mentioned: false
+    allowed_tools:
+    - knowledge_search
+    - grep_chunks
+    - list_knowledge_chunks
+    - query_knowledge_graph
+    - get_document_info
+    web_search_enabled: false
+    web_search_max_results: 5
+    multi_turn_enabled: true
+    history_turns: 10
+    faq_priority_enabled: true
+    faq_direct_answer_threshold: 0.9
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 8
+    rerank_threshold: 0.3
+- id: builtin-data-analyst
+  avatar: 🗄️
+  is_builtin: true
+  i18n:
+    default:
+      name: Data Analyst
+      description: General-agent runtime data analysis agent for bound MySQL/PostgreSQL sources with SQL and optional structured
+        charts
+    zh-CN:
+      name: 数据分析
+      description: 数据分析智能体，支持绑定 MySQL/PostgreSQL 数据源并使用 SQL 分析数据，可按用户要求生成结构化图表
+    zh-TW:
+      name: 數據分析
+      description: 數據分析智能體，支援綁定 MySQL/PostgreSQL 資料來源並使用 SQL 分析資料，可按使用者要求生成結構化圖表
+    ja-JP:
+      name: データアナリスト
+      description: MySQL/PostgreSQL データソースをバインドして SQL 分析し、必要に応じて構造化チャートを生成するデータ分析エージェント
+    ko-KR:
+      name: 데이터 분석가
+      description: MySQL/PostgreSQL 데이터 소스를 바인딩하고 SQL로 분석하며 요청 시 구조화 차트를 생성하는 데이터 분석 에이전트
+  config:
+    agent_mode: agent
+    agent_type: data-analysis
+    system_prompt_id: data_analyst
+    thinking: true
+    temperature: 0.2
+    max_completion_tokens: 16384
+    max_iterations: 50
+    llm_call_timeout: 600
+    kb_selection_mode: all
+    retrieve_kb_only_when_mentioned: false
+    db_data_sources: []
+    allowed_tools:
+    - thinking
+    - todo_write
+    - db_catalog
+    - db_schema
+    - db_query
+    - grep_chunks
+    - knowledge_search
+    - list_knowledge_chunks
+    - query_knowledge_graph
+    - get_document_info
+    - database_query
+    web_search_enabled: false
+    web_search_max_results: 0
+    web_fetch_enabled: true
+    web_fetch_top_n: 3
+    multi_turn_enabled: true
+    history_turns: 10
+    embedding_top_k: 5
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 5
+    rerank_threshold: 0.3
+    enable_artifacts: true
+- id: builtin-table-analyst
+  avatar: 📊
+  is_builtin: true
+  i18n:
+    default:
+      name: Table Analyst
+      description: CSV/Excel table analysis agent with DuckDB SQL and optional structured charts
+    zh-CN:
+      name: 表格分析
+      description: 支持从知识库或上传的 CSV/Excel 文件中选择表格，使用 DuckDB SQL 分析并按需生成结构化图表
+    zh-TW:
+      name: 表格分析
+      description: 支援從知識庫或上傳的 CSV/Excel 文件中選擇表格，使用 DuckDB SQL 分析並按需生成結構化圖表
+    ja-JP:
+      name: テーブル分析
+      description: ナレッジベースまたはアップロードされた CSV/Excel を DuckDB SQL で分析し、必要に応じて構造化チャートを生成するエージェント
+    ko-KR:
+      name: 표 분석
+      description: 지식 베이스 또는 업로드한 CSV/Excel 파일을 DuckDB SQL로 분석하고 요청 시 구조화 차트를 생성하는 에이전트
+  config:
+    agent_mode: agent
+    agent_type: table-analysis
+    system_prompt_id: table_analyst
+    thinking: true
+    temperature: 0.2
+    max_completion_tokens: 16384
+    max_iterations: 50
+    llm_call_timeout: 600
+    kb_selection_mode: all
+    retrieve_kb_only_when_mentioned: false
+    supported_file_types:
+    - csv
+    - xlsx
+    - xls
+    allowed_tools:
+    - thinking
+    - todo_write
+    - grep_chunks
+    - knowledge_search
+    - list_knowledge_chunks
+    - query_knowledge_graph
+    - get_document_info
+    - table_schema
+    - table_analysis
+    web_search_enabled: false
+    web_search_max_results: 0
+    web_fetch_enabled: true
+    web_fetch_top_n: 3
+    multi_turn_enabled: true
+    history_turns: 10
+    faq_priority_enabled: false
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 5
+    rerank_threshold: 0.3
+    enable_artifacts: true
+- id: builtin-general-agent
+  avatar: 🧠
+  is_builtin: true
+  i18n:
+    default:
+      name: General Agent
+      description: General-purpose agent that reuses WeKnora retrieval, tools, MCP, Skills and database sources
+    zh-CN:
+      name: 通用智能体
+      description: 通用智能体，通常不单独使用，建议配合一个或多个专业Skill使用。可复用 WeKnora 检索、工具、MCP、Skills 和数据库数据源。
+    zh-TW:
+      name: 通用智能體
+      description: 通用智能體，復用 WeKnora 檢索、工具、MCP、Skills 和資料庫來源
+    ja-JP:
+      name: 汎用エージェント
+      description: WeKnora の検索、ツール、MCP、Skills、データベースソースを再利用する汎用エージェント
+    ko-KR:
+      name: 범용 에이전트
+      description: WeKnora 검색, 도구, MCP, Skills 및 데이터베이스 소스를 재사용하는 범용 에이전트
+  config:
+    agent_mode: agent
+    agent_type: general-agent
+    system_prompt_id: general_agent
+    thinking: true
+    temperature: 0.0
+    max_completion_tokens: 16384
+    max_iterations: 50
+    llm_call_timeout: 600
+    kb_selection_mode: all
+    retrieve_kb_only_when_mentioned: false
+    db_data_sources: []
+    professional_skills_selection_mode: selected
+    selected_professional_skills:
+    - anysearch-skill
+    - find-skill-skillhub
+    allowed_tools:
+    - knowledge_search
+    - grep_chunks
+    - list_knowledge_chunks
+    - get_document_info
+    - query_knowledge_graph
+    - wiki_search
+    - wiki_read_page
+    - wiki_read_source_doc
+    - data_schema
+    - data_analysis
+    - db_catalog
+    - db_schema
+    - db_query
+    web_search_enabled: false
+    web_search_max_results: 5
+    web_fetch_enabled: true
+    web_fetch_top_n: 3
+    enable_artifacts: true
+    multi_turn_enabled: true
+    history_turns: 10
+    retain_retrieval_history: true
+    faq_priority_enabled: true
+    faq_direct_answer_threshold: 0.9
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 8
+    rerank_threshold: 0.3
+- id: builtin-document-processing
+  avatar: 📄
+  is_builtin: true
+  i18n:
+    default:
+      name: Document Processing
+      description: Document-processing agent that creates or modifies Word, Excel, PDF and PPT files directly
+    zh-CN:
+      name: 文档处理
+      description: 文档处理智能体，直接生成或修改 Word / Excel / PDF / PPT 文档
+    zh-TW:
+      name: 文件處理
+      description: 文件處理智能體，直接生成或修改 Word / Excel / PDF / PPT 文件
+    ja-JP:
+      name: ドキュメント処理
+      description: Word / Excel / PDF / PPT を直接作成または編集するドキュメント処理エージェント
+    ko-KR:
+      name: 문서 처리
+      description: Word / Excel / PDF / PPT 문서를 직접 생성하거나 수정하는 문서 처리 에이전트
+  config:
+    agent_mode: agent
+    agent_type: document-processing-agent
+    system_prompt_id: document_agent
+    thinking: true
+    document_template:
+      word:
+        requirement_file:
+          source: builtin
+          builtin_id: gbt9704_2012_word_requirement
+          file_name: GB_T_9704_2012_党政机关公文格式_Word模板要求.md
+          file_type: md
+        template_files: []
+      excel:
+        requirement_file:
+          source: builtin
+          builtin_id: gbt9704_2012_excel_requirement
+          file_name: GB_T_9704_2012_党政机关公文格式_Excel模板要求.md
+          file_type: md
+        template_files: []
+      pdf:
+        requirement_file:
+          source: builtin
+          builtin_id: gbt9704_2012_pdf_requirement
+          file_name: GB_T_9704_2012_党政机关公文格式_PDF模板要求.md
+          file_type: md
+        template_files: []
+      ppt:
+        requirement_file:
+          source: builtin
+          builtin_id: gbt9704_2012_ppt_requirement
+          file_name: GB_T_9704_2012_党政机关公文格式_PPT模板要求.md
+          file_type: md
+        template_files: []
+    professional_skills_selection_mode: selected
+    selected_professional_skills:
+    - anysearch-skill
+    - find-skill-skillhub
+    temperature: 0.4
+    max_completion_tokens: 16384
+    max_iterations: 50
+    llm_call_timeout: 600
+    kb_selection_mode: all
+    retrieve_kb_only_when_mentioned: false
+    db_data_sources: []
+    allowed_tools:
+    - thinking
+    - todo_write
+    - knowledge_search
+    - grep_chunks
+    - list_knowledge_chunks
+    - get_document_info
+    - query_knowledge_graph
+    - wiki_search
+    - wiki_read_page
+    - wiki_read_source_doc
+    - data_schema
+    - data_analysis
+    - db_catalog
+    - db_schema
+    - db_query
+    web_search_enabled: false
+    web_search_max_results: 5
+    web_fetch_enabled: true
+    web_fetch_top_n: 3
+    enable_artifacts: true
+    multi_turn_enabled: true
+    history_turns: 10
+    retain_retrieval_history: true
+    faq_priority_enabled: true
+    faq_direct_answer_threshold: 0.9
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 5
+    rerank_threshold: 0.3
+- id: builtin-wiki-researcher
+  avatar: 📚
+  is_builtin: true
+  i18n:
+    default:
+      name: Wiki Questioner
+      description: Specialized agent for answering questions based on Wiki knowledge bases
+    zh-CN:
+      name: 维基问答
+      description: 专注于在 Wiki 知识库中回答问题的智能体
+    zh-TW:
+      name: 維基問答
+      description: 專注於在 Wiki 知識庫中回答問題的智能體
+    ja-JP:
+      name: Wiki 問答
+      description: Wikiナレッジベースでの回答問題に特化したエージェント
+    ko-KR:
+      name: 위키 질문
+      description: 위키 지식 베이스에서 답변하는 데 특화된 에이전트
+  config:
+    agent_mode: agent
+    agent_type: wiki-qa
+    system_prompt_id: wiki_researcher
+    thinking: true
+    temperature: 0.7
+    max_completion_tokens: 16384
+    max_iterations: 50
+    kb_selection_mode: all
+    retrieve_kb_only_when_mentioned: false
+    allowed_tools:
+    - wiki_search
+    - wiki_read_page
+    - wiki_read_source_doc
+    - wiki_flag_issue
+    web_search_enabled: false
+    web_search_max_results: 0
+    multi_turn_enabled: true
+    history_turns: 10
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 5
+    rerank_threshold: 0.3
+- id: builtin-wiki-fixer
+  avatar: 🔧
+  is_builtin: true
+  i18n:
+    default:
+      name: Wiki Fixer
+      description: Specialized agent for revising Wiki pages based on inspection issues
+    zh-CN:
+      name: 维基修订
+      description: 专门用于根据巡检问题修订 Wiki 页面的智能体
+    zh-TW:
+      name: 維基修訂
+      description: 專門用於根據巡檢問題修訂 Wiki 頁面的智能體
+    ja-JP:
+      name: Wiki 修訂
+      description: 検査の問題に基づいてWikiページを修復および最適化するための専用エージェント
+    ko-KR:
+      name: 위키 수정
+      description: 검사 문제를 기반으로 Wiki 페이지를 修復하고 最適化하는 전용 에이전트
+  config:
+    agent_type: custom
+    agent_mode: agent
+    system_prompt_id: wiki_fixer
+    thinking: false
+    temperature: 0.7
+    max_completion_tokens: 16384
+    max_iterations: 50
+    kb_selection_mode: selected
+    retrieve_kb_only_when_mentioned: false
+    retain_retrieval_history: true
+    allowed_tools:
+    - wiki_search
+    - wiki_read_page
+    - wiki_read_source_doc
+    - wiki_write_page
+    - wiki_replace_text
+    - wiki_rename_page
+    - wiki_delete_page
+    - wiki_read_issue
+    - wiki_update_issue
+    web_search_enabled: false
+    web_search_max_results: 0
+    multi_turn_enabled: true
+    history_turns: 10
+    embedding_top_k: 10
+    keyword_threshold: 0.3
+    vector_threshold: 0.5
+    rerank_top_k: 5
+    rerank_threshold: 0.3

@@ -39,15 +39,13 @@
 | derivative-worker | 2 | `.1/.7` | `500m/1Gi`；`1500m/2Gi` |
 | wiki-worker | 2 | `.2/.7` | `500m/1Gi`；`1500m/2Gi` |
 | maintenance | 2 | `.1/.2` | `150m/384Mi`；`750m/1Gi` |
-| general-agent | 2 | `.1/.2` | `250m/768Mi`；`1500m/2Gi` |
-| document-agent | 2 | `.1/.2` | `500m/1280Mi`；`2500m/4Gi` |
+| agent-runtime | 2 | `.1/.2` | `250m/512Mi`；`2C/2Gi` |
+| 按需运行工作区 | 最多 16 个活动运行 | document-worker 节点 | 每个 `100m/256Mi`；`2C/2Gi`；两个 4Gi PVC |
 | frontend/mobile | 各 2 | `.1/.2` | 见 values |
 | PostgreSQL | 1 | `.6` | `3C/8Gi`；`6C/12Gi`，`/dev/shm=2Gi` |
 
 Neo4j 保持在 `.54`，Ingress 保持现状；集群内 LiteLLM 当前不承载流量，模型通过
-外部 llmgateway 域名访问。目标节点 request 占用为：`.1/.2`
-约 `52.2% CPU / 29.5% RAM`，`.7` 约 `45.3% / 23.9%`，`.6` 约
-`64.6% / 86.0%`；不需要扩容。
+外部 llmgateway 域名访问。含工作区池预算的目标 request 占用：`.1` 约 `53.5% CPU / 29.5% RAM`，`.2` 约 `52.2% / 28.6%`，`.7` 约 `51.6% / 28.4%`。工作区 limits 允许资源超配，不等于可同时满负荷运行；生产需根据实际文件负载确认并发容量。
 
 ## 文件索引
 

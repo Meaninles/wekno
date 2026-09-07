@@ -99,7 +99,6 @@ func (h *CustomAgentHandler) CreateAgent(c *gin.Context) {
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		if err == service.ErrAgentNameRequired ||
-			err == service.ErrAgentDatabaseSourcesRequired ||
 			stderrors.Is(err, service.ErrAgentDocumentTemplateInvalid) ||
 			stderrors.Is(err, service.ErrAgentCustomConfigInvalid) {
 			c.Error(errors.NewBadRequestError(err.Error()))
@@ -340,8 +339,6 @@ func (h *CustomAgentHandler) UpdateAgent(c *gin.Context) {
 		case service.ErrCannotModifyBuiltin:
 			c.Error(errors.NewForbiddenError("Cannot modify built-in agent"))
 		case service.ErrAgentNameRequired:
-			c.Error(errors.NewBadRequestError(err.Error()))
-		case service.ErrAgentDatabaseSourcesRequired:
 			c.Error(errors.NewBadRequestError(err.Error()))
 		case service.ErrAgentDocumentTemplateInvalid:
 			c.Error(errors.NewBadRequestError(err.Error()))

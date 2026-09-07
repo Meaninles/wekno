@@ -1,5 +1,7 @@
 <template>
   <div class="embed-bot-msg" :class="{ 'is-embedded': embeddedMode }">
+    <FailureNotice v-if="replyFailure" :failure="replyFailure" />
+    <template v-else>
     <SourceReferenceHub v-if="session?.is_completed || session?.knowledge_references?.length" ref="sourceReferenceHub" :session="session"
       :content="answerText" embedded-mode />
     <CompletedSimpleRunSummary v-if="!session?.isRagMode && !session?.isAgentMode" :message="session as Record<string, any>" />
@@ -27,6 +29,7 @@
         </div>
       </div>
     </div>
+    </template>
     <Teleport to="body">
       <div v-if="citationFloat.visible" class="embed-citation-float"
         :style="{ top: `${citationFloat.top}px`, left: `${citationFloat.left}px` }" @mouseenter="cancelCitationClose"
@@ -48,6 +51,8 @@
 </template>
 
 <script setup lang="ts">
+import FailureNotice from '@/custom/modules/failures/FailureNotice.vue';
+import { messageFailure } from '@/custom/modules/failures/failures';
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue'
 import 'katex/dist/katex.min.css'
 import {
@@ -244,6 +249,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   parentMd.value?.removeEventListener('click', handleSourceCitationClick, true)
 })
+const replyFailure = computed(() => messageFailure(props.session || {}));
 </script>
 
 <style scoped lang="less">

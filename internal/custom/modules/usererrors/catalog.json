@@ -1,0 +1,170 @@
+[
+  {
+    "code": "empty_response",
+    "message": "这次没有生成有效回答，请重试。",
+    "patterns": [
+      "empty response",
+      "empty answer",
+      "answer must not be empty",
+      "no assistant message",
+      "空回复",
+      "空回答"
+    ]
+  },
+  {
+    "code": "input_too_long",
+    "message": "本次内容较多，请减少输入或附件后重试。",
+    "patterns": [
+      "maximum context length",
+      "context length exceeded",
+      "prompt exceeds",
+      "context_length_exceeded",
+      "too many tokens",
+      "输入过长",
+      "内容过长"
+    ]
+  },
+  {
+    "code": "file_too_large",
+    "message": "文件超过大小限制，请压缩或拆分后上传。",
+    "patterns": [
+      "file too large",
+      "payload too large",
+      "request entity too large",
+      "文件大小超过",
+      "文件过大",
+      "超过上传上限",
+      "http 413",
+      "status code: 413",
+      "status code 413"
+    ]
+  },
+  {
+    "code": "file_unsupported",
+    "message": "暂不支持此文件格式，请换一种格式上传。",
+    "patterns": [
+      "unsupported file",
+      "unsupported format",
+      "不支持的文件",
+      "不支持此文件",
+      "文件格式不支持"
+    ]
+  },
+  {
+    "code": "file_failed",
+    "message": "文件未能处理完成，请检查文件是否可正常打开后重新上传。",
+    "patterns": [
+      "parse failed",
+      "parsing failed",
+      "extraction failed",
+      "document parsing",
+      "文件解析失败",
+      "文档解析失败",
+      "上传失败",
+      "upload failed"
+    ]
+  },
+  {
+    "code": "permission_denied",
+    "message": "当前无法访问所需资料，请确认访问权限或联系管理员。",
+    "patterns": [
+      "permission denied",
+      "access denied",
+      "forbidden",
+      "membership unavailable",
+      "account unavailable",
+      "无权限",
+      "没有权限",
+      "无权访问"
+    ]
+  },
+  {
+    "code": "service_configuration",
+    "message": "回答服务暂时不可用，请联系管理员检查设置。",
+    "patterns": [
+      "invalid api key",
+      "incorrect api key",
+      "authenticationerror",
+      "unauthorized",
+      "model not found",
+      "model unavailable",
+      "model is not configured",
+      "未配置模型",
+      "模型未配置"
+    ]
+  },
+  {
+    "code": "busy",
+    "message": "当前使用人数较多，请稍后重试。",
+    "patterns": [
+      "rate limit",
+      "ratelimit",
+      "too many requests",
+      "queue full",
+      "capacity",
+      "服务繁忙",
+      "排队等待失败",
+      "http 429",
+      "status code: 429",
+      "status code 429"
+    ]
+  },
+  {
+    "code": "timeout",
+    "message": "这次处理时间较长，未能完成，请稍后重试。",
+    "patterns": [
+      "timeout",
+      "timed out",
+      "deadline",
+      "超时"
+    ]
+  },
+  {
+    "code": "task_limit",
+    "message": "这次任务未能完成，请缩小问题范围后重试。",
+    "patterns": [
+      "max_turn",
+      "max turns",
+      "maxturns",
+      "turncount",
+      "exceed_limit",
+      "exceeded_limit",
+      "budget exhausted",
+      "任务过于复杂"
+    ]
+  },
+  {
+    "code": "connection",
+    "message": "连接暂时中断，请稍后重试。",
+    "patterns": [
+      "eof",
+      "connection reset",
+      "connection refused",
+      "broken pipe",
+      "disconnected",
+      "failed to fetch",
+      "networkerror",
+      "network error",
+      "stream ended",
+      "stream failed",
+      "fetch failed",
+      "连接中断",
+      "网络错误"
+    ]
+  },
+  {
+    "code": "cancelled",
+    "message": "已停止生成。",
+    "patterns": [
+      "cancelled by caller",
+      "context canceled",
+      "已停止生成。",
+      "回答已被取消"
+    ]
+  },
+  {
+    "code": "unknown",
+    "message": "这次未能完成，请稍后重试。",
+    "patterns": []
+  }
+]

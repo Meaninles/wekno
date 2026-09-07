@@ -37,9 +37,7 @@ import json, sys
 data = json.load(sys.stdin)
 exact = {
     "weknora-app", "weknora-docreader",
-    "weknora-general-agent", "weknora-document-processing-agent",
-    "weknora-custom-general-agent",
-    "weknora-custom-document-processing-agent",
+    "weknora-agent-runtime",
 }
 for item in data.get("items", []):
     name = item["metadata"]["name"]

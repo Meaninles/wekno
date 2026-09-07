@@ -171,7 +171,7 @@ func TestTableAnalysisToolAllowsChartsOnlyForTableAnalysis(t *testing.T) {
 		t.Fatal("default data_analysis tool should not allow chart output")
 	}
 
-	tableTool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, nil, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	tableTool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, nil, "session-table", &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent})
 	if !tableTool.allowChart {
 		t.Fatal("table_analysis tool should allow chart output")
 	}
@@ -210,7 +210,7 @@ func TestTableAnalysisValidationOptionsAreTableOnly(t *testing.T) {
 		t.Fatal("legacy data_analysis validation should still keep SQL injection risk checks")
 	}
 
-	tableTool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, nil, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	tableTool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, nil, "session-table", &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent})
 	_, tableValidation := utils.ValidateSQL(
 		"SELECT id FROM attachment_1 UNION ALL SELECT id FROM attachment_1__raw",
 		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__raw"})...,

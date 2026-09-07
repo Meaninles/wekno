@@ -1,9 +1,9 @@
 import { defineStore } from "pinia";
 import { nextTick } from "vue";
-import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SIMPLE_CHAT_ID } from "@/api/agent";
+import { BUILTIN_KNOWLEDGE_QA_ID, BUILTIN_GENERAL_AGENT_ID } from "@/api/agent";
 import { getApiBaseUrl } from "@/utils/api-base";
 import { updateMyPreferences, type UserPreferences } from "@/api/auth";
-import { isAgentStreamAgentId, isAgentStreamBuiltinAgentId, isQuickAnswerAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
+import { isAgentStreamAgentId, isAgentStreamBuiltinAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
 
 // 定义设置接口
 interface Settings {
@@ -109,7 +109,7 @@ const defaultSettings: Settings = {
     rerankModelId: "",
     selectedChatModelId: "",  // 用户当前选择的对话模型ID
   },
-  selectedAgentId: BUILTIN_QUICK_ANSWER_ID,  // 默认选中快速问答模式
+  selectedAgentId: BUILTIN_KNOWLEDGE_QA_ID,  // 默认选中知识问答模式
   selectedAgentSourceTenantId: null as string | null,  // 共享智能体来源租户 ID
   autoCheckUpdate: true,
 };
@@ -151,10 +151,7 @@ export const useSettingsStore = defineStore("settings", {
     isAgentEnabled: (state) => state.settings.isAgentEnabled || false,
 
     // 当前是否为普通问答流内置项（优先看 selectedAgentId，避免与 isAgentEnabled 漂移）
-    isQuickAnswerMode: (state) =>
-      isQuickAnswerAgentId(state.settings.selectedAgentId),
-
-    // 是否走 Agent 流式管线（智能推理 / 自定义 Agent）；快速问答走 RAG 管线
+// 是否走 Agent 流式管线（知识问答 / 自定义 Agent）；知识问答走 RAG 管线
     isAgentStreamMode: (state) =>
       isAgentStreamAgentId(
         state.settings.selectedAgentId,
@@ -201,7 +198,7 @@ export const useSettingsStore = defineStore("settings", {
     isAutoCheckUpdateEnabled: (state) => state.settings.autoCheckUpdate ?? true,
 
     // 当前选中的智能体ID
-    selectedAgentId: (state) => state.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
+    selectedAgentId: (state) => state.settings.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID,
     // 共享智能体来源租户 ID（可选）
     selectedAgentSourceTenantId: (state) => state.settings.selectedAgentSourceTenantId ?? null,
   },
@@ -651,7 +648,7 @@ export const useSettingsStore = defineStore("settings", {
       this.settings.selectedAgentId = agentId;
       this.settings.selectedAgentSourceTenantId = (sourceTenantId != null && sourceTenantId !== "") ? sourceTenantId : null;
       // 根据智能体类型自动切换 Agent 模式
-      if (agentId === BUILTIN_QUICK_ANSWER_ID || agentId === BUILTIN_SIMPLE_CHAT_ID) {
+      if (agentId === BUILTIN_KNOWLEDGE_QA_ID || agentId === BUILTIN_GENERAL_AGENT_ID) {
         this.settings.isAgentEnabled = false;
       } else if (isAgentStreamBuiltinAgentId(agentId)) {
         this.settings.isAgentEnabled = true;
@@ -672,7 +669,7 @@ export const useSettingsStore = defineStore("settings", {
     
     // 获取选中的智能体ID
     getSelectedAgentId(): string {
-      return this.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID;
+      return this.settings.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID;
     },
 
     // —— 会话级输入态恢复 —— //

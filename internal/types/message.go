@@ -236,6 +236,8 @@ type Message struct {
 	RequestID string `json:"request_id"`
 	// Message text content
 	Content string `json:"content"`
+	// Public failure category; diagnostic details remain in private run records.
+	ErrorCode string `json:"error_code,omitempty" gorm:"type:varchar(40);default:''"`
 	// Message role: "user", "assistant", "system"
 	Role string `json:"role"`
 	// References to knowledge chunks used in the response

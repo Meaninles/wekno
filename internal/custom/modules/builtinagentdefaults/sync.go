@@ -72,7 +72,7 @@ func applyReservedProfessionalSkillDefaults(agent *types.CustomAgent) *types.Cus
 }
 
 func applyReservedProfessionalSkillsToConfig(cfg *types.CustomAgentConfig) {
-	if cfg == nil || cfg.AgentMode != types.AgentModeSmartReasoning {
+	if cfg == nil || cfg.AgentMode != types.AgentModeUnified {
 		return
 	}
 	if cfg.AgentType != types.AgentTypeGeneralAgent && cfg.AgentType != types.AgentTypeDocumentProcessingAgent {
@@ -144,10 +144,7 @@ func (s *Service) referenceBuiltinAgent(
 			agent.Config.SystemPromptID = defaultAgent.Config.SystemPromptID
 			agent.Config.SystemPrompt = defaultAgent.Config.SystemPrompt
 		}
-		if defaultAgent.Config.ContextTemplateID != "" {
-			agent.Config.ContextTemplateID = defaultAgent.Config.ContextTemplateID
-			agent.Config.ContextTemplate = defaultAgent.Config.ContextTemplate
-		}
+
 		if agent.Config.Thinking == nil {
 			agent.Config.Thinking = cloneBoolPtr(defaultAgent.Config.Thinking)
 		}
@@ -173,12 +170,7 @@ func (s *Service) applyReferenceModelConfig(
 	if err != nil {
 		return cfg, err
 	}
-	cfg.QueryUnderstandModelID, err = s.resolveTenantModelID(
-		ctx, targetTenantID, reference.QueryUnderstandModelID, types.ModelTypeKnowledgeQA,
-	)
-	if err != nil {
-		return cfg, err
-	}
+
 	cfg.VLMModelID, err = s.resolveTenantModelID(ctx, targetTenantID, reference.VLMModelID, types.ModelTypeVLLM)
 	if err != nil {
 		return cfg, err
@@ -196,12 +188,10 @@ func (s *Service) applyReferenceModelConfig(
 
 	cfg.SystemPrompt = reference.SystemPrompt
 	cfg.SystemPromptID = reference.SystemPromptID
-	cfg.ContextTemplate = reference.ContextTemplate
-	cfg.ContextTemplateID = reference.ContextTemplateID
-	cfg.RewritePromptSystem = reference.RewritePromptSystem
-	cfg.RewritePromptUser = reference.RewritePromptUser
-	cfg.FallbackPrompt = reference.FallbackPrompt
-	cfg.IntentPrompts = cloneStringMap(reference.IntentPrompts)
+
+
+
+
 
 	return cfg, nil
 }

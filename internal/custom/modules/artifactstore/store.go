@@ -35,18 +35,18 @@ type Store struct {
 func NewFromEnv() (*Store, error) {
 	provider := artifactProvider()
 	if provider == "" {
-		return nil, fmt.Errorf("private artifact object storage is required: configure CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER=minio|obs")
+		return nil, fmt.Errorf("private artifact object storage is required: configure AGENT_RUNTIME_ARTIFACT_STORAGE_PROVIDER=minio|obs")
 	}
 
 	bucket := firstEnv(
-		"CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET",
-		"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_BUCKET",
+		"AGENT_RUNTIME_ARTIFACT_BUCKET",
+		"AGENT_RUNTIME_ORIGINAL_INPUT_BUCKET",
 	)
-	prefix := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX"))
+	prefix := strings.TrimSpace(os.Getenv("AGENT_RUNTIME_ARTIFACT_PATH_PREFIX"))
 	if prefix == "" {
 		return nil, fmt.Errorf(
 			"private artifact path prefix is required: configure " +
-				"CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX=" +
+				"AGENT_RUNTIME_ARTIFACT_PATH_PREFIX=" +
 				privateNamespaceExample + "/<deployment>/namespace/<uuid>/",
 		)
 	}
@@ -68,18 +68,18 @@ func NewFromEnv() (*Store, error) {
 			bucket = defaultBucket
 		}
 		endpoint := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_MINIO_ENDPOINT",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_ENDPOINT",
+			"AGENT_RUNTIME_ARTIFACT_MINIO_ENDPOINT",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_MINIO_ENDPOINT",
 			"MINIO_ENDPOINT",
 		)
 		accessKey := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_MINIO_ACCESS_KEY_ID",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_ACCESS_KEY_ID",
+			"AGENT_RUNTIME_ARTIFACT_MINIO_ACCESS_KEY_ID",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_MINIO_ACCESS_KEY_ID",
 			"MINIO_ACCESS_KEY_ID",
 		)
 		secretKey := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_MINIO_SECRET_ACCESS_KEY",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_SECRET_ACCESS_KEY",
+			"AGENT_RUNTIME_ARTIFACT_MINIO_SECRET_ACCESS_KEY",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_MINIO_SECRET_ACCESS_KEY",
 			"MINIO_SECRET_ACCESS_KEY",
 		)
 		if endpoint == "" || accessKey == "" || secretKey == "" {
@@ -90,8 +90,8 @@ func NewFromEnv() (*Store, error) {
 			accessKey,
 			secretKey,
 			bucket,
-			envBool("CUSTOM_GENERAL_AGENT_ARTIFACT_MINIO_USE_SSL",
-				envBool("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_USE_SSL", false)),
+			envBool("AGENT_RUNTIME_ARTIFACT_MINIO_USE_SSL",
+				envBool("AGENT_RUNTIME_ORIGINAL_INPUT_MINIO_USE_SSL", false)),
 			normalizedPrefix,
 		)
 	case "obs":
@@ -102,26 +102,26 @@ func NewFromEnv() (*Store, error) {
 			return nil, fmt.Errorf("private OBS artifact bucket is required")
 		}
 		endpoint := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_OBS_ENDPOINT",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_OBS_ENDPOINT",
+			"AGENT_RUNTIME_ARTIFACT_OBS_ENDPOINT",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_OBS_ENDPOINT",
 			"OBS_ENDPOINT",
 		)
 		region := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_OBS_REGION",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_OBS_REGION",
+			"AGENT_RUNTIME_ARTIFACT_OBS_REGION",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_OBS_REGION",
 			"OBS_REGION",
 		)
 		if region == "" {
 			region = "cn-north-4"
 		}
 		accessKey := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_OBS_ACCESS_KEY",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_OBS_ACCESS_KEY",
+			"AGENT_RUNTIME_ARTIFACT_OBS_ACCESS_KEY",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_OBS_ACCESS_KEY",
 			"OBS_ACCESS_KEY",
 		)
 		secretKey := firstEnv(
-			"CUSTOM_GENERAL_AGENT_ARTIFACT_OBS_SECRET_KEY",
-			"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_OBS_SECRET_KEY",
+			"AGENT_RUNTIME_ARTIFACT_OBS_SECRET_KEY",
+			"AGENT_RUNTIME_ORIGINAL_INPUT_OBS_SECRET_KEY",
 			"OBS_SECRET_KEY",
 		)
 		if endpoint == "" || accessKey == "" || secretKey == "" {
@@ -291,9 +291,9 @@ func (s *Store) Delete(ctx context.Context, filePath string) error {
 
 func artifactProvider() string {
 	provider := strings.ToLower(firstEnv(
-		"CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER",
-		"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER",
-		"CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PROVIDER",
+		"AGENT_RUNTIME_ARTIFACT_STORAGE_PROVIDER",
+		"AGENT_RUNTIME_ORIGINAL_INPUT_STORAGE_PROVIDER",
+		"AGENT_RUNTIME_ORIGINAL_INPUT_PROVIDER",
 	))
 	if provider != "" {
 		return provider

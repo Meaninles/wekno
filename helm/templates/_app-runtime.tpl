@@ -189,12 +189,9 @@ therefore need the same database, object-store, model, and encryption config.
   value: {{ $root.Values.app.env.WEKNORA_WIKI_MAP_TASK_CONCURRENCY | quote }}
 - name: ENABLE_GRAPH_RAG
   value: {{ $root.Values.app.env.ENABLE_GRAPH_RAG | quote }}
-- name: WEKNORA_SANDBOX_MODE
-  value: {{ $root.Values.app.sandbox.mode | quote }}
-- name: WEKNORA_SANDBOX_TIMEOUT
-  value: {{ $root.Values.app.sandbox.timeoutSeconds | quote }}
-- name: WEKNORA_SANDBOX_DOCKER_IMAGE
-  value: {{ $root.Values.app.sandbox.dockerImage | quote }}
+
+
+
 - name: NEO4J_ENABLE
   value: {{ ternary "true" "false" (or $root.Values.neo4j.enabled (eq (lower (toString $root.Values.app.env.ENABLE_GRAPH_RAG)) "true")) | quote }}
 - name: WEKNORA_METRICS_ENABLED
@@ -214,31 +211,21 @@ therefore need the same database, object-store, model, and encryption config.
   value: /var/run/secrets/weknora-document-queue-kubernetes/ca.crt
 {{- end }}
 {{- if $root.Values.app.agentIntegration.enabled }}
-- name: CUSTOM_GENERAL_AGENT_URL
-  value: {{ $root.Values.app.agentIntegration.generalAgentURL | quote }}
-- name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
-  value: {{ $root.Values.app.agentIntegration.documentProcessingAgentURL | quote }}
-# Active Agent runs are process-local. API-role callbacks use the Pod IP so
-# they cannot be load-balanced onto a different API process.
-- name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
+- name: AGENT_RUNTIME_TOOL_CALLBACK_URL
   value: {{ $root.Values.app.agentIntegration.toolCallbackURL | quote }}
-- name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL
+- name: AGENT_RUNTIME_ARTIFACT_UPLOAD_URL
   value: {{ $root.Values.app.agentIntegration.artifactUploadURL | quote }}
-- name: CUSTOM_GENERAL_AGENT_API_KEY
+- name: AGENT_RUNTIME_API_KEY
   valueFrom:
     secretKeyRef:
       name: {{ $root.Values.app.agentIntegration.apiKeySecret.name | quote }}
       key: {{ $root.Values.app.agentIntegration.apiKeySecret.key | quote }}
-- name: CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER
+- name: AGENT_RUNTIME_ARTIFACT_STORAGE_PROVIDER
   value: {{ $root.Values.app.agentIntegration.artifactStorage.provider | quote }}
-- name: CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET
+- name: AGENT_RUNTIME_ARTIFACT_BUCKET
   value: {{ $root.Values.app.agentIntegration.artifactStorage.bucket | quote }}
-- name: CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX
+- name: AGENT_RUNTIME_ARTIFACT_PATH_PREFIX
   value: {{ $root.Values.app.agentIntegration.artifactStorage.pathPrefix | quote }}
-- name: CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_MISSING
-  value: {{ $root.Values.app.agentIntegration.artifactStorage.migrationAllowMissing | quote }}
-- name: CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_INVALID
-  value: {{ $root.Values.app.agentIntegration.artifactStorage.migrationAllowInvalid | quote }}
 {{- end }}
 {{- if or $root.Values.neo4j.enabled (eq (lower (toString $root.Values.app.env.ENABLE_GRAPH_RAG)) "true") }}
 - name: NEO4J_URI

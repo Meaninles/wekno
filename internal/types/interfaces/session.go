@@ -49,8 +49,6 @@ type SessionService interface {
 	// KnowledgeQA performs knowledge-based question answering.
 	// Events are emitted through eventBus (references, answer chunks, completion).
 	KnowledgeQA(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error
-	// KnowledgeQAByEvent performs knowledge-based question answering by event
-	KnowledgeQAByEvent(ctx context.Context, chatManage *types.ChatManage, eventList []types.EventType) error
 	// SearchKnowledge performs knowledge-based search, without summarization
 	// knowledgeBaseIDs: list of knowledge base IDs to search (supports multi-KB)
 	// knowledgeIDs: list of specific knowledge (file) IDs to search
@@ -59,7 +57,7 @@ type SessionService interface {
 	AgentQA(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error
 	// BuildAgentRuntimeConfig resolves the same runtime AgentConfig used by
 	// AgentQA. Custom agent runners call this to reuse tenant/model/KB/search
-	// scoping and avoid config drift from the native smart-reasoning path.
+	// scoping and avoid config drift from the native unified agent path.
 	BuildAgentRuntimeConfig(ctx context.Context, req *types.QARequest) (*types.AgentConfig, error)
 }
 

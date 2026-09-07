@@ -34,8 +34,8 @@ test('mobile resolves restored selected file metadata before rendering or sendin
 })
 
 test('mobile agent sheet only marks the exact selected built-in agent', () => {
-  assert.match(source, /\[BUILTIN_SIMPLE_CHAT_ID\]: "简单对话"/)
+  assert.match(source, /\[BUILTIN_GENERAL_AGENT_ID\]: "通用智能体"/)
   assert.match(source, /const isSelectedAgent = \(agent: CustomAgent\) => selectedAgentId\.value === agent\.id/)
   assert.match(source, /:class="\{ selected: isSelectedAgent\(agent\) \}"/)
-  assert.doesNotMatch(source, /\[BUILTIN_QUICK_ANSWER_ID,\s*BUILTIN_SIMPLE_CHAT_ID\][\s\S]*agent\.id === BUILTIN_QUICK_ANSWER_ID/)
+  assert.doesNotMatch(source, /\[BUILTIN_QUICK_ANSWER_ID,\s*BUILTIN_GENERAL_AGENT_ID\][\s\S]*agent\.id === BUILTIN_QUICK_ANSWER_ID/)
 })

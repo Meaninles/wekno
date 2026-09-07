@@ -59,7 +59,7 @@ func (h *Handler) Capabilities(c *gin.Context) {
 			},
 			"agent_types": []string{
 				"simple-chat",
-				"smart-reasoning",
+				"knowledge-qa",
 				"general-agent",
 				"document-processing-agent",
 				"data-analysis",

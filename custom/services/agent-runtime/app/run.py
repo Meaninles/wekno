@@ -1,0 +1,83 @@
+"""The sole Agent construction and execution entry point."""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import time
+from collections.abc import Sequence
+
+from agentscope.agent import Agent, ContextConfig, ModelConfig, ReActConfig
+from agentscope.model import ChatModelBase
+from agentscope.permission import PermissionMode
+from agentscope.tool import ToolBase, Toolkit
+
+from .context import EvidencePrefetch, messages
+from .contracts import RunRequest, RunResult
+from .control import Control
+from .delivery import Delivery, DeliveryError
+from .events import Events
+from .state import Lifecycle, restore
+from .tools import BusinessTool
+from .vision import Vision
+from .budget import IterationBudget
+
+
+async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
+                  *, extra_tools: Sequence[ToolBase] = (), skills=(), offloader=None) -> RunResult:
+    """Run once through the SDK; recovery enters here with the same durable state."""
+    lifecycle = Lifecycle(control)
+    delivery = Delivery(control, lifecycle)
+    events = Events(control)
+    lifecycle.events = events
+    delivery.events = events
+    state = restore(payload.checkpoint, payload.run_id)
+    if offloader is not None and hasattr(offloader, "get_backend"):
+        from .file_context import WorkspaceToolContext
+        state.tool_context = WorkspaceToolContext.bind(state.tool_context, offloader.get_backend())
+    # Workspace commands run in a dedicated restricted container. Business
+    # mutations still pass through Go's live approval and authorization gates.
+    state.permission_context.mode = PermissionMode.BYPASS
+    toolkit = Toolkit(tools=[BusinessTool(spec, control) for spec in payload.tools] + list(extra_tools),
+                      skills_or_loaders=skills or None)
+    agent = Agent(
+        name="weknora", system_prompt=payload.system_prompt, model=model,
+        toolkit=toolkit, state=state, offloader=offloader,
+        middlewares=[Vision(control), EvidencePrefetch(control), IterationBudget(payload.runtime_config.max_iterations), lifecycle, delivery],
+        model_config=ModelConfig(max_retries=0, fallback_model=None),
+        context_config=ContextConfig(),
+        # SDK grants one final text decision after max_iters. Count that call
+        # inside our public budget instead of silently exceeding it.
+        react_config=ReActConfig(max_iters=payload.runtime_config.max_iterations - 1,
+                                interruption_raise_cancelled_error=True),
+    )
+    inputs = None if payload.checkpoint else messages(payload)
+    remaining = payload.deadline_unix - time.time()
+    if remaining <= 0:
+        raise TimeoutError("Run deadline has expired")
+    owner = asyncio.current_task()
+    pump = asyncio.create_task(events.pump())
+
+    def pump_finished(task):
+        if not task.cancelled() and task.exception() is not None and owner is not None:
+            owner.cancel("Event persistence failed")
+
+    pump.add_done_callback(pump_finished)
+    try:
+        async with asyncio.timeout(remaining):
+            stream = agent.reply_stream(inputs=inputs, yield_final_msg=True)
+            try:
+                async for item in stream:
+                    # Completion is the committed Go result, never an SDK
+                    # end notification with a still-uncommitted message.
+                    if getattr(item, "type", "") != "REPLY_END":
+                        await events.sdk(item)
+            finally:
+                await stream.aclose()
+            await events.flush()
+        if delivery.result is None:
+            raise DeliveryError("SDK ended without a committed result")
+        return delivery.result
+    finally:
+        pump.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump

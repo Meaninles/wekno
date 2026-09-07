@@ -1,25 +1,14 @@
 # WeKnora production profile for the existing Moutai CCE cluster.
 #
 # This is the target production topology, not a staged rollout profile.
-# It assumes the prerequisites documented in
-# docs/custom/当前版本生产更新部署执行手册.md have been completed:
-#   - immutable release images have been pushed to the approved SWR project
-#     and the same sandbox digest is available to the host Docker daemon on
-#     every app node;
-#   - /app/skills/preloaded on every app node was exported from that exact app
-#     image and passed the per-node checks in the deployment runbook;
-#   - the release scratch directories under
-#     /mnt/weknora-data/weknora-v2-scratch exist on .1/.2/.7;
-#   - the node labels used below exist;
-#   - weknora-agent-internal contains apiKey;
-#   - weknora-model-runtime was captured from the current production app and
-#     contains the existing Anthropic/LiteLLM runtime settings;
-#   - the existing OBS configuration and object prefix have been captured and
-#     verified read-only; this release does not migrate or rewrite source files.
-#
-# No RWX storage or CSI provisioning is introduced. Durable source files stay
-# in their current private OBS prefix. Parsing and Agent workspaces are
-# disposable hostPath scratch directories on the three existing app nodes.
+# Prerequisites: immutable SWR images, node labels and role scratch paths,
+# private object storage, and the weknora-agent-internal apiKey secret.
+# Agent Runtime uses one AgentScope harness for all independent profiles.
+# Kubernetes workspaces require a usable StorageClass for per-run RWO PVCs;
+# configure agentRuntime.workspace.storageClass for the target cluster.
+# Workspace Pods have no model credentials and no external network access.
+# Local Docker verification does not certify the target cluster's storage,
+# scheduling or network-policy implementation.
 
 global:
   imagePullSecrets:
@@ -192,13 +181,6 @@ app:
     digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
-  sandbox:
-    mode: docker
-    timeoutSeconds: "300"
-    # Pulled by the host Docker daemon through docker.sock, not by kubelet.
-    # Replace with the full immutable SWR reference and authenticate or
-    # pre-pull it on every app node.
-    dockerImage: weknora-sandbox-prod:horizontal-objectstore-20260726
   resources:
     # API-only role. CPU-heavy parsing is reserved by parseWorker above.
     requests:
@@ -273,12 +255,10 @@ app:
       tokenExpirationSeconds: 3600
   agentIntegration:
     enabled: true
-    generalAgentURL: http://weknora-custom-general-agent.weknora.svc.cluster.local:8091
-    documentProcessingAgentURL: http://weknora-custom-document-processing-agent.weknora.svc.cluster.local:8091
     # Agent run ownership is process-local. Bypass the shared app Service so
     # every callback returns to the API Pod that created the active run.
-    toolCallbackURL: http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call
-    artifactUploadURL: http://app.weknora.svc.cluster.local:8080/api/v1/custom/general-agent/internal/artifacts/upload
+    toolCallbackURL: http://app:8080/api/v1/custom/agent-runtime/internal/tools/call
+    artifactUploadURL: http://app.weknora.svc.cluster.local:8080/api/v1/custom/agent-runtime/internal/artifacts/upload
     apiKeySecret:
       name: weknora-agent-internal
       key: apiKey
@@ -289,8 +269,6 @@ app:
       # Never reuse it for a test cluster or restore drill and never rotate it
       # during an ordinary upgrade.
       pathPrefix: weknora/__weknora_private_agent_artifacts_v1__/deployment/prod-cce-wk-6a9d12b0/namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
-      migrationAllowMissing: "false"
-      migrationAllowInvalid: "false"
   professionalSkillStorage:
     provider: obs
     bucket: ap-weknora-obs-zhengshi-01
@@ -323,18 +301,6 @@ app:
           name: weknora-model-runtime
           key: ANTHROPIC_AUTH_TOKEN
           optional: true
-    - name: WEKNORA_SANDBOX_ALLOW_NETWORK
-      valueFrom:
-        secretKeyRef:
-          name: weknora-model-runtime
-          key: WEKNORA_SANDBOX_ALLOW_NETWORK
-          optional: true
-    - name: WEKNORA_SANDBOX_PASSTHROUGH_ENV
-      valueFrom:
-        secretKeyRef:
-          name: weknora-model-runtime
-          key: WEKNORA_SANDBOX_PASSTHROUGH_ENV
-          optional: true
 
     # Ordinary knowledge files and generated private artifacts share the OBS
     # account but use disjoint, auditable prefixes.
@@ -356,18 +322,18 @@ app:
         secretKeyRef:
           name: weknora-obs
           key: OBS_SECRET_KEY
-    - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER
+    - name: AGENT_RUNTIME_ORIGINAL_INPUT_STORAGE_PROVIDER
       value: obs
-    - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_BUCKET
+    - name: AGENT_RUNTIME_ORIGINAL_INPUT_BUCKET
       value: ap-weknora-obs-zhengshi-01
-    - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX
+    - name: AGENT_RUNTIME_ORIGINAL_INPUT_PATH_PREFIX
       value: weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/prod-cce-wk-6a9d12b0/namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
       # Leaf keys are temp/<tenant-id>/<transfer-uuid>.<ext>. Configure an OBS
       # lifecycle rule scoped exactly to this prefix with <=24h expiration as
       # a hard-kill fallback; never include knowledge or artifact prefixes.
-    - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MAX_MB
+    - name: AGENT_RUNTIME_ORIGINAL_INPUT_MAX_MB
       value: "50"
-    - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_MAX_MB
+    - name: AGENT_RUNTIME_ARTIFACT_UPLOAD_MAX_MB
       value: "128"
 
     # Uploads larger than the 50 MiB parser transport ceiling are split before
@@ -590,95 +556,29 @@ docreader:
     - name: DOCREADER_ODL_HYBRID
       value: "off"
 
-generalAgent:
+agentRuntime:
   enabled: true
   replicaCount: 2
-  terminationGracePeriodSeconds: 60
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+  concurrency: 8
   image:
-    repository: weknora-custom-general-agent
+    repository: weknora-agent-runtime
+    tag: local
     digest: ""
-    tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
-  apiKeySecret:
-    name: weknora-agent-internal
-    key: apiKey
-  env:
-    maxTurns: "30"
-    maxArtifactMB: "50"
-    apiTimeoutMS: "7200000"
-    idleTimeoutMS: "900000"
-  scratch:
-    volumeType: hostPath
-    hostPath:
-      path: /mnt/weknora-data/weknora-v2-scratch/general-agent
-      type: Directory
+  controlURL: http://app:8080/api/v1/custom/agent-runtime/internal
   resources:
-    requests:
-      cpu: 250m
-      memory: 768Mi
-    limits:
-      cpu: 1500m
-      memory: 2Gi
-  topologySpread:
-    enabled: true
-    maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 2Gi}
   nodeSelector:
-    weknora.io/agent-worker: "true"
-
-documentProcessingAgent:
-  enabled: true
-  replicaCount: 2
-  terminationGracePeriodSeconds: 90
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
-  image:
-    repository: weknora-custom-document-processing-agent
-    digest: ""
-    tag: horizontal-objectstore-20260726
-    pullPolicy: IfNotPresent
-  apiKeySecret:
-    name: weknora-agent-internal
-    key: apiKey
-  env:
-    maxTurns: "30"
-    maxArtifactMB: "50"
-    apiTimeoutMS: "7200000"
-    idleTimeoutMS: "900000"
-  scratch:
-    volumeType: hostPath
-    hostPath:
-      path: /mnt/weknora-data/weknora-v2-scratch/document-agent
-      type: Directory
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1280Mi
-    limits:
-      cpu: 2500m
-      memory: 4Gi
-  topologySpread:
-    enabled: true
-    maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
-  nodeSelector:
-    weknora.io/agent-worker: "true"
+    weknora.io/stateless-worker: "true"
+  workspace:
+    namespace: ""
+    image: weknora-agent-workspace:local
+    storageClass: ""
+    storageSize: 4Gi
+    imagePullSecrets: []
+    nodeSelector:
+      weknora.io/document-worker: "true"
 
 frontend:
   enabled: true

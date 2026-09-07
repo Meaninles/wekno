@@ -67,7 +67,7 @@ func validManagerAgent(kbIDs ...string) *types.CustomAgent {
 	}
 	return &types.CustomAgent{
 		Config: types.CustomAgentConfig{
-			AgentMode:       types.AgentModeSmartReasoning,
+			AgentMode:       types.AgentModeUnified,
 			AgentType:       types.AgentTypeKnowledgeBaseManager,
 			RerankModelID:   "rerank-1",
 			KBSelectionMode: "selected",
@@ -228,5 +228,52 @@ func TestConfigureRuntimeFailsClosedForOutOfScopeDocumentAndTagOnly(t *testing.T
 	}
 	if len(runtime.KnowledgeManagement.EffectivePermissions) != 0 || len(runtime.KnowledgeBases) != 0 {
 		t.Fatalf("tag-only selection must not grant mutation scope: %+v", runtime.KnowledgeManagement)
+	}
+}
+
+func TestConfigureRuntimeSeparatesSessionInputsFromMutationScope(t *testing.T) {
+	for _, test := range []struct {
+		name, owner, session string
+		tenant               uint64
+		allowed              bool
+	}{
+		{"current and historical uploads", "user-1", "session-1", 1, true},
+		{"other session", "user-1", "session-2", 1, false},
+		{"other owner", "user-2", "session-1", 1, false},
+		{"other tenant", "user-1", "session-1", 2, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kbs := &kbManagerTestKBService{kbs: map[string]*types.KnowledgeBase{
+				"kb-a":   {ID: "kb-a", TenantID: 1, Type: types.KnowledgeBaseTypeDocument},
+				"inputs": {ID: "inputs", TenantID: test.tenant, IsTemporary: true, ChatSessionID: test.session, ChatOwnerID: test.owner},
+			}}
+			documents := &kbManagerTestKnowledgeService{documents: map[string]*types.Knowledge{
+				"upload": {ID: "upload", KnowledgeBaseID: "inputs", TenantID: test.tenant},
+			}}
+			for _, explicitKB := range []bool{false, true} {
+				req := &types.QARequest{Session: &types.Session{ID: "session-1", TenantID: 1}, CustomAgent: validManagerAgent("kb-a"), KnowledgeIDs: []string{"upload"}}
+				if explicitKB {
+					req.KnowledgeBaseIDs = []string{"kb-a"}
+				}
+				runtime := &types.AgentConfig{AgentType: types.AgentTypeKnowledgeBaseManager}
+				err := NewConfigurator(kbs, documents, nil).ConfigureRuntime(kbManagerTestContext(1), req, runtime)
+				if !test.allowed {
+					if err == nil {
+						t.Fatal("out-of-scope upload accepted")
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				scope := runtime.KnowledgeManagement
+				if scope.ExplicitSelection != explicitKB || !scope.HasWholeKnowledgeBase("kb-a") || len(scope.Documents) != 0 || len(scope.EffectivePermissions) != 1 {
+					t.Fatalf("input changed mutation scope: %+v", scope)
+				}
+				if strings.Join(runtime.KnowledgeIDs, ",") != "upload" {
+					t.Fatal("upload lost from read scope")
+				}
+			}
+		})
 	}
 }

@@ -24,12 +24,12 @@ test('agent progress messages are rendered as visible tool titles', () => {
 })
 
 test('rag mode still renders non-rag tool calls while delegating rag pipeline rows', () => {
-  assert.match(source, /RAG_PIPELINE_TOOL_NAMES/)
+  assert.match(source, /RETRIEVAL_TOOL_NAMES/)
   assert.match(source, /hasNonRagToolEvents/)
   assert.match(source, /props\.ragMode && props\.session\?\.agent_mode !== true/)
   assert.match(source, /if \(props\.ragMode && !hasNonRagToolEvents\.value\)/)
   assert.match(source, /if \(isRagDelegatedEvent\(e\)\) return false/)
-  assert.match(source, /RAG_PIPELINE_TOOL_NAMES\.has\(event\.tool_name\)/)
+  assert.match(source, /RETRIEVAL_TOOL_NAMES\.has\(event\.tool_name\)/)
 })
 
 test('answer text is not reclassified with operational preamble regexes', () => {
@@ -67,13 +67,13 @@ test('zero-result knowledge retrieval renders as neutral completion', () => {
   assert.match(source, /getSearchResultsSummary\(event\)/)
 })
 
-test('Claude SDK live process output uses a bounded projection without rebuilding history', () => {
+test('Unified runtime live process output uses a bounded projection without rebuilding history', () => {
   assert.match(source, /LiveProcessPreview/)
-  assert.match(source, /usesClaudeSDKTerminalDelivery/)
+  assert.match(source, /usesRuntimeTerminalDelivery/)
   assert.match(source, /liveProjection\.value\.interactiveEvents/)
   assert.match(
     source,
-    /if \(\s*usesClaudeSDKTerminalDelivery\.value[\s\S]*!isConversationDone\.value[\s\S]*liveProjection\.value[\s\S]*\) \{[\s\S]*return interactive;/,
+    /if \(\s*usesRuntimeTerminalDelivery\.value[\s\S]*!isConversationDone\.value[\s\S]*liveProjection\.value[\s\S]*\) \{[\s\S]*return interactive;/,
   )
   assert.match(source, /const result = buildFullEventList\(stream\);/)
 })

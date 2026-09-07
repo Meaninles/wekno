@@ -503,9 +503,6 @@ func (s *Service) ConfigureRuntimeSkills(ctx context.Context, req *types.QAReque
 	for _, drop := range dropped {
 		s.DebugLog(ctx, "unavailable selected skill: %s", drop.Name)
 	}
-	agentConfig.SkillsEnabled = false
-	agentConfig.SkillDirs = nil
-	agentConfig.AllowedSkills = nil
 	agentConfig.RuntimeLightweightSkills = nil
 	agentConfig.PinnedSkillNames = nil
 	for _, pkg := range packages {

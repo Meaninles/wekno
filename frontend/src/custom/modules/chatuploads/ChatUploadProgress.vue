@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FailureNotice from '../failures/FailureNotice.vue'
+import { publicFailure } from '../failures/failures'
 import type { UploadRow } from './uploads'
 defineProps<{ rows: UploadRow[]; preparing: boolean }>()
 defineEmits<{ (e: 'retry', key: string): void; (e: 'cancel'): void }>()
@@ -12,7 +14,7 @@ const labels = { queued: '处理中', uploading: '处理中', processing: '处�
       <span class="upload-name" :title="row.name">{{ row.name }}</span>
       <span role="status" :aria-label="`${row.name}：${labels[row.state]}`">{{ labels[row.state] }}</span>
       <button v-if="row.state === 'failed'" type="button" @click="$emit('retry', row.key)">重试</button>
-      <span v-if="row.error" class="upload-error">{{ row.error }}</span>
+      <FailureNotice v-if="row.state === 'failed'" class="upload-error" :failure="publicFailure(row.error, publicFailure(row.error).code === 'unknown' ? 'file_failed' : undefined)" />
     </div>
     <button type="button" @click="$emit('cancel')">取消文件处理并保留输入</button>
   </section>

@@ -35,3 +35,15 @@ func TestResolveKnowledgeBases_KBSelectionNoneIgnoresExplicitTargets(t *testing.
 		t.Fatalf("expected tag scopes to be cleared, got %v", req.TagScopes)
 	}
 }
+
+func TestResolveKnowledgeBasesNonePreservesOnlyValidatedSessionUploads(t *testing.T) {
+	req := &types.QARequest{
+		CustomAgent:      &types.CustomAgent{Config: types.CustomAgentConfig{KBSelectionMode: "none"}},
+		KnowledgeBaseIDs: []string{"unselected-kb"}, KnowledgeIDs: []string{"untrusted-document", "upload"},
+		SessionUploadKnowledgeIDs: []string{"upload", "historical-upload"},
+	}
+	kbs, files := (&sessionService{}).resolveKnowledgeBases(context.Background(), req)
+	if len(kbs) != 0 || len(files) != 2 || files[0] != "upload" || files[1] != "historical-upload" {
+		t.Fatalf("unexpected resolved scope: %v, %v", kbs, files)
+	}
+}

@@ -66,7 +66,6 @@ type AgentTypePresetConfig struct {
 	FAQPriorityEnabled              bool                       `yaml:"faq_priority_enabled"   json:"faq_priority_enabled,omitempty"`
 	FAQDirectAnswerThreshold        float64                    `yaml:"faq_direct_answer_threshold" json:"faq_direct_answer_threshold,omitempty"`
 	WebSearchEnabled                bool                       `yaml:"web_search_enabled"     json:"web_search_enabled,omitempty"`
-	ClaudeSDKWebSearchEnabled       bool                       `yaml:"claude_sdk_web_search_enabled" json:"claude_sdk_web_search_enabled,omitempty"`
 	WebFetchEnabled                 bool                       `yaml:"web_fetch_enabled"      json:"web_fetch_enabled,omitempty"`
 	WebFetchTopN                    int                        `yaml:"web_fetch_top_n"        json:"web_fetch_top_n,omitempty"`
 	HistoryTurns                    int                        `yaml:"history_turns"          json:"history_turns,omitempty"`

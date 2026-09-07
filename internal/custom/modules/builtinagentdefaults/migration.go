@@ -13,16 +13,16 @@ var factualRAGDefaultMigrations = []string{
 	`UPDATE custom_agents
 		SET config = jsonb_set(config, '{temperature}', '0.1'::jsonb, true),
 		    updated_at = NOW()
-		WHERE id = 'builtin-smart-reasoning'
+		WHERE id = 'builtin-knowledge-qa'
 		  AND is_builtin = TRUE
-		  AND config->>'agent_type' = 'rag-qa'
+		  AND config->>'agent_type' = 'knowledge-qa'
 		  AND config->>'temperature' IN ('0.7', '0.70')`,
 	`UPDATE custom_agents
 		SET config = jsonb_set(config, '{history_turns}', '10'::jsonb, true),
 		    updated_at = NOW()
-		WHERE id = 'builtin-smart-reasoning'
+		WHERE id = 'builtin-knowledge-qa'
 		  AND is_builtin = TRUE
-		  AND config->>'agent_type' = 'rag-qa'
+		  AND config->>'agent_type' = 'knowledge-qa'
 		  AND config->>'history_turns' = '5'`,
 }
 

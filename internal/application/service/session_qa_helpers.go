@@ -34,10 +34,10 @@ func (s *sessionService) resolveKnowledgeBases(
 
 	if customAgent != nil && customAgent.Config.KBSelectionMode == "none" {
 		if hasExplicitMention {
-			logger.Infof(ctx, "KBSelectionMode=none: ignoring request-specified KB/file/tag targets")
+			logger.Infof(ctx, "KBSelectionMode=none: retaining only validated session uploads")
 		}
 		req.TagScopes = nil
-		return nil, nil
+		return nil, append([]string(nil), req.SessionUploadKnowledgeIDs...)
 	}
 
 	if hasExplicitMention {
@@ -55,7 +55,7 @@ func (s *sessionService) resolveKnowledgeBases(
 	} else if customAgent != nil {
 		kbIDs = s.resolveKnowledgeBasesFromAgent(ctx, customAgent, req.Session.TenantID)
 	}
-	return kbIDs, knowledgeIDs
+	return kbIDs, dedupStrings(append(knowledgeIDs, req.SessionUploadKnowledgeIDs...))
 }
 
 func (s *sessionService) restrictTagScopesToAgentScope(
@@ -148,129 +148,6 @@ func (s *sessionService) resolveRetrievalTenantID(
 		}
 	}
 	return retrievalTenantID
-}
-
-// applyAgentOverridesToChatManage applies custom agent configuration overrides
-// to a ChatManage object that was initialized with system defaults.
-// This covers: system prompt, context template, temperature, max tokens, thinking,
-// retrieval thresholds, rewrite settings, fallback settings, FAQ strategy, and history turns.
-func (s *sessionService) applyAgentOverridesToChatManage(
-	ctx context.Context,
-	customAgent *types.CustomAgent,
-	cm *types.ChatManage,
-) {
-	if customAgent == nil {
-		return
-	}
-
-	// Ensure defaults are set
-	customAgent.EnsureDefaults()
-
-	// Override summary config fields
-	if customAgent.Config.SystemPrompt != "" {
-		cm.SummaryConfig.Prompt = customAgent.Config.SystemPrompt
-		logger.Infof(ctx, "Using custom agent's system_prompt")
-	}
-	if customAgent.Config.ContextTemplate != "" {
-		cm.SummaryConfig.ContextTemplate = customAgent.Config.ContextTemplate
-		logger.Infof(ctx, "Using custom agent's context_template")
-	}
-	if customAgent.Config.Temperature >= 0 {
-		cm.SummaryConfig.Temperature = customAgent.Config.Temperature
-		logger.Infof(ctx, "Using custom agent's temperature: %f", customAgent.Config.Temperature)
-	}
-	if customAgent.Config.MaxCompletionTokens > 0 {
-		cm.SummaryConfig.MaxCompletionTokens = customAgent.Config.MaxCompletionTokens
-		logger.Infof(ctx, "Using custom agent's max_completion_tokens: %d", customAgent.Config.MaxCompletionTokens)
-	}
-	// Agent-level thinking setting takes full control (no global fallback).
-	// EnsureDefaults pins nil to explicit false so thinking_control wire formats
-	// always receive a value.
-	cm.SummaryConfig.Thinking = customAgent.Config.Thinking
-	if customAgent.Config.Thinking != nil {
-		logger.Infof(ctx, "Using custom agent's thinking: %v", *customAgent.Config.Thinking)
-	} else {
-		logger.Warnf(ctx, "Custom agent thinking is unset after EnsureDefaults; model thinking param will be omitted")
-	}
-
-	// Override retrieval strategy settings
-	cm.RetrievalBudget = customAgent.Config.RetrievalBudget
-	if customAgent.Config.EmbeddingTopK > 0 {
-		cm.EmbeddingTopK = customAgent.Config.EmbeddingTopK
-	}
-	if customAgent.Config.KeywordThreshold > 0 {
-		cm.KeywordThreshold = customAgent.Config.KeywordThreshold
-	}
-	if customAgent.Config.VectorThreshold > 0 {
-		cm.VectorThreshold = customAgent.Config.VectorThreshold
-	}
-	if customAgent.Config.RerankTopK > 0 {
-		cm.RerankTopK = customAgent.Config.RerankTopK
-	}
-	cm.RerankThreshold = customAgent.Config.RerankThreshold
-	if customAgent.Config.RerankModelID != "" {
-		cm.RerankModelID = customAgent.Config.RerankModelID
-	}
-
-	// Override rewrite settings
-	cm.EnableRewrite = customAgent.Config.EnableRewrite
-	cm.EnableQueryExpansion = customAgent.Config.EnableQueryExpansion
-	if customAgent.Config.RewritePromptSystem != "" {
-		cm.RewritePromptSystem = customAgent.Config.RewritePromptSystem
-	}
-	if customAgent.Config.RewritePromptUser != "" {
-		cm.RewritePromptUser = customAgent.Config.RewritePromptUser
-	}
-	if customAgent.Config.QueryUnderstandModelID != "" {
-		cm.QueryUnderstandModelID = customAgent.Config.QueryUnderstandModelID
-		logger.Infof(ctx, "Using custom agent's query_understand_model_id: %s",
-			customAgent.Config.QueryUnderstandModelID)
-	}
-
-	// Override fallback settings
-	if customAgent.Config.FallbackStrategy != "" {
-		cm.FallbackStrategy = types.FallbackStrategy(customAgent.Config.FallbackStrategy)
-	}
-	if customAgent.Config.FallbackResponse != "" {
-		cm.FallbackResponse = customAgent.Config.FallbackResponse
-	}
-	if customAgent.Config.FallbackPrompt != "" {
-		cm.FallbackPrompt = customAgent.Config.FallbackPrompt
-	}
-
-	// Override web search settings
-	if customAgent.Config.WebSearchMaxResults > 0 {
-		cm.WebSearchMaxResults = customAgent.Config.WebSearchMaxResults
-	}
-
-	// Override history turns
-	if customAgent.Config.HistoryTurns > 0 {
-		cm.MaxRounds = customAgent.Config.HistoryTurns
-		logger.Infof(ctx, "Using custom agent's history_turns: %d", cm.MaxRounds)
-	}
-	if !customAgent.Config.MultiTurnEnabled {
-		cm.MaxRounds = 0
-		logger.Infof(ctx, "Multi-turn disabled by custom agent, clearing history")
-	}
-
-	// FAQ strategy settings
-	cm.FAQPriorityEnabled = customAgent.Config.FAQPriorityEnabled
-	cm.FAQDirectAnswerThreshold = customAgent.Config.FAQDirectAnswerThreshold
-	if cm.FAQPriorityEnabled {
-		logger.Infof(ctx, "FAQ priority enabled: threshold=%.2f",
-			cm.FAQDirectAnswerThreshold)
-	}
-
-	// Data analysis pipeline stage (opt-in, default off).
-	cm.DataAnalysisEnabled = customAgent.Config.DataAnalysisEnabled
-	if cm.DataAnalysisEnabled {
-		logger.Infof(ctx, "Data analysis pipeline stage enabled by custom agent")
-	}
-
-	if len(customAgent.Config.IntentPrompts) > 0 {
-		cm.IntentPromptOverrides = customAgent.Config.IntentPrompts
-		logger.Infof(ctx, "Using custom agent's intent_prompts (%d overrides)", len(cm.IntentPromptOverrides))
-	}
 }
 
 // restrictMentionsToAgentScope filters user-provided @mention targets (KB IDs

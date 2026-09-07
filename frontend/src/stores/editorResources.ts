@@ -22,10 +22,6 @@ const emptyPlaceholders = (): PlaceholdersResponse => ({
   all: [],
   system_prompt: [],
   agent_system_prompt: [],
-  context_template: [],
-  rewrite_system_prompt: [],
-  rewrite_prompt: [],
-  fallback_prompt: [],
 })
 
 type EditorResourceKey =

@@ -12,7 +12,7 @@ import (
 func TestMergeResetConfigPreservesRuntimeBindings(t *testing.T) {
 	disabled := false
 	defaultConfig := types.CustomAgentConfig{
-		AgentType:           types.AgentTypeDataAnalysis,
+		AgentType:           types.AgentTypeGeneralAgent,
 		ModelID:             "default-model",
 		RerankModelID:       "default-rerank",
 		WebSearchProviderID: "default-provider",
@@ -21,9 +21,9 @@ func TestMergeResetConfigPreservesRuntimeBindings(t *testing.T) {
 		MCPSelectionMode:    "none",
 	}
 	currentConfig := types.CustomAgentConfig{
-		ModelID:                    "current-model",
-		RerankModelID:              "current-rerank",
-		QueryUnderstandModelID:     "current-query-model",
+		ModelID:       "current-model",
+		RerankModelID: "current-rerank",
+
 		VLMModelID:                 "current-vlm",
 		ASRModelID:                 "current-asr",
 		ImageStorageProvider:       "cos",
@@ -43,7 +43,7 @@ func TestMergeResetConfigPreservesRuntimeBindings(t *testing.T) {
 	if got.ModelID != "current-model" || got.RerankModelID != "current-rerank" {
 		t.Fatalf("model bindings were not preserved: %#v", got)
 	}
-	if got.QueryUnderstandModelID != "current-query-model" || got.VLMModelID != "current-vlm" || got.ASRModelID != "current-asr" {
+	if got.VLMModelID != "current-vlm" || got.ASRModelID != "current-asr" {
 		t.Fatalf("auxiliary model bindings were not preserved: %#v", got)
 	}
 	if got.ImageStorageProvider != "cos" {
@@ -71,7 +71,7 @@ func TestApplyReferenceModelDefaultsAddsReservedProfessionalSkills(t *testing.T)
 		IsBuiltin: true,
 		TenantID:  10002,
 		Config: types.CustomAgentConfig{
-			AgentMode:                       types.AgentModeSmartReasoning,
+			AgentMode:                       types.AgentModeUnified,
 			AgentType:                       types.AgentTypeGeneralAgent,
 			ProfessionalSkillsSelectionMode: "none",
 			SelectedProfessionalSkills:      []string{"tenant-skill"},
@@ -100,7 +100,7 @@ func TestApplyReferenceModelDefaultsDoesNotAddReservedProfessionalSkillsToDataAn
 		IsBuiltin: true,
 		TenantID:  10002,
 		Config: types.CustomAgentConfig{
-			AgentMode:                       types.AgentModeSmartReasoning,
+			AgentMode:                       types.AgentModeUnified,
 			AgentType:                       types.AgentTypeDataAnalysis,
 			ProfessionalSkillsSelectionMode: "none",
 		},
@@ -118,7 +118,7 @@ func TestApplyReferenceModelDefaultsDoesNotAddReservedProfessionalSkillsToDataAn
 
 func TestMergeResetConfigClearsDataSourcesForNonDataAnalysisAgents(t *testing.T) {
 	defaultConfig := types.CustomAgentConfig{
-		AgentType:     types.AgentTypeGeneralAgent,
+		AgentType:     types.AgentTypeKnowledgeQA,
 		DBDataSources: []string{},
 	}
 	currentConfig := types.CustomAgentConfig{
@@ -184,7 +184,7 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 		IsBuiltin: true,
 		TenantID:  sourceTenantID,
 		Config: types.CustomAgentConfig{
-			AgentMode:           types.AgentModeSmartReasoning,
+			AgentMode:           types.AgentModeUnified,
 			AgentType:           types.AgentTypeGeneralAgent,
 			ModelID:             "source-chat-model",
 			RerankModelID:       "source-rerank-model",
@@ -200,7 +200,7 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 		IsBuiltin: true,
 		TenantID:  targetTenantID,
 		Config: types.CustomAgentConfig{
-			AgentMode:          types.AgentModeSmartReasoning,
+			AgentMode:          types.AgentModeUnified,
 			AgentType:          types.AgentTypeGeneralAgent,
 			ModelID:            "old-model",
 			RerankModelID:      "old-rerank",
@@ -289,12 +289,12 @@ func TestEnsureUserProvisionedCreatesMissingBuiltinAgentsWithTenantModelDefaults
 		Status: types.ModelStatusActive,
 	})
 	requireCreate(t, db, &types.CustomAgent{
-		ID:        types.BuiltinQuickAnswerID,
-		Name:      "快速问答",
+		ID:        types.BuiltinKnowledgeQAID,
+		Name:      "知识问答",
 		IsBuiltin: true,
 		TenantID:  sourceTenantID,
 		Config: types.CustomAgentConfig{
-			AgentMode:           types.AgentModeQuickAnswer,
+			AgentMode:           types.AgentModeUnified,
 			ModelID:             "source-deepseek-model",
 			RerankModelID:       "source-rerank-model",
 			Temperature:         0.7,
@@ -303,12 +303,12 @@ func TestEnsureUserProvisionedCreatesMissingBuiltinAgentsWithTenantModelDefaults
 		},
 	})
 	requireCreate(t, db, &types.CustomAgent{
-		ID:        types.BuiltinSmartReasoningID,
-		Name:      "智能推理",
+		ID:        types.BuiltinGeneralAgentID,
+		Name:      "通用智能体",
 		IsBuiltin: true,
 		TenantID:  targetTenantID,
 		Config: types.CustomAgentConfig{
-			AgentMode: types.AgentModeSmartReasoning,
+			AgentMode: types.AgentModeUnified,
 			ModelID:   "tenant-custom-model",
 		},
 	})
@@ -321,32 +321,32 @@ func TestEnsureUserProvisionedCreatesMissingBuiltinAgentsWithTenantModelDefaults
 	expectedRerankID := deterministicModelCloneID(targetTenantID, "source-rerank-model")
 
 	var quickAnswer types.CustomAgent
-	if err := db.Where("id = ? AND tenant_id = ?", types.BuiltinQuickAnswerID, targetTenantID).
+	if err := db.Where("id = ? AND tenant_id = ?", types.BuiltinKnowledgeQAID, targetTenantID).
 		First(&quickAnswer).Error; err != nil {
-		t.Fatalf("expected tenant quick-answer agent: %v", err)
+		t.Fatalf("expected tenant knowledge-qa agent: %v", err)
 	}
 	if !quickAnswer.IsBuiltin {
-		t.Fatalf("quick-answer should be built-in")
+		t.Fatalf("knowledge-qa should be built-in")
 	}
 	if quickAnswer.Config.ModelID != expectedChatID {
-		t.Fatalf("quick-answer model_id = %q, want %q", quickAnswer.Config.ModelID, expectedChatID)
+		t.Fatalf("knowledge-qa model_id = %q, want %q", quickAnswer.Config.ModelID, expectedChatID)
 	}
 	if quickAnswer.Config.RerankModelID != expectedRerankID {
-		t.Fatalf("quick-answer rerank_model_id = %q, want %q", quickAnswer.Config.RerankModelID, expectedRerankID)
+		t.Fatalf("knowledge-qa rerank_model_id = %q, want %q", quickAnswer.Config.RerankModelID, expectedRerankID)
 	}
 
 	var clonedChat types.Model
 	if err := db.Where("id = ? AND tenant_id = ?", expectedChatID, targetTenantID).First(&clonedChat).Error; err != nil {
-		t.Fatalf("expected cloned quick-answer chat model: %v", err)
+		t.Fatalf("expected cloned knowledge-qa chat model: %v", err)
 	}
 	if clonedChat.Name != "deepseek-v4-flash-int8" || clonedChat.ManagedBy != modelCloneManagedBy {
 		t.Fatalf("unexpected cloned chat model: %#v", clonedChat)
 	}
 
 	var smartReasoning types.CustomAgent
-	if err := db.Where("id = ? AND tenant_id = ?", types.BuiltinSmartReasoningID, targetTenantID).
+	if err := db.Where("id = ? AND tenant_id = ?", types.BuiltinGeneralAgentID, targetTenantID).
 		First(&smartReasoning).Error; err != nil {
-		t.Fatalf("expected existing smart-reasoning agent: %v", err)
+		t.Fatalf("expected existing knowledge-qa agent: %v", err)
 	}
 	if smartReasoning.Config.ModelID != "tenant-custom-model" {
 		t.Fatalf("existing built-in agent should not be overwritten, got %#v", smartReasoning.Config)
@@ -355,40 +355,29 @@ func TestEnsureUserProvisionedCreatesMissingBuiltinAgentsWithTenantModelDefaults
 	if err := svc.EnsureUserProvisioned(context.Background(), targetUser); err != nil {
 		t.Fatalf("EnsureUserProvisioned second call returned error: %v", err)
 	}
-	var quickAnswerCount int64
+	var knowledgeQACount int64
 	if err := db.Model(&types.CustomAgent{}).
-		Where("id = ? AND tenant_id = ?", types.BuiltinQuickAnswerID, targetTenantID).
-		Count(&quickAnswerCount).Error; err != nil {
-		t.Fatalf("count quick-answer: %v", err)
+		Where("id = ? AND tenant_id = ?", types.BuiltinKnowledgeQAID, targetTenantID).
+		Count(&knowledgeQACount).Error; err != nil {
+		t.Fatalf("count knowledge-qa: %v", err)
 	}
-	if quickAnswerCount != 1 {
-		t.Fatalf("quick-answer row count = %d, want 1", quickAnswerCount)
+	if knowledgeQACount != 1 {
+		t.Fatalf("knowledge-qa row count = %d, want 1", knowledgeQACount)
 	}
 }
 
 func TestApplyReferenceModelConfigSyncsPromptFields(t *testing.T) {
 	svc := NewService(nil, nil)
 	current := types.CustomAgentConfig{
-		SystemPrompt:        "target system",
-		SystemPromptID:      "target_system_id",
-		ContextTemplate:     "target context",
-		ContextTemplateID:   "target_context_id",
-		RewritePromptSystem: "target rewrite system",
-		RewritePromptUser:   "target rewrite user",
-		FallbackPrompt:      "target fallback",
-		IntentPrompts:       map[string]string{"chitchat": "target chitchat"},
-		MCPSelectionMode:    "selected",
-		MCPServices:         []string{"mcp-1"},
+		SystemPrompt:   "target system",
+		SystemPromptID: "target_system_id",
+
+		MCPSelectionMode: "selected",
+		MCPServices:      []string{"mcp-1"},
 	}
 	reference := types.CustomAgentConfig{
-		SystemPrompt:        "reference system",
-		SystemPromptID:      "reference_system_id",
-		ContextTemplate:     "reference context",
-		ContextTemplateID:   "reference_context_id",
-		RewritePromptSystem: "reference rewrite system",
-		RewritePromptUser:   "reference rewrite user",
-		FallbackPrompt:      "reference fallback",
-		IntentPrompts:       map[string]string{"chitchat": "reference chitchat"},
+		SystemPrompt:   "reference system",
+		SystemPromptID: "reference_system_id",
 	}
 
 	got, err := svc.applyReferenceModelConfig(context.Background(), 10002, current, reference)
@@ -399,22 +388,7 @@ func TestApplyReferenceModelConfigSyncsPromptFields(t *testing.T) {
 	if got.SystemPrompt != "reference system" || got.SystemPromptID != "reference_system_id" {
 		t.Fatalf("system prompt fields were not synced: %#v", got)
 	}
-	if got.ContextTemplate != "reference context" || got.ContextTemplateID != "reference_context_id" {
-		t.Fatalf("context template fields were not synced: %#v", got)
-	}
-	if got.RewritePromptSystem != "reference rewrite system" || got.RewritePromptUser != "reference rewrite user" {
-		t.Fatalf("rewrite prompt fields were not synced: %#v", got)
-	}
-	if got.FallbackPrompt != "reference fallback" {
-		t.Fatalf("fallback prompt was not synced: %#v", got)
-	}
-	if got.IntentPrompts["chitchat"] != "reference chitchat" {
-		t.Fatalf("intent prompts were not synced: %#v", got.IntentPrompts)
-	}
-	reference.IntentPrompts["chitchat"] = "changed"
-	if got.IntentPrompts["chitchat"] != "reference chitchat" {
-		t.Fatalf("intent prompts should be cloned, got %#v", got.IntentPrompts)
-	}
+
 	if got.MCPSelectionMode != "selected" || len(got.MCPServices) != 1 || got.MCPServices[0] != "mcp-1" {
 		t.Fatalf("MCP settings should remain target-local: %#v", got)
 	}

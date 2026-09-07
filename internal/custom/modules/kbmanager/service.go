@@ -24,7 +24,7 @@ import (
 
 const managementChannel = "agent_knowledge_manager"
 
-// RunFileResolver is implemented by the General Agent runtime. Only two
+// RunFileResolver is implemented by the unified Agent Harness. Only two
 // current-run source kinds are accepted: a registered artifact token or a
 // byte-verified uploaded/selected input-file ID.
 type RunFileResolver interface {
@@ -132,7 +132,7 @@ func (s *Service) Stop() {
 
 type FileSource struct {
 	SourceType string `json:"source_type" jsonschema:"artifact or input_file; URLs and filesystem paths are forbidden"`
-	SourceID   string `json:"source_id" jsonschema:"file_token returned by create_artifact, or id from input_files/original_input_manifest.json"`
+	SourceID   string `json:"source_id" jsonschema:"file_token returned by publish_artifact, or id from input_files/original_input_manifest.json"`
 	FileName   string `json:"file_name,omitempty" jsonschema:"required for artifact sources; optional override for input_file sources; keep a knowledge-base-supported extension"`
 }
 
@@ -172,7 +172,7 @@ type operationActor struct {
 func actorFromContext(ctx context.Context, scope ToolScope) (operationActor, error) {
 	meta, ok := agenttools.ToolExecFromContext(ctx)
 	if !ok || strings.TrimSpace(meta.RunID) == "" {
-		return operationActor{}, fmt.Errorf("knowledge mutation requires an active General Agent run")
+		return operationActor{}, fmt.Errorf("knowledge mutation requires an active agent run")
 	}
 	callerTenantID, ok := types.TenantIDFromContext(ctx)
 	if !ok || callerTenantID == 0 {

@@ -219,7 +219,6 @@ function convertToLegacyFormat(model: ModelConfig) {
     apiKey: '',
     provider: model.parameters.provider || '',
     rerankMaxInputTokens: model.parameters.rerank_parameters?.max_input_tokens,
-    runtimeAdapter: model.parameters.extra_config?.agent_runtime_adapter || 'platform',
     dimension: model.parameters.embedding_parameters?.dimension,
     supportsDimensionOverride: model.parameters.embedding_parameters?.supports_dimension_override || false,
     isBuiltin: model.is_builtin || false,
@@ -477,7 +476,6 @@ const handleModelSave = async (modelData: any) => {
       delete extraConfig.thinking_control
     }
     if (saveType === 'chat' || saveType === 'vllm') {
-      extraConfig.agent_runtime_adapter = modelData.runtimeAdapter || 'platform'
     }
     delete extraConfig.general_agent_claude_base_url
     if (saveType === 'asr') {

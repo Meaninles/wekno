@@ -20,9 +20,7 @@ const (
 
 // saveImageAttachments decodes base64 images from the request and saves them to
 // storage. The images slice is mutated in place: URL is populated.
-// This is always called when images are present. VLM analysis is handled
-// separately (either in the pipeline rewrite step for RAG paths, or via
-// analyzeImageAttachments for pure chat paths with non-vision models).
+// Vision interpretation is owned by the unified agent runtime.
 func (h *Handler) saveImageAttachments(ctx context.Context, images []ImageAttachment, tenantID uint64, storageProvider string) error {
 	return SaveImageAttachments(ctx, h.fileService, images, tenantID, storageProvider)
 }
@@ -62,65 +60,6 @@ func SaveImageAttachments(ctx context.Context, fileService interfaces.FileServic
 	}
 
 	return nil
-}
-
-// analyzeImageAttachments runs VLM analysis on saved images and populates Caption.
-// Used as a fallback for pure chat paths where the pipeline rewrite step won't run.
-// For RAG paths, image analysis is handled in the pipeline rewrite step instead.
-func (h *Handler) analyzeImageAttachments(ctx context.Context, images []ImageAttachment, vlmModelID string, userQuery string) {
-	AnalyzeImageAttachments(ctx, h.modelService, images, vlmModelID, userQuery)
-}
-
-// AnalyzeImageAttachments runs VLM analysis on saved images and populates Caption.
-func AnalyzeImageAttachments(ctx context.Context, modelService interfaces.ModelService, images []ImageAttachment, vlmModelID string, userQuery string) {
-	if len(images) == 0 || vlmModelID == "" {
-		return
-	}
-	if modelService == nil {
-		logger.Warnf(ctx, "No model service available for image analysis, skipping")
-		return
-	}
-
-	vlmModel, err := modelService.GetVLMModel(ctx, vlmModelID)
-	if err != nil {
-		logger.Warnf(ctx, "No VLM model available for image analysis, skipping: %v", err)
-		return
-	}
-
-	for i := range images {
-		img := &images[i]
-		if img.Data == "" {
-			continue
-		}
-		imgBytes, _, decErr := decodeDataURI(img.Data)
-		if decErr != nil {
-			logger.Warnf(ctx, "Failed to decode image %d for VLM analysis: %v", i, decErr)
-			continue
-		}
-		prompt := buildImageAnalysisPrompt(userQuery)
-		analysis, analysisErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, prompt)
-		if analysisErr != nil {
-			logger.Warnf(ctx, "VLM analysis failed for image %d: %v", i, analysisErr)
-		} else {
-			img.Caption = analysis
-		}
-	}
-}
-
-// buildImageAnalysisPrompt generates a context-aware VLM prompt based on the
-// user's question. Instead of doing generic OCR + Caption separately, we do a
-// single analysis call that is tailored to the user's intent.
-func buildImageAnalysisPrompt(userQuery string) string {
-	if strings.TrimSpace(userQuery) == "" {
-		return "请分析这张图片的内容。如果包含文字，请提取关键文字信息；如果是自然图片，请描述其主要内容。用简洁的中文回答。"
-	}
-	return fmt.Sprintf(
-		"用户的问题是：%s\n\n请分析图片中与用户问题相关的内容。"+
-			"如果图片包含文字/文档/表格，请提取与问题相关的关键信息。"+
-			"如果是自然图片/截图/图表，请描述与问题相关的视觉内容。"+
-			"用简洁的中文回答，只输出分析结果。",
-		userQuery,
-	)
 }
 
 func decodeDataURI(dataURI string) ([]byte, string, error) {

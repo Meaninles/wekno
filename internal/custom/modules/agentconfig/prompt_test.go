@@ -8,9 +8,9 @@ import (
 
 func TestRepairPromptReferenceResolution(t *testing.T) {
 	templates := &config.PromptTemplatesConfig{AgentSystemPrompt: []config.PromptTemplate{{ID: "preset", Content: "shipped body"}}, ContextTemplate: []config.PromptTemplate{{ID: "context", Content: "evidence"}}}
-	original := types.CustomAgentConfig{SystemPromptID: "preset", ContextTemplateID: "context"}
+	original := types.CustomAgentConfig{SystemPromptID: "preset"}
 	got, err := ResolvePrompts(original, templates)
-	if err != nil || got.SystemPrompt != "shipped body" || got.ContextTemplate != "evidence" || original.SystemPrompt != "" {
+	if err != nil || got.SystemPrompt != "shipped body" || original.SystemPrompt != "" {
 		t.Fatal(got, err)
 	}
 	original.SystemPrompt = "user override"

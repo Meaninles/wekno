@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -146,4 +147,13 @@ func TestResolveChatModelIDUsesValidSummaryModelOverride(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "override-chat", modelID)
+}
+
+type stubModelService struct {
+	interfaces.ModelService
+	modelsByID map[string]*types.Model
+}
+
+func (s *stubModelService) GetModelByID(_ context.Context, id string) (*types.Model, error) {
+	return s.modelsByID[id], nil
 }

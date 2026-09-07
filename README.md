@@ -29,8 +29,7 @@ Embed SDK 同时保留 `window.WeKnora`，并提供 `window.ZhiHui` 品牌别名
 |---|---|---|
 | 桌面前端 | `http://localhost:5177` | `frontend/` 开发服务 |
 | 后端 API | `http://localhost:8080` | runtime profile 的 `runtime-entry` API 入口 |
-| general-agent | `http://127.0.0.1:8091/health` | 通用/数据/表格智能体旁路运行时 |
-| document-processing-agent | `http://127.0.0.1:8093/health` | Word、Excel、PDF、PPT 处理运行时 |
+| Agent Runtime | 容器内部 `/health` | 全部问答共用 AgentScope Harness |
 | Langfuse | `http://localhost:3000` | 启用对应 profile 后可用 |
 
 ## 平台能力
@@ -79,8 +78,7 @@ flowchart TB
 
     subgraph Execution["执行层"]
         DR["DocReader ×3"]
-        GA["general-agent ×2"]
-        DA["document-processing-agent ×2"]
+        GA["agent-runtime ×2"]
         Model["模型服务\nChat / Embedding / Rerank / VLM / ASR"]
     end
 
@@ -95,9 +93,7 @@ flowchart TB
     DQ --> DR
     DQ --> Model
     Agent --> GA
-    Agent --> DA
     GA --> Agent
-    DA --> Agent
     Control --> PG
     DQ <--> Redis
     Control --> Object
@@ -206,16 +202,9 @@ flowchart LR
 - Wiki 图：节点按类型分类、搜索和分页；选择节点只加载其一跳邻接图；点击关联
   节点会以它为新中心继续加载，不展示整库全图。
 
-### 7. Agent 双副本边界
+### 7. 统一 Agent Harness
 
-`general-agent` 和 `document-processing-agent` 都支持两个或更多副本。一次 SDK
-运行固定在一个 Pod 的临时工作目录；Python 旁路服务不直接连接 WeKnora 数据库、
-业务数据库、MCP 或对象存储凭据。工具执行和最终产物上传都回到 Go app，因而：
-
-- 请求不需要依赖 Agent 共享目录或粘性会话。
-- 已完成产物可以从任意 app 下载。
-- Agent Pod 崩溃不会损坏已提交产物；未提交运行按失败/重试处理。
-- 通用、数据分析、表格分析和文档处理各自的工具及安全特点保持不变。
+所有问答使用同一 AgentScope Harness。各智能体保留独立类型和能力：知识问答固定 15 次，其余类型固定 50 次。Go 持久化 Run、检查点、工具回执与事件；Worker 使用租约和 epoch 接管，最终消息与结果原子提交。工作区独立于 Worker，最终产物经 Go 校验并写入私有对象存储。详见[统一 Agent Harness 实现与验证](./docs/custom/统一AgentHarness实现方案.md)。
 
 ## 生产部署
 
@@ -239,8 +228,7 @@ flowchart LR
 | wiki-worker | 2 | 500m / 1Gi | 1500m / 2Gi | hostPath scratch |
 | maintenance | 2 | 150m / 384Mi | 750m / 1Gi | 无 |
 | DocReader | 3 | 750m / 1Gi | 4C / 4Gi | hostPath scratch |
-| general-agent | 2 | 250m / 768Mi | 1500m / 2Gi | hostPath scratch |
-| document-processing-agent | 2 | 500m / 1280Mi | 2500m / 4Gi | hostPath scratch |
+| agent-runtime | 2 | 250m / 512Mi | 2C / 2Gi | 独立受限工作区 |
 | frontend | 2 | 0.1C / 128Mi | 0.5C / 512Mi | 无 |
 | mobile-web | 2 | 0.05C / 64Mi | 0.3C / 512Mi | 无 |
 
@@ -379,7 +367,7 @@ docker compose -p weknora-runtime-profile-e2e \
 Agent 旁路服务：
 
 ```bash
-docker compose -f custom/docker-compose.general-agent.yml up -d --build
+docker compose -f custom/docker-compose.agent-runtime.yml up -d --build
 curl http://127.0.0.1:8091/health
 curl http://127.0.0.1:8093/health
 ```

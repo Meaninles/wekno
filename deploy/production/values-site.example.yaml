@@ -11,9 +11,6 @@ app:
     tag: REPLACE_GIT_SHA
     digest: REPLACE_APP_DIGEST
     pullPolicy: IfNotPresent
-  sandbox:
-    dockerImage: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-sandbox@REPLACE_SANDBOX_DIGEST
-
 docreader:
   image:
     repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-docreader
@@ -21,19 +18,14 @@ docreader:
     digest: REPLACE_DOCREADER_DIGEST
     pullPolicy: IfNotPresent
 
-generalAgent:
+agentRuntime:
   image:
-    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-general-agent
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-agent-runtime
     tag: REPLACE_GIT_SHA
-    digest: REPLACE_GENERAL_AGENT_DIGEST
+    digest: REPLACE_AGENT_RUNTIME_DIGEST
     pullPolicy: IfNotPresent
-
-documentProcessingAgent:
-  image:
-    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-document-processing-agent
-    tag: REPLACE_GIT_SHA
-    digest: REPLACE_DOCUMENT_AGENT_DIGEST
-    pullPolicy: IfNotPresent
+  workspace:
+    image: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-agent-workspace@REPLACE_AGENT_WORKSPACE_DIGEST
 
 frontend:
   image:

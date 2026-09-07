@@ -419,7 +419,7 @@ func TestOrganizationSourcesIncludeDatabaseSourcesFromSharedAgent(t *testing.T) 
 		TenantID: 1,
 		Name:     "Professional Data Analyst",
 		Config: wktypes.CustomAgentConfig{
-			AgentMode:     wktypes.AgentModeSmartReasoning,
+			AgentMode:     wktypes.AgentModeUnified,
 			AgentType:     wktypes.AgentTypeDataAnalysis,
 			DBDataSources: []string{src.ID},
 		},

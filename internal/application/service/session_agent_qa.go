@@ -9,189 +9,32 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/Tencent/WeKnora/internal/models/chat"
-	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// AgentQA performs agent-based question answering with conversation history and streaming support
-// customAgent is optional - if provided, uses custom agent configuration instead of tenant defaults
-// summaryModelID is optional - if provided, overrides the model from customAgent config
-func (s *sessionService) AgentQA(
-	ctx context.Context,
-	req *types.QARequest,
-	eventBus *event.EventBus,
-) error {
-	sessionID := req.Session.ID
-
-	// customAgent is required for AgentQA (handler has already done permission check for shared agent)
-	if req.CustomAgent == nil {
-		logger.Warnf(ctx, "Custom agent not provided for session: %s", sessionID)
-		return errors.New("custom agent configuration is required for agent QA")
+// AgentQA and KnowledgeQA share the registered durable runtime.
+func (s *sessionService) AgentQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+	if req == nil || req.Session == nil {
+		return errors.New("QA request and session are required")
 	}
-
-	// Ensure defaults are set
-	req.CustomAgent.EnsureDefaults()
-
-	agentConfig, err := s.BuildAgentRuntimeConfig(ctx, req)
-	if err != nil {
-		return err
-	}
-	effectiveModelID := agentConfig.RuntimeModelID
-	if effectiveModelID == "" {
-		logger.Warnf(ctx, "No summary model configured for custom agent %s", req.CustomAgent.ID)
-		return errors.New("summary model (model_id) is not configured in custom agent settings")
-	}
-
-	summaryModel, err := s.modelService.GetChatModel(ctx, effectiveModelID)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to get chat model: %v", err)
-		return fmt.Errorf("failed to get chat model: %w", err)
-	}
-
-	// Get rerank model from custom agent config only when knowledge_search can
-	// actually run. A disabled KB scope makes all KB tools ineffective, so it
-	// must not force users to configure an otherwise-unused rerank model.
-	var rerankModel rerank.Reranker
-	hasKnowledgeSearchTool := false
-	for _, tool := range agentConfig.AllowedTools {
-		if tool == tools.ToolKnowledgeSearch {
-			hasKnowledgeSearchTool = true
-			break
-		}
-	}
-
-	if hasKnowledgeSearchTool {
-		rerankModelID := req.CustomAgent.Config.RerankModelID
-		if rerankModelID == "" {
-			logger.Infof(ctx, "No rerank model configured for custom agent %s; knowledge_search will use chat-model rerank/fallback", req.CustomAgent.ID)
-		} else {
-			rerankModel, err = s.modelService.GetRerankModel(ctx, rerankModelID)
-			if err != nil {
-				logger.Warnf(ctx, "Failed to get rerank model: %v", err)
-				return fmt.Errorf("failed to get rerank model: %w", err)
-			}
-		}
-	} else {
-		logger.Infof(ctx, "knowledge_search is unavailable for the effective agent scope, skipping rerank model initialization")
-	}
-
-	// Load multi-turn history directly from DB (the single source of truth).
-	// The shared history projection includes bounded dialogue and read handles;
-	// old tool transcripts stay archived, with exact evidence validated on read.
-	var llmContext []chat.Message
-	var durableUserContext string
-	if agentConfig.MultiTurnEnabled {
-		historyTurns := agentConfig.HistoryTurns
-		if historyTurns <= 0 {
-			historyTurns = 5
-		}
-		llmContext, durableUserContext, err = LoadAgentHistoryWithArchive(ctx, s.messageRepo, sessionID, historyTurns, req.UserMessageID, req.AssistantMessageID)
+	copyReq := *req
+	if copyReq.CustomAgent == nil {
+		kbIDs, knowledgeIDs := s.resolveKnowledgeBases(ctx, req)
+		modelID, err := s.resolveChatModelID(ctx, req, kbIDs, knowledgeIDs)
 		if err != nil {
-			logger.Warnf(ctx, "Failed to load agent history from DB: %v, continuing without history", err)
-			llmContext = []chat.Message{}
+			return err
 		}
-		logger.Infof(ctx, "Loaded %d history messages from DB (turns=%d, archive_chars=%d)",
-			len(llmContext), historyTurns, len([]rune(durableUserContext)))
-	} else {
-		logger.Infof(ctx, "Multi-turn disabled for this agent, running without history")
-		llmContext = []chat.Message{}
-	}
-	agentConfig.DurableUserContext = durableUserContext
-
-	if agentConfig.AgentType == types.AgentTypeTableAnalysis {
-		emitTableAnalysisDisplayIntentProgress(ctx, eventBus, sessionID, nil, "start")
-		intent, intentErr := classifyTableAnalysisDisplayIntent(ctx, summaryModel, req, agentConfig, llmContext)
-		if intentErr != nil {
-			logger.Warnf(ctx, "Table analysis display intent classification failed: %v", intentErr)
-			intent = normalizeTableAnalysisDisplayIntent(&types.TableAnalysisDisplayIntent{
-				ChartRequested: false,
-				Confidence:     "error",
-				Reason:         fmt.Sprintf("图表展示意图识别失败，按不需要图表展示处理：%v", intentErr),
-				Source:         "llm_intent_classifier",
-			})
+		tenantID, _ := types.TenantIDFromContext(ctx)
+		copyReq.CustomAgent = types.GetBuiltinAgent(types.BuiltinKnowledgeQAID, tenantID)
+		if copyReq.CustomAgent == nil {
+			return errors.New("default QA profile is unavailable")
 		}
-		agentConfig.TableAnalysisDisplayIntent = intent
-		emitTableAnalysisDisplayIntentProgress(ctx, eventBus, sessionID, intent, "success")
+		copyReq.CustomAgent.Config.KBSelectionMode = "selected"
+		copyReq.CustomAgent.Config.KnowledgeBases = kbIDs
+		copyReq.KnowledgeIDs = knowledgeIDs
+		copyReq.SummaryModelID = modelID
 	}
-
-	// Create agent engine with EventBus
-	logger.Info(ctx, "Creating agent engine")
-	engine, err := s.agentService.CreateAgentEngine(
-		ctx,
-		agentConfig,
-		summaryModel,
-		rerankModel,
-		eventBus,
-		sessionID,
-		req.AssistantMessageID,
-	)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to create agent engine: %v", err)
-		return err
-	}
-
-	// Route image data based on agent model's vision capability
-	var agentModelSupportsVision bool
-	if effectiveModelID != "" {
-		if modelInfo, err := s.modelService.GetModelByID(ctx, effectiveModelID); err == nil && modelInfo != nil {
-			agentModelSupportsVision = modelInfo.Parameters.SupportsVision
-		}
-	}
-
-	var agentContext string
-	var agentImageURLs []string
-	if agentModelSupportsVision && len(req.ImageURLs) > 0 {
-		agentImageURLs = req.ImageURLs
-		logger.Infof(ctx, "Agent model supports vision, passing %d image(s) directly", len(agentImageURLs))
-	} else if req.ImageDescription != "" {
-		agentContext = "[用户上传图片内容]\n" + req.ImageDescription
-		logger.Infof(ctx, "Agent model does not support vision, appending image description (%d chars)", len(req.ImageDescription))
-	}
-	if req.QuotedContext != "" {
-		agentContext += "\n\n" + req.QuotedContext
-	}
-	// Inject attachment content (documents, audio transcripts, etc.) so the agent
-	// can see uploaded files. Mirrors the behavior of the KnowledgeQA pipeline
-	// (see chat_pipeline/into_chat_message.go).
-	if len(req.Attachments) > 0 {
-		agentContext += req.Attachments.BuildPrompt()
-		logger.Infof(ctx, "Appended %d attachment(s) to agent query", len(req.Attachments))
-	}
-	if agentConfig.AgentType == types.AgentTypeTableAnalysis && agentConfig.TableAnalysisDisplayIntent != nil {
-		agentContext = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentContext
-	}
-	engine.SetCurrentTurnContext(agentContext)
-
-	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
-	// the agent engine only; we intentionally do not persist them on user messages
-	// so multi-turn history stays clean and is not skewed by stale @mention scope.
-
-	// Execute agent with streaming (asynchronously)
-	// Events will be emitted to EventBus and handled by the Handler layer
-	logger.Info(ctx, "Executing agent with streaming")
-	if _, err := engine.Execute(
-		ctx,
-		sessionID,
-		req.AssistantMessageID,
-		req.Query,
-		llmContext,
-		agentImageURLs,
-	); err != nil {
-		logger.Errorf(ctx, "Agent execution failed: %v", err)
-		// Emit error event to the EventBus used by this agent
-		eventBus.Emit(ctx, event.Event{
-			Type:      event.EventError,
-			SessionID: sessionID,
-			Data: event.ErrorData{
-				Error:     err.Error(),
-				Stage:     "agent_execution",
-				SessionID: sessionID,
-			},
-		})
-	}
-	// Return empty - events will be handled by Handler via EventBus subscription
-	return nil
+	return runUnifiedAgent(ctx, &copyReq, bus)
 }
 
 // BuildAgentRuntimeConfig creates the same runtime AgentConfig used by AgentQA,
@@ -275,7 +118,6 @@ func (s *sessionService) buildAgentConfig(
 		WebSearchEnabled:            customAgent.Config.WebSearchEnabled && req.WebSearchEnabled,
 		WebSearchMaxResults:         customAgent.Config.WebSearchMaxResults,
 		WebSearchProviderID:         customAgent.Config.WebSearchProviderID,
-		ClaudeSDKWebSearchEnabled:   customAgent.Config.ClaudeSDKWebSearchEnabled && customAgent.Config.WebSearchEnabled && req.WebSearchEnabled,
 		WebFetchEnabled:             customAgent.Config.WebFetchEnabled,
 		WebFetchTopN:                customAgent.Config.WebFetchTopN,
 		MultiTurnEnabled:            customAgent.Config.MultiTurnEnabled,
@@ -372,7 +214,7 @@ func (s *sessionService) buildAgentConfig(
 	// Build search targets using agent's tenant (handler has validated access for shared agent)
 	searchTargets, err := s.buildSearchTargets(ctx, agentTenantID, agentConfig.KnowledgeBases, agentConfig.KnowledgeIDs, req.TagScopes)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to build search targets for agent: %v", err)
+		return nil, fmt.Errorf("build authorized search targets: %w", err)
 	}
 	agentConfig.SearchTargets = searchTargets
 	logger.Infof(ctx, "Agent search targets built: %d targets", len(searchTargets))
@@ -382,45 +224,6 @@ func (s *sessionService) buildAgentConfig(
 	}
 
 	return agentConfig, nil
-}
-
-// applyPerRequestSkillScope narrows the agent's skill whitelist to the @Skill
-// mentions for this turn and records the pinned set for the <must_use> hint.
-// It is a no-op when no skills were mentioned or skills are disabled.
-func applyPerRequestSkillScope(
-	ctx context.Context,
-	agentConfig *types.AgentConfig,
-	skillsMode string,
-	requested []string,
-) {
-	if len(requested) == 0 || agentConfig == nil {
-		return
-	}
-	if skillsMode == "none" {
-		logger.Warnf(ctx, "Ignoring @Skill mention: agent skill selection is disabled (mode=none)")
-		return
-	}
-	if !agentConfig.SkillsEnabled {
-		logger.Warnf(ctx, "Ignoring @Skill mention: runtime skills are unavailable")
-		return
-	}
-	requested = dedupPreservingOrder(requested)
-	if len(agentConfig.AllowedSkills) == 0 {
-		agentConfig.AllowedSkills = dedupPreservingOrder(requested)
-	} else {
-		agentConfig.AllowedSkills = intersectPreservingRequestOrder(requested, agentConfig.AllowedSkills)
-		if len(agentConfig.AllowedSkills) == 0 {
-			agentConfig.SkillsEnabled = false
-			agentConfig.PinnedSkillNames = nil
-			logger.Warnf(ctx, "Ignoring @Skill scope outside agent preset: requested=%v", requested)
-			return
-		}
-	}
-	if agentConfig.SkillsEnabled && len(agentConfig.AllowedSkills) > 0 {
-		agentConfig.PinnedSkillNames = intersectPreservingRequestOrder(requested, agentConfig.AllowedSkills)
-	}
-	logger.Infof(ctx, "Applied per-request @skill scope: requested=%v effective=%v pinned=%v",
-		requested, agentConfig.AllowedSkills, agentConfig.PinnedSkillNames)
 }
 
 // applyPerRequestMCPScope narrows the agent's MCP services to the @MCP mentions

@@ -1,0 +1,40 @@
+name: ${AGENT_RUNTIME_PROJECT_NAME:-weknora-agent-runtime}
+
+services:
+  agent-runtime:
+    build:
+      context: ..
+      dockerfile: custom/services/agent-runtime/Dockerfile
+    image: ${AGENT_RUNTIME_IMAGE:-weknora-agent-runtime:local}
+    container_name: weknora-agent-runtime
+    environment:
+      AGENT_RUNTIME_CONTROL_URL: http://runtime-entry:8080/api/v1/custom/agent-runtime/internal
+      AGENT_RUNTIME_API_KEY: ${AGENT_RUNTIME_API_KEY:-dev-agent-runtime-key}
+      AGENT_RUNTIME_CONCURRENCY: ${AGENT_RUNTIME_CONCURRENCY:-8}
+      AGENT_WORKSPACE_IMAGE: ${AGENT_WORKSPACE_IMAGE:-weknora-agent-workspace:local}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:8091:8091"
+    networks:
+      - development
+    restart: unless-stopped
+    stop_grace_period: 35s
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/readyz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  agent-workspace-image:
+    profiles: [build]
+    image: ${AGENT_WORKSPACE_IMAGE:-weknora-agent-workspace:local}
+    build:
+      context: ..
+      dockerfile: custom/services/agent-runtime/sandbox/Dockerfile
+
+networks:
+  development:
+    name: ${WEKNORA_RUNTIME_NETWORK_NAME:-weknora_WeKnora-network-dev}
+    external: true

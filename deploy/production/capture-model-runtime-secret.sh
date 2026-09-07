@@ -122,12 +122,9 @@ capture_environment_value ANTHROPIC_BASE_URL required
 capture_environment_value ANTHROPIC_MODEL required
 capture_environment_value ANTHROPIC_API_KEY required
 capture_environment_value ANTHROPIC_AUTH_TOKEN optional
-capture_environment_value WEKNORA_SANDBOX_ALLOW_NETWORK optional
-capture_environment_value WEKNORA_SANDBOX_PASSTHROUGH_ENV optional
 
 secret_arguments=()
-for value_file in "${temporary_directory}"/ANTHROPIC_* \
-  "${temporary_directory}"/WEKNORA_SANDBOX_*; do
+for value_file in "${temporary_directory}"/ANTHROPIC_*; do
   if [[ -f "${value_file}" ]]; then
     secret_arguments+=("--from-file=$(basename "${value_file}")=${value_file}")
   fi

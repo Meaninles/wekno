@@ -176,7 +176,7 @@ func TestHandleFinalAnswerStartsNewStreamSegmentWhenProviderReusesIDAfterTool(t 
 	}
 }
 
-func TestHandleCompletePersistsExactStreamedProductionCandidate(t *testing.T) {
+func TestHandleCompleteUsesCommittedResultAsAuthority(t *testing.T) {
 	stream := &recordingStreamManager{}
 	msg := &types.Message{
 		ID:        "assistant-1",
@@ -206,13 +206,13 @@ func TestHandleCompletePersistsExactStreamedProductionCandidate(t *testing.T) {
 		Type: event.EventAgentComplete,
 		Data: event.AgentCompleteData{
 			MessageID:   "assistant-1",
-			FinalAnswer: "different completion payload that must not replace the stream",
+			FinalAnswer: "committed corrected answer",
 		},
 	}); err != nil {
 		t.Fatalf("handleComplete returned error: %v", err)
 	}
 
-	if msg.Content != "streamed final answer" {
+	if msg.Content != "committed corrected answer" {
 		t.Fatalf("assistant content = %q, want single final answer", msg.Content)
 	}
 	if len(stream.events) == 0 {
@@ -222,8 +222,8 @@ func TestHandleCompletePersistsExactStreamedProductionCandidate(t *testing.T) {
 	if complete.Type != types.ResponseTypeComplete {
 		t.Fatalf("last stream event type = %s, want complete", complete.Type)
 	}
-	if got := complete.Data["final_answer"]; got != "streamed final answer" {
-		t.Fatalf("complete final_answer = %q, want streamed final answer", got)
+	if got := complete.Data["final_answer"]; got != "committed corrected answer" {
+		t.Fatalf("complete final_answer = %q, want committed answer", got)
 	}
 	refs, ok := complete.Data["knowledge_references"].([]*types.SearchResult)
 	if !ok || len(refs) != 0 {
@@ -506,19 +506,19 @@ func TestHandleQueueStatusAppendsReplayableEvent(t *testing.T) {
 
 func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 	maxTurns := userFacingAgentErrorMessage(errors.New("Claude result subtype=error_max_turns maxTurns=30 turnCount=31"))
-	if maxTurns != "任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数" {
+	if maxTurns != "这次任务未能完成，请缩小问题范围后重试。" {
 		t.Fatalf("max turns message = %q", maxTurns)
 	}
 
 	timeout := userFacingAgentErrorMessage(errors.New("API request timed out after API_TIMEOUT_MS"))
-	if timeout != "任务耗时过长，请将任务拆分为具体子任务逐个执行，或提高智能体LLM调用超时时间" {
+	if timeout != "这次处理时间较长，未能完成，请稍后重试。" {
 		t.Fatalf("timeout message = %q", timeout)
 	}
 
 	incompatible := userFacingAgentErrorMessage(errors.New(
 		"ResultMessage(result='API Error: Content block is not a text block', model_usage={'secret': 'internal'})",
 	))
-	if incompatible != "模型服务返回了不兼容的响应格式，请重试或切换模型" {
+	if incompatible != "这次未能完成，请稍后重试。" {
 		t.Fatalf("incompatible response message = %q", incompatible)
 	}
 	if strings.Contains(incompatible, "model_usage") {
@@ -534,7 +534,7 @@ func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 		"general agent stream failed: status=504 body=<html>gateway timeout</html>",
 	} {
 		got := userFacingAgentErrorMessage(errors.New(transportErr))
-		if got != "智能体服务连接中断，请稍后重试" {
+		if got != "连接暂时中断，请稍后重试。" && got != "这次处理时间较长，未能完成，请稍后重试。" {
 			t.Fatalf("transport error %q mapped to %q", transportErr, got)
 		}
 		if strings.Contains(got, "10.0.0.") || strings.Contains(strings.ToLower(got), "status=") {

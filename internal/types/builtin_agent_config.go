@@ -72,7 +72,7 @@ func LoadBuiltinAgentsConfig(configDir string) error {
 			return
 		}
 		for _, entry := range file.BuiltinAgents {
-			if entry.Config.AgentMode != AgentModeQuickAnswer && entry.Config.AgentMode != AgentModeSmartReasoning {
+			if entry.Config.AgentMode != AgentModeUnified {
 				loadErr = fmt.Errorf("builtin agent %q must declare a valid agent_mode, got %q", entry.ID, entry.Config.AgentMode)
 				return
 			}
@@ -233,13 +233,6 @@ func ResolveBuiltinAgentPromptRefs(resolver func(id string) string) {
 			}
 		}
 		// Resolve context_template_id → ContextTemplate
-		if entry.Config.ContextTemplateID != "" && entry.Config.ContextTemplate == "" {
-			if content := resolver(entry.Config.ContextTemplateID); content != "" {
-				entry.Config.ContextTemplate = content
-			} else {
-				fmt.Printf("Warning: builtin agent %q references context_template_id %q but template not found\n",
-					entry.ID, entry.Config.ContextTemplateID)
-			}
-		}
+
 	}
 }

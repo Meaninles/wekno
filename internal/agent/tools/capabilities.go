@@ -156,50 +156,14 @@ func KBSatisfiesToolRequirements(caps types.KBCapabilities, allowedTools []strin
 	return false
 }
 
-// quickAnswerKBFilter is the implicit capability requirement for the
-// "quick-answer" (RAG) agent mode. Quick-answer drives retrieval purely
-// through vector/keyword chunk search, so a KB with neither chunk index
-// (e.g. wiki-only) cannot contribute any context and should be filtered
-// out everywhere the user can pick a KB (agent KB scope, `@` mention list,
-// chat KB selector).
-//
-// We treat this as a property of the agent MODE rather than of any
-// specific tool, because quick-answer mode doesn't ship with an
-// `allowed_tools` list — its retrieval is implicit.
-var quickAnswerKBFilter = KBFilter{AnyOf: []KBCapability{CapVector, CapKeyword}}
-
-// DeriveKBFilterForAgent derives the effective KB capability filter for a
-// given agent configuration. It combines the implicit constraint from
-// `agentMode` (quick-answer forces vector|keyword) with the tool-derived
-// filter (any_of capabilities required by some allowed tool).
-//
-// The returned filter is the UNION of both contributions, which matches
-// the existing any_of semantics: a KB passes iff it exposes at least one
-// of the listed capabilities.
-func DeriveKBFilterForAgent(agentMode string, allowedTools []string) KBFilter {
-	seen := make(map[KBCapability]struct{})
-	if agentMode == "quick-answer" {
-		for _, c := range quickAnswerKBFilter.AnyOf {
-			seen[c] = struct{}{}
-		}
-	}
-	for _, c := range DeriveKBFilterFromTools(allowedTools).AnyOf {
-		seen[c] = struct{}{}
-	}
-	if len(seen) == 0 {
-		return KBFilter{}
-	}
-	out := make([]KBCapability, 0, len(seen))
-	for c := range seen {
-		out = append(out, c)
-	}
-	return KBFilter{AnyOf: out}
+// DeriveKBFilterForAgent uses the enabled tools of the unified harness.
+func DeriveKBFilterForAgent(_ string, allowedTools []string) KBFilter {
+	return DeriveKBFilterFromTools(allowedTools)
 }
 
 // KBSatisfiesAgentRequirements is the agent-aware variant of
 // KBSatisfiesToolRequirements: it also enforces the implicit capability
-// constraints of `agentMode` (currently: quick-answer requires vector or
-// keyword indexing on the KB).
+// capability requirements of the configured tools.
 func KBSatisfiesAgentRequirements(caps types.KBCapabilities, agentMode string, allowedTools []string) bool {
 	f := DeriveKBFilterForAgent(agentMode, allowedTools)
 	if f.IsEmpty() {

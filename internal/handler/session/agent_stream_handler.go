@@ -10,6 +10,7 @@ import (
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/usererrors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -372,10 +373,9 @@ func (h *AgentStreamHandler) handleToolResult(ctx context.Context, evt event.Eve
 	responseType := types.ResponseTypeToolResult
 	content := agenttools.StreamContentForToolResult(data.ToolName, data.Success, data.Error, data.Data)
 	if !data.Success {
+		logger.GetLogger(h.ctx).Warn("QA tool failed", "tool", data.ToolName, "error", data.Error)
 		responseType = types.ResponseTypeError
-		if content == "" && data.Error != "" {
-			content = data.Error
-		}
+		content = usererrors.Message(data.Error)
 	}
 
 	// Build metadata including tool result data for rich frontend rendering
@@ -395,6 +395,14 @@ func (h *AgentStreamHandler) handleToolResult(ctx context.Context, evt event.Eve
 	})
 	for k, v := range clientData {
 		metadata[k] = v
+	}
+
+	if !data.Success {
+		metadata = map[string]interface{}{
+			"tool_name": data.ToolName, "tool_call_id": data.ToolCallID,
+			"success": false, "duration_ms": durationMs,
+			"error": content, "error_code": usererrors.Classify("", data.Error).Code,
+		}
 	}
 
 	// Append event to stream
@@ -553,6 +561,13 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
 	}
 
 	h.mu.Lock()
+	if data.Replace {
+		for _, segment := range h.answerSegments {
+			segment.superseded = true
+		}
+		h.finalAnswer = ""
+	}
+
 	sourceID := evt.ID
 	if strings.TrimSpace(sourceID) == "" {
 		sourceID = "answer"
@@ -609,6 +624,8 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
 	if data.IsFallback {
 		metadata["is_fallback"] = true
 	}
+	metadata["replace"] = data.Replace
+	metadata["revision"] = data.Revision
 	h.mu.Unlock()
 
 	// Append this chunk to stream (frontend will accumulate by event ID)
@@ -654,17 +671,23 @@ func (h *AgentStreamHandler) handleError(ctx context.Context, evt event.Event) e
 		return nil
 	}
 
-	// Build error metadata
+	logger.GetLogger(h.ctx).Error("QA failed", "stage", data.Stage, "error", data.Error)
+	failure := usererrors.Classify(data.ErrorCode, data.Error)
+	h.mu.Lock()
+	h.assistantMessage.ErrorCode = failure.Code
+	h.assistantMessage.Content = failure.Message
+	h.assistantMessage.IsCompleted = true
+	h.mu.Unlock()
+	// Only the public category crosses the stream boundary.
 	metadata := map[string]interface{}{
-		"stage": data.Stage,
-		"error": data.Error,
+		"error_code": failure.Code,
 	}
 
 	// Append error event to stream
 	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
 		ID:        evt.ID,
 		Type:      types.ResponseTypeError,
-		Content:   data.Error,
+		Content:   failure.Message,
 		Done:      true,
 		Timestamp: time.Now(),
 		Data:      metadata,
@@ -738,13 +761,9 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		} else if len(data.KnowledgeRefs) > 0 {
 			availableRefs = mergeCitationReferences(availableRefs, data.KnowledgeRefs)
 		}
-		// The accumulated answer stream is the production candidate. A completion
-		// payload is only a fallback for runtimes that emitted no answer events;
-		// it must never silently replace text the user already received.
-		finalAnswer := h.finalAnswer
-		if finalAnswer == "" {
-			finalAnswer = data.FinalAnswer
-		}
+		// The committed runtime result is the authority for every client.
+		finalAnswer := data.FinalAnswer
+
 		_, citedRefs, report := sourcerefs.FilterAnswerCitations(finalAnswer, availableRefs)
 		if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 			logger.GetLogger(h.ctx).Warnf(

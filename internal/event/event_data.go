@@ -223,6 +223,8 @@ type AgentReferencesData struct {
 
 // AgentFinalAnswerData represents final answer streaming data
 type AgentFinalAnswerData struct {
+	Replace    bool   `json:"replace,omitempty"`
+	Revision   int64  `json:"revision,omitempty"`
 	Content    string `json:"content"`
 	Done       bool   `json:"done"`
 	IsFallback bool   `json:"is_fallback,omitempty"` // True when response is a fallback (no knowledge base match)

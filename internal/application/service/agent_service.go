@@ -4,28 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"strconv"
 
-	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/agent/approval"
-	"github.com/Tencent/WeKnora/internal/agent/skills"
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/mcp"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
-	"github.com/Tencent/WeKnora/internal/sandbox"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
-	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"gorm.io/gorm"
 )
-
-const MAX_ITERATIONS = 100 // Max iterations for agent execution
 
 // dedupStrings removes duplicate strings while preserving the first occurrence order.
 func dedupStrings(in []string) []string {
@@ -155,127 +146,18 @@ func NewAgentService(
 	}
 }
 
-// CreateAgentEngine creates an agent engine with the given configuration and EventBus.
-// History is loaded once per turn by the caller (see service.LoadAgentHistory)
-// and handed to AgentEngine.Execute as llmContext; the engine is stateless across turns.
-func (s *agentService) CreateAgentEngine(
-	ctx context.Context,
-	config *types.AgentConfig,
-	chatModel chat.Chat,
-	rerankModel rerank.Reranker,
-	eventBus *event.EventBus,
-	sessionID, assistantMessageID string,
-) (interfaces.AgentEngine, error) {
-	logger.Infof(ctx, "Creating agent engine with custom EventBus")
-
-	// 1. Validate config
+// CreateToolRegistry exposes business tools to the single Agent Harness.
+// Professional skills and code execution are owned by its SDK workspace.
+func (s *agentService) CreateToolRegistry(ctx context.Context, config *types.AgentConfig, rerankModel rerank.Reranker, sessionID string) (interfaces.AgentToolRegistry, error) {
 	if err := s.ValidateConfig(config); err != nil {
 		return nil, fmt.Errorf("invalid agent config: %w", err)
 	}
-	if chatModel == nil {
-		return nil, fmt.Errorf("chat model is nil after initialization")
-	}
-
-	// 2. Build tool registry
-	toolRegistry, skillsManager, err := s.createToolRegistry(
-		ctx, config, chatModel, rerankModel, eventBus, sessionID, assistantMessageID, true,
-	)
-	if err != nil {
+	registry := tools.NewToolRegistry()
+	if err := s.registerTools(ctx, registry, config, rerankModel, sessionID); err != nil {
 		return nil, err
 	}
-
-	// 3. Resolve knowledge base and selected document metadata
-	kbInfos, selectedDocs := s.resolveKBAndDocInfos(ctx, config)
-
-	// 4. Resolve system prompt template
-	systemPromptTemplate := ""
-	if config.UseCustomSystemPrompt || config.SystemPrompt != "" {
-		systemPromptTemplate = config.ResolveSystemPrompt(config.WebSearchEnabled)
-	}
-
-	// 5. Create engine
-	engine := agent.NewAgentEngine(
-		config, chatModel, toolRegistry, eventBus,
-		kbInfos, selectedDocs, sessionID,
-		systemPromptTemplate,
-	)
-	engine.SetAppConfig(s.cfg)
-	pinnedMCP := s.resolvePinnedMCPServiceInfos(ctx, config)
-	s.attachPinnedMCPToolNames(toolRegistry, pinnedMCP)
-	engine.SetPinnedMentions(
-		pinnedMCP,
-		s.resolvePinnedSkillInfos(config),
-	)
-
-	// Set VLM image describer for MCP tool result image analysis.
-	// When an MCP tool returns images, the engine uses VLM to generate text descriptions
-	// and appends them to the tool result content (since Chat Completions API does not
-	// reliably support images in tool role messages across providers).
-	if config.VLMModelID != "" {
-		if vlmModel, err := s.modelService.GetVLMModel(ctx, config.VLMModelID); err == nil {
-			engine.SetImageDescriber(func(ctx context.Context, imgBytes []byte, prompt string) (string, error) {
-				return vlmModel.Predict(ctx, [][]byte{imgBytes}, prompt)
-			})
-			logger.Infof(ctx, "VLM image describer set for MCP tool result analysis (model: %s)", config.VLMModelID)
-		} else {
-			logger.Warnf(ctx, "Failed to load VLM model %s for MCP image fallback: %v", config.VLMModelID, err)
-		}
-	}
-
-	if skillsManager != nil {
-		engine.SetSkillsManager(skillsManager)
-		logger.Infof(ctx, "Skills manager initialized with %d skills",
-			len(skillsManager.GetAllMetadata()))
-	}
-
-	return engine, nil
-}
-
-// CreateToolRegistry builds the same native/custom/MCP tool registry used by
-// CreateAgentEngine. Custom agent runtimes (for example the general-agent
-// sidecar bridge) call this method so tool behavior stays identical to native
-// smart-reasoning agents.
-func (s *agentService) CreateToolRegistry(
-	ctx context.Context,
-	config *types.AgentConfig,
-	chatModel chat.Chat,
-	rerankModel rerank.Reranker,
-	sessionID string,
-) (interfaces.AgentToolRegistry, error) {
-	registry, _, err := s.createToolRegistry(ctx, config, chatModel, rerankModel, nil, sessionID, "", true)
-	return registry, err
-}
-
-func (s *agentService) createToolRegistry(
-	ctx context.Context,
-	config *types.AgentConfig,
-	chatModel chat.Chat,
-	rerankModel rerank.Reranker,
-	eventBus *event.EventBus,
-	sessionID, assistantMessageID string,
-	includeSkills bool,
-) (*tools.ToolRegistry, *skills.Manager, error) {
-	if err := s.ValidateConfig(config); err != nil {
-		return nil, nil, fmt.Errorf("invalid agent config: %w", err)
-	}
-	if chatModel == nil {
-		return nil, nil, fmt.Errorf("chat model is nil after initialization")
-	}
-	toolRegistry := tools.NewToolRegistry()
-	if err := s.registerTools(ctx, toolRegistry, config, rerankModel, chatModel, sessionID); err != nil {
-		return nil, nil, fmt.Errorf("failed to register tools: %w", err)
-	}
-	s.registerMCPTools(ctx, toolRegistry, config, eventBus, sessionID, assistantMessageID)
-	var skillsManager *skills.Manager
-	if includeSkills && config.SkillsEnabled && len(config.SkillDirs) > 0 {
-		var err error
-		skillsManager, err = s.initializeSkillsManager(ctx, config, toolRegistry)
-		if err != nil {
-			logger.Warnf(ctx, "Failed to initialize skills manager: %v", err)
-			skillsManager = nil
-		}
-	}
-	return toolRegistry, skillsManager, nil
+	s.registerMCPTools(ctx, registry, config, nil, sessionID, "")
+	return registry, nil
 }
 
 // registerMCPTools registers MCP tools from enabled services for this tenant.
@@ -359,117 +241,12 @@ func (s *agentService) registerMCPTools(
 	}
 }
 
-// resolveKBAndDocInfos loads knowledge base metadata and selected document info for prompt.
-func (s *agentService) resolveKBAndDocInfos(
-	ctx context.Context,
-	config *types.AgentConfig,
-) ([]*agent.KnowledgeBaseInfo, []*agent.SelectedDocumentInfo) {
-	kbIDs := knowledgeBaseIDsForPrompt(config)
-	kbInfos, err := s.getKnowledgeBaseInfos(ctx, kbIDs)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to get knowledge base details, using IDs only: %v", err)
-		kbInfos = make([]*agent.KnowledgeBaseInfo, 0, len(kbIDs))
-		for _, kbID := range kbIDs {
-			kbInfos = append(kbInfos, &agent.KnowledgeBaseInfo{
-				ID:          kbID,
-				Name:        kbID,
-				Description: "",
-				DocCount:    0,
-			})
-		}
-	}
-
-	selectedDocs, err := s.getSelectedDocumentInfos(ctx, config.KnowledgeIDs)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to get selected document details: %v", err)
-		selectedDocs = []*agent.SelectedDocumentInfo{}
-	}
-
-	return kbInfos, selectedDocs
-}
-
-// initializeSkillsManager creates and initializes the skills manager
-func (s *agentService) initializeSkillsManager(
-	ctx context.Context,
-	config *types.AgentConfig,
-	toolRegistry *tools.ToolRegistry,
-) (*skills.Manager, error) {
-	// Initialize sandbox manager based on environment variables
-	// WEKNORA_SANDBOX_MODE: "docker", "local", "disabled" (default: "disabled")
-	// WEKNORA_SANDBOX_TIMEOUT: timeout in seconds (default: 60)
-	// WEKNORA_SANDBOX_DOCKER_IMAGE: custom Docker image (default: wechatopenai/weknora-sandbox:latest)
-	var sandboxMgr sandbox.Manager
-	var err error
-
-	sandboxMode := os.Getenv("WEKNORA_SANDBOX_MODE")
-	if sandboxMode == "" {
-		sandboxMode = "disabled"
-	}
-	dockerImage := os.Getenv("WEKNORA_SANDBOX_DOCKER_IMAGE")
-	if dockerImage == "" {
-		dockerImage = sandbox.DefaultDockerImage
-	}
-	sandboxTimeoutStr := os.Getenv("WEKNORA_SANDBOX_TIMEOUT")
-	sandboxTimeout := 60
-	if sandboxTimeoutStr != "" {
-		if v, err := strconv.Atoi(sandboxTimeoutStr); err == nil && v > 0 {
-			sandboxTimeout = v
-		}
-	}
-
-	switch sandboxMode {
-	case "docker":
-		sandboxMgr, err = sandbox.NewManagerFromType("docker", true, dockerImage) // Enable fallback to local
-		if err != nil {
-			logger.Warnf(ctx, "Failed to initialize Docker sandbox, falling back to disabled: %v", err)
-			sandboxMgr = sandbox.NewDisabledManager()
-		}
-	case "local":
-		sandboxMgr, err = sandbox.NewManagerFromType("local", false, "")
-		if err != nil {
-			logger.Warnf(ctx, "Failed to initialize local sandbox: %v", err)
-			sandboxMgr = sandbox.NewDisabledManager()
-		}
-	default:
-		sandboxMgr = sandbox.NewDisabledManager()
-	}
-	logger.Infof(ctx, "Sandbox configured: mode=%s, timeout=%ds, image=%s", sandboxMode, sandboxTimeout, dockerImage)
-
-	// Create skills manager
-	skillsConfig := &skills.ManagerConfig{
-		SkillDirs:     config.SkillDirs,
-		AllowedSkills: config.AllowedSkills,
-		Enabled:       config.SkillsEnabled,
-	}
-
-	skillsManager := skills.NewManager(skillsConfig, sandboxMgr)
-
-	// Initialize (discover skills)
-	if err := skillsManager.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize skills: %w", err)
-	}
-
-	// Register skills tools
-	readSkillTool := tools.NewReadSkillTool(skillsManager)
-	toolRegistry.RegisterTool(readSkillTool)
-	logger.Infof(ctx, "Registered read_skill tool")
-
-	if sandboxMode != "disabled" {
-		executeSkillTool := tools.NewExecuteSkillScriptTool(skillsManager)
-		toolRegistry.RegisterTool(executeSkillTool)
-		logger.Infof(ctx, "Registered execute_skill_script tool")
-	}
-
-	return skillsManager, nil
-}
-
 // registerTools registers tools based on the agent configuration
 func (s *agentService) registerTools(
 	ctx context.Context,
 	registry *tools.ToolRegistry,
 	config *types.AgentConfig,
 	rerankModel rerank.Reranker,
-	chatModel chat.Chat,
 	sessionID string,
 ) error {
 	documentSearchTargets, err := sourcerefs.DocumentSearchTargets(
@@ -563,7 +340,7 @@ func (s *agentService) registerTools(
 		// Data-analysis agents with bound data sources still benefit from
 		// planning even though their scope is not represented as KBs.
 		hasLegacyDataAnalysisSources := (config.AgentType == types.AgentTypeDataAnalysis ||
-			types.IsClaudeSDKAgentType(config.AgentType)) && len(config.DBDataSources) > 0
+			types.HasWorkspaceCapabilities(config.AgentType)) && len(config.DBDataSources) > 0
 		if !config.WebSearchEnabled && !hasLegacyDataAnalysisSources {
 			kbTools[tools.ToolTodoWrite] = true
 		}
@@ -686,7 +463,6 @@ func (s *agentService) registerTools(
 				s.chunkService,
 				documentSearchTargets,
 				rerankModel,
-				chatModel,
 				config,
 				s.cfg,
 			)
@@ -714,7 +490,7 @@ func (s *agentService) registerTools(
 			logger.Infof(ctx, "Registered web_search tool for session: %s, maxResults: %d, providerID: %s", sessionID, config.WebSearchMaxResults, config.WebSearchProviderID)
 
 		case tools.ToolWebFetch:
-			toolToRegister = tools.NewWebFetchTool(chatModel, config.WebFetchTopN)
+			toolToRegister = tools.NewWebFetchTool(config.WebFetchTopN)
 			logger.Infof(ctx, "Registered web_fetch tool for session: %s, maxItems: %d", sessionID, config.WebFetchTopN)
 
 		case tools.ToolDataAnalysis:
@@ -781,130 +557,15 @@ func (s *agentService) ValidateConfig(config *types.AgentConfig) error {
 		return fmt.Errorf("config cannot be nil")
 	}
 
-	if config.MaxIterations <= 0 {
-		config.MaxIterations = 5 // Default
+	if !types.IsKnownAgentType(config.AgentType) {
+		return fmt.Errorf("unsupported agent type: %s", config.AgentType)
 	}
-
-	if config.MaxIterations > MAX_ITERATIONS {
-		return fmt.Errorf("max iterations too high: %d (max %d)", config.MaxIterations, MAX_ITERATIONS)
-	}
+	config.MaxIterations = types.AgentIterationBudget(config.AgentType)
 
 	return nil
 }
 
 // getKnowledgeBaseInfos retrieves detailed information for knowledge bases
-func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string) ([]*agent.KnowledgeBaseInfo, error) {
-	if len(kbIDs) == 0 {
-		return []*agent.KnowledgeBaseInfo{}, nil
-	}
-
-	kbInfos := make([]*agent.KnowledgeBaseInfo, 0, len(kbIDs))
-
-	for _, kbID := range kbIDs {
-		// Get knowledge base details
-		kb, err := s.knowledgeBaseService.GetKnowledgeBaseByID(ctx, kbID)
-		if err != nil {
-			logger.Warnf(ctx, "Failed to get knowledge base %s: %v", secutils.SanitizeForLog(kbID), err)
-			kbInfos = append(kbInfos, &agent.KnowledgeBaseInfo{
-				ID:          kbID,
-				Name:        kbID,
-				Type:        "document",
-				Description: "",
-				DocCount:    0,
-				RecentDocs:  []agent.RecentDocInfo{},
-			})
-			continue
-		}
-
-		// Skip hidden/system-managed knowledge bases (e.g., __chat_history__)
-		if kb.IsTemporary {
-			logger.Debugf(ctx, "Skipping temporary knowledge base %s (%s) from prompt", kb.ID, kb.Name)
-			continue
-		}
-
-		// Get document count and recent documents
-		docCount := 0
-		recentDocs := []agent.RecentDocInfo{}
-
-		if kb.Type == types.KnowledgeBaseTypeFAQ {
-			pageResult, err := s.knowledgeService.ListFAQEntries(ctx, kbID, &types.Pagination{
-				Page:     1,
-				PageSize: 10,
-			}, 0, "", "", "")
-			if err == nil && pageResult != nil {
-				docCount = int(pageResult.Total)
-				if entries, ok := pageResult.Data.([]*types.FAQEntry); ok {
-					for _, entry := range entries {
-						if len(recentDocs) >= 10 {
-							break
-						}
-						recentDocs = append(recentDocs, agent.RecentDocInfo{
-							ChunkID:             entry.ChunkID,
-							KnowledgeID:         entry.KnowledgeID,
-							KnowledgeBaseID:     entry.KnowledgeBaseID,
-							Title:               entry.StandardQuestion,
-							Type:                string(types.ChunkTypeFAQ),
-							CreatedAt:           entry.CreatedAt.Format("2006-01-02"),
-							FAQStandardQuestion: entry.StandardQuestion,
-							FAQSimilarQuestions: entry.SimilarQuestions,
-							FAQAnswers:          entry.Answers,
-						})
-					}
-				}
-			} else if err != nil {
-				logger.Warnf(ctx, "Failed to list FAQ entries for %s: %v", kbID, err)
-			}
-		}
-
-		// Fallback to generic knowledge listing when not FAQ or FAQ retrieval failed
-		if kb.Type != types.KnowledgeBaseTypeFAQ || len(recentDocs) == 0 {
-			pageResult, err := s.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx, kbID, &types.Pagination{
-				Page:     1,
-				PageSize: 10,
-			}, types.KnowledgeListFilter{
-				ParseStatus: types.ParseStatusCompleted,
-			})
-
-			if err == nil && pageResult != nil {
-				docCount = int(pageResult.Total)
-
-				// Convert to Knowledge slice
-				if knowledges, ok := pageResult.Data.([]*types.Knowledge); ok {
-					for _, k := range knowledges {
-						if len(recentDocs) >= 10 {
-							break
-						}
-						recentDocs = append(recentDocs, agent.RecentDocInfo{
-							KnowledgeID: k.ID,
-							Title:       k.Title,
-							Description: k.Description,
-							FileName:    k.FileName,
-							Type:        k.FileType,
-							CreatedAt:   k.CreatedAt.Format("2006-01-02"),
-							FileSize:    k.FileSize,
-						})
-					}
-				}
-			}
-		}
-
-		kbType := kb.Type
-		if kbType == "" {
-			kbType = "document" // Default type
-		}
-		kbInfos = append(kbInfos, &agent.KnowledgeBaseInfo{
-			ID:           kb.ID,
-			Name:         kb.Name,
-			Type:         kbType,
-			Description:  kb.Description,
-			DocCount:     docCount,
-			Capabilities: kbRetrievalCapabilities(kb),
-			RecentDocs:   recentDocs,
-		})
-	}
-
-	return kbInfos, nil
-}
 
 // kbRetrievalCapabilities reports which retrieval surfaces a KB exposes.
 // Surfaces are the static facts the hybrid agent prompt consults to pick its
@@ -930,152 +591,3 @@ func kbRetrievalCapabilities(kb *types.KnowledgeBase) []string {
 
 // getSelectedDocumentInfos retrieves detailed information for user-selected documents (via @ mention)
 // This loads the actual content of the documents to include in the system prompt
-func (s *agentService) getSelectedDocumentInfos(ctx context.Context, knowledgeIDs []string) ([]*agent.SelectedDocumentInfo, error) {
-	if len(knowledgeIDs) == 0 {
-		return []*agent.SelectedDocumentInfo{}, nil
-	}
-
-	// Get tenant ID from context
-	tenantID := uint64(0)
-	if tid, ok := types.TenantIDFromContext(ctx); ok {
-		tenantID = tid
-	}
-
-	// Fetch knowledge metadata (include docs from shared KBs the user has access to)
-	knowledges, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, knowledgeIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get knowledge batch: %w", err)
-	}
-
-	// Build map for quick lookup
-	knowledgeMap := make(map[string]*types.Knowledge)
-	for _, k := range knowledges {
-		if k != nil {
-			knowledgeMap[k.ID] = k
-		}
-	}
-
-	selectedDocs := make([]*agent.SelectedDocumentInfo, 0, len(knowledgeIDs))
-
-	for _, kid := range knowledgeIDs {
-		k, ok := knowledgeMap[kid]
-		if !ok {
-			logger.Warnf(ctx, "Selected knowledge %s not found", kid)
-			continue
-		}
-
-		docInfo := &agent.SelectedDocumentInfo{
-			KnowledgeID:     k.ID,
-			KnowledgeBaseID: k.KnowledgeBaseID,
-			Title:           k.Title,
-			FileName:        k.FileName,
-			FileType:        k.FileType,
-		}
-
-		selectedDocs = append(selectedDocs, docInfo)
-	}
-
-	logger.Infof(ctx, "Loaded %d selected documents metadata for prompt", len(selectedDocs))
-	return selectedDocs, nil
-}
-
-func (s *agentService) resolvePinnedMCPServiceInfos(
-	ctx context.Context,
-	config *types.AgentConfig,
-) []*agent.PinnedMCPServiceInfo {
-	if len(config.PinnedMCPServiceIDs) == 0 || s.mcpServiceService == nil {
-		return nil
-	}
-	tenantID := uint64(0)
-	if tid, ok := types.TenantIDFromContext(ctx); ok {
-		tenantID = tid
-	}
-	if tenantID == 0 {
-		return fallbackPinnedMCPInfos(config.PinnedMCPServiceIDs)
-	}
-
-	services, err := s.mcpServiceService.ListMCPServicesByIDs(ctx, tenantID, config.PinnedMCPServiceIDs)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to resolve pinned MCP services: %v", err)
-		return fallbackPinnedMCPInfos(config.PinnedMCPServiceIDs)
-	}
-	byID := make(map[string]*types.MCPService, len(services))
-	for _, svc := range services {
-		if svc != nil {
-			byID[svc.ID] = svc
-		}
-	}
-	result := make([]*agent.PinnedMCPServiceInfo, 0, len(config.PinnedMCPServiceIDs))
-	for _, id := range config.PinnedMCPServiceIDs {
-		if id == "" {
-			continue
-		}
-		if svc, ok := byID[id]; ok {
-			result = append(result, &agent.PinnedMCPServiceInfo{
-				ID:          svc.ID,
-				Name:        svc.Name,
-				Description: svc.Description,
-			})
-			continue
-		}
-		result = append(result, &agent.PinnedMCPServiceInfo{ID: id, Name: id})
-	}
-	return result
-}
-
-func (s *agentService) attachPinnedMCPToolNames(
-	registry *tools.ToolRegistry,
-	pinned []*agent.PinnedMCPServiceInfo,
-) {
-	if registry == nil || len(pinned) == 0 {
-		return
-	}
-	byService := tools.MCPToolNamesByServiceID(registry)
-	for _, info := range pinned {
-		if info == nil || info.ID == "" {
-			continue
-		}
-		info.ToolNames = append([]string(nil), byService[info.ID]...)
-	}
-}
-
-func fallbackPinnedMCPInfos(ids []string) []*agent.PinnedMCPServiceInfo {
-	result := make([]*agent.PinnedMCPServiceInfo, 0, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		result = append(result, &agent.PinnedMCPServiceInfo{ID: id, Name: id})
-	}
-	return result
-}
-
-func (s *agentService) resolvePinnedSkillInfos(config *types.AgentConfig) []*agent.PinnedSkillInfo {
-	if len(config.PinnedSkillNames) == 0 {
-		return nil
-	}
-
-	descByName := make(map[string]string)
-	if len(config.SkillDirs) > 0 {
-		loader := skills.NewLoader(config.SkillDirs)
-		if metadata, err := loader.DiscoverSkills(); err == nil {
-			for _, meta := range metadata {
-				if meta != nil {
-					descByName[meta.Name] = meta.Description
-				}
-			}
-		}
-	}
-
-	result := make([]*agent.PinnedSkillInfo, 0, len(config.PinnedSkillNames))
-	for _, name := range config.PinnedSkillNames {
-		if name == "" {
-			continue
-		}
-		result = append(result, &agent.PinnedSkillInfo{
-			Name:        name,
-			Description: descByName[name],
-		})
-	}
-	return result
-}

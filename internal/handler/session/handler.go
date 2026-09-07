@@ -30,6 +30,12 @@ type Handler struct {
 	userService          interfaces.UserService          // Service for resolving per-user preferences (e.g. enable_memory default)
 	attachmentProcessor  *AttachmentProcessor            // Processor for file attachments
 	uploadResolver       UploadResolver
+	resumeRuntime        func(*gin.Context, *types.Message) bool
+	stopRuntime          func(*gin.Context, *types.Message) error
+}
+
+func (h *Handler) SetRuntimeStreamControl(resume func(*gin.Context, *types.Message) bool, stop func(*gin.Context, *types.Message) error) {
+	h.resumeRuntime, h.stopRuntime = resume, stop
 }
 
 // NewHandler creates a new instance of Handler with all necessary dependencies

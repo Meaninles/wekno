@@ -11,7 +11,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -96,7 +95,6 @@ type KnowledgeSearchTool struct {
 	chunkService         interfaces.ChunkService
 	searchTargets        types.SearchTargets // Pre-computed unified search targets
 	rerankModel          rerank.Reranker
-	chatModel            chat.Chat // Optional chat model for LLM-based reranking
 	agentConfig          *types.AgentConfig
 	config               *config.Config // Global config for fallback values
 
@@ -109,7 +107,6 @@ func NewKnowledgeSearchTool(
 	chunkService interfaces.ChunkService,
 	searchTargets types.SearchTargets,
 	rerankModel rerank.Reranker,
-	chatModel chat.Chat,
 	agentConfig *types.AgentConfig,
 	cfg *config.Config,
 ) *KnowledgeSearchTool {
@@ -120,7 +117,6 @@ func NewKnowledgeSearchTool(
 		chunkService:         chunkService,
 		searchTargets:        searchTargets,
 		rerankModel:          rerankModel,
-		chatModel:            chatModel,
 		agentConfig:          agentConfig,
 		config:               cfg,
 	}
@@ -603,7 +599,7 @@ func (t *KnowledgeSearchTool) formatOutput(ctx context.Context, results []*searc
 	if len(inputs) > 0 {
 		tenantID, _ := types.TenantIDFromContext(ctx)
 		var err error
-		refs, err = sourcerefs.ResolveQuickAnswerEvidence(ctx, t.chunkService.GetRepository(), tenantID, inputs)
+		refs, err = sourcerefs.ResolveRetrievalEvidence(ctx, t.chunkService.GetRepository(), tenantID, inputs)
 		if err != nil {
 			return nil, fmt.Errorf("resolve exact knowledge-search evidence: %w", err)
 		}

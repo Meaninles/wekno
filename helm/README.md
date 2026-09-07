@@ -41,8 +41,8 @@ flowchart TB
     F --> A["Go app ×N"]
     M --> A
     A --> D["DocReader ×N"]
-    A --> G["general-agent ×N"]
-    A --> P["document-processing-agent ×N"]
+    A --> G["AgentScope runtime ×N"]
+    G --> P["isolated workspace per run"]
     A --> DB["PostgreSQL / ParadeDB"]
     A <--> R["Redis delivery / stream / model admission"]
     A --> O["MinIO / private OBS"]
@@ -116,7 +116,7 @@ The repository contains one reviewed profile for the current production CCE:
   one maintenance app for SQL and legacy-artifact migration.
 
 Current production roles are API/parse-worker `3/3`, derivative/wiki/maintenance
-`2/2/2`, DocReader `3`, general-agent/document-processing-agent `2/2`, and
+`2/2/2`, DocReader `3`, unified AgentScope runtime `2`, and
 frontend/mobile-web `2/2`. Every parse-worker admits four complete document
 workflows; cluster document capacity is 12. Durable files use private OBS. Each
 worker/DocReader/Agent Pod gets an isolated hostPath scratch directory under
@@ -267,7 +267,7 @@ and CA Secrets and switch PostgreSQL/Redis to verified TLS rather than using
 | `generalAgent.scratch` | Per-Pod POSIX run workspace | `20Gi` RWO ephemeral |
 | `documentProcessingAgent.replicaCount` | Office document runtime Pods | `2` |
 | `documentProcessingAgent.scratch` | Per-Pod Office/PDF workspace | `40Gi` RWO ephemeral |
-| `app.agentIntegration.toolCallbackURL` | Process-local Agent run callback; must return to the originating API Pod | `http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call` |
+| `app.agentIntegration.toolCallbackURL` | Durable run callback; any healthy API Pod can serve it | `http://app:8080/api/v1/custom/agent-runtime/internal/tools/call` |
 | `app.agentIntegration.artifactStorage.provider` | Durable final artifacts | `obs` |
 | `app.agentIntegration.artifactStorage.pathPrefix` | Private deployment/namespace-scoped artifact root | unique production prefix |
 

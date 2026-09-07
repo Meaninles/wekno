@@ -11,7 +11,7 @@ type SkillService interface {
 	// ListPreloadedSkills returns metadata for all preloaded skills
 	ListPreloadedSkills(ctx context.Context) ([]*skills.SkillMetadata, error)
 
-	// ListProfessionalSkills returns metadata for Claude SDK native skills.
+	// ListProfessionalSkills returns metadata for professional skills.
 	ListProfessionalSkills(ctx context.Context) ([]*skills.SkillMetadata, error)
 
 	// GetSkillByName retrieves a skill by its name

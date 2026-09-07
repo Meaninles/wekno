@@ -25,16 +25,7 @@ import AgentSelector from './AgentSelector.vue';
 import { getCaretCoordinates } from '@/utils/caret';
 import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom';
 import { type ModelConfig } from '@/api/model';
-import {
-  type CustomAgent,
-  BUILTIN_DATA_ANALYST_ID,
-  BUILTIN_DOCUMENT_PROCESSING_ID,
-  BUILTIN_GENERAL_AGENT_ID,
-  BUILTIN_QUICK_ANSWER_ID,
-  BUILTIN_SMART_REASONING_ID,
-  BUILTIN_TABLE_ANALYST_ID,
-  BUILTIN_WIKI_RESEARCHER_ID,
-} from '@/api/agent';
+import { type CustomAgent, BUILTIN_GENERAL_AGENT_ID, BUILTIN_KNOWLEDGE_QA_ID } from '@/api/agent';
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
@@ -204,26 +195,21 @@ const agentModeButtonRef = ref<HTMLElement>();
 const agentModeDropdownStyle = ref<Record<string, string>>({});
 
 const selectedAgentId = computed({
-  get: () => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
+  get: () => settingsStore.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID,
   set: (val: string) => settingsStore.selectAgent(val)
 });
 
 const unresolvedBuiltinAgentName = (agentId: string) => {
   const zhNames: Record<string, string> = {
-    [BUILTIN_QUICK_ANSWER_ID]: t('input.normalMode'),
-    [BUILTIN_SMART_REASONING_ID]: t('input.agentMode'),
-    [BUILTIN_WIKI_RESEARCHER_ID]: '维基问答',
-    [BUILTIN_DATA_ANALYST_ID]: '数据分析',
-    [BUILTIN_TABLE_ANALYST_ID]: '表格分析',
-    [BUILTIN_GENERAL_AGENT_ID]: '通用智能体',
-    [BUILTIN_DOCUMENT_PROCESSING_ID]: '文档处理',
+    [BUILTIN_KNOWLEDGE_QA_ID]: "知识问答",
+    [BUILTIN_GENERAL_AGENT_ID]: "通用智能体",
   };
   return zhNames[agentId] || agentId;
 };
 
 const selectedAgent = computed(() => {
   // When a shared-agent source tenant is set, resolve from sharedAgents FIRST.
-  // Builtin agents (e.g. builtin-smart-reasoning) use the same constant ID across
+  // Builtin agents (e.g. builtin-knowledge-qa) use the same constant ID across
   // tenants, so falling back to agents.value first would incorrectly return the
   // current tenant's own builtin instead of the shared one.
   const sourceTenantId = settingsStore.selectedAgentSourceTenantId;
@@ -235,12 +221,12 @@ const selectedAgent = computed(() => {
   }
   const mine = agents.value.find(a => a.id === selectedAgentId.value);
   if (mine) return mine;
-  const fallbackId = selectedAgentId.value || BUILTIN_QUICK_ANSWER_ID;
+  const fallbackId = selectedAgentId.value || BUILTIN_KNOWLEDGE_QA_ID;
   return {
     id: fallbackId,
     name: unresolvedBuiltinAgentName(fallbackId),
     is_builtin: fallbackId.startsWith('builtin-'),
-    config: { agent_mode: settingsStore.isAgentStreamMode ? 'smart-reasoning' as const : 'quick-answer' as const }
+    config: { agent_mode: 'agent' as const }
   } as CustomAgent;
 });
 
@@ -410,7 +396,7 @@ const agentAllowedTools = computed<string[]>(() => {
 
 const isDocumentProcessingAgent = computed(() => {
   const agentType = currentAgentConfig.value?.agent_type;
-  return hasAgentConfig.value && agentType === 'document-processing-agent';
+  return hasAgentConfig.value && agentType === 'general-agent';
 });
 
 // 从 KB 对象里抽能力位，优先用 backend 显式的 capabilities 字段；否则回退到 indexing_strategy，
@@ -435,7 +421,7 @@ const kbToScopeCaps = (kb: any): Partial<ScopeCapabilities> => {
   };
 };
 
-// 当前智能体的 agent_mode（quick-answer / smart-reasoning），用于把
+// 当前智能体的 agent_mode（quick-answer / agent），用于把
 // "RAG-only 模式不能 @ wiki-only 知识库"这种隐式约束带进 KB 过滤。
 const agentMode = computed(() => {
   if (!hasAgentConfig.value) return '';
@@ -444,7 +430,7 @@ const agentMode = computed(() => {
 
 // Agent data arrives asynchronously and the selected ID is persisted across
 // reloads. Reconcile the runtime switch once that config is resolved; otherwise
-// a smart-reasoning agent can be sent through the quick-answer endpoint and its
+// a agent agent can be sent through the quick-answer endpoint and its
 // structured tool protocol is rendered as ordinary answer text.
 watch(
   [isSelectedAgentResolved, agentMode],
@@ -981,24 +967,24 @@ const loadAgents = async (force = false) => {
   }
 };
 
-// 默认选中的 builtin（builtin-quick-answer）也可能被当前租户管理员停用。
+// 默认选中的 builtin（builtin-knowledge-qa）也可能被当前租户管理员停用。
 // 列表加载完后做一次纠偏：若当前选中的是本租户停用的 agent（仅限「我的/builtin」，
-// 共享智能体由源租户决定，本地停用列表不适用），按 智能推理 → 快速问答 →
+// 共享智能体由源租户决定，本地停用列表不适用），按 知识问答 → 知识问答 →
 // 第一个可用 的顺序兜底切换。全部都被停用时保持原选择不动（极端场景，UI 仍会
 // 在 enabledAgents 过滤后显示空，由用户在智能体页恢复任意一个）。
 const ensureSelectedAgentNotDisabled = () => {
   if (settingsStore.selectedAgentSourceTenantId) return
-  const currentId = settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID
+  const currentId = settingsStore.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID
   if (agents.value.some(a => a.id === currentId) && !disabledOwnAgentIds.value.includes(currentId)) return
 
   const isEnabled = (id: string) =>
     agents.value.some(a => a.id === id) && !disabledOwnAgentIds.value.includes(id)
 
   let fallback: CustomAgent | undefined
-  if (isEnabled(BUILTIN_SMART_REASONING_ID)) {
-    fallback = agents.value.find(a => a.id === BUILTIN_SMART_REASONING_ID)
-  } else if (isEnabled(BUILTIN_QUICK_ANSWER_ID)) {
-    fallback = agents.value.find(a => a.id === BUILTIN_QUICK_ANSWER_ID)
+  if (isEnabled(BUILTIN_KNOWLEDGE_QA_ID)) {
+    fallback = agents.value.find(a => a.id === BUILTIN_KNOWLEDGE_QA_ID)
+  } else if (isEnabled(BUILTIN_KNOWLEDGE_QA_ID)) {
+    fallback = agents.value.find(a => a.id === BUILTIN_KNOWLEDGE_QA_ID)
   } else {
     fallback = agents.value.find(a => !disabledOwnAgentIds.value.includes(a.id))
   }
@@ -1007,8 +993,8 @@ const ensureSelectedAgentNotDisabled = () => {
   settingsStore.selectAgent(fallback.id)
   // selectAgent 内部仅对两个 builtin 常量自动切 isAgentEnabled；自定义 agent 兜底时
   // 需要按其 agent_mode 显式同步一次，保证模式徽标与对话行为一致。
-  if (fallback.id !== BUILTIN_QUICK_ANSWER_ID && fallback.id !== BUILTIN_SMART_REASONING_ID) {
-    settingsStore.toggleAgent(fallback.config?.agent_mode === 'smart-reasoning')
+  if (fallback.id !== BUILTIN_KNOWLEDGE_QA_ID && fallback.id !== BUILTIN_KNOWLEDGE_QA_ID) {
+    settingsStore.toggleAgent(fallback.config?.agent_mode === 'agent')
   }
 }
 
@@ -2088,7 +2074,7 @@ const createSession = async (val: string) => {
     return;
   }
 
-  // 发送前校验当前选中的智能体（含默认快速问答）是否已配置完成
+  // 发送前校验当前选中的智能体（含默认知识问答）是否已配置完成
   const agentToCheck = selectedAgent.value;
   let actualAgent = agentToCheck;
   if (agentToCheck.is_builtin && !settingsStore.selectedAgentSourceTenantId) {
@@ -2099,7 +2085,7 @@ const createSession = async (val: string) => {
     }
     actualAgent = builtin || agentToCheck;
   }
-  const isAgentMode = actualAgent.config?.agent_mode === 'smart-reasoning';
+  const isAgentMode = actualAgent.config?.agent_mode === 'agent';
   const { keys: notReadyKeys, labels: notReadyReasons } = collectAgentNotReadyReasons(
     actualAgent,
     isAgentMode,
@@ -2276,18 +2262,18 @@ const toggleAgentModeSelector = () => {
   }
 }
 
-const selectAgentMode = async (mode: 'quick-answer' | 'smart-reasoning') => {
+const selectAgentMode = async (mode: 'agent') => {
   if (!chatResources.isFresh('models')) {
     await loadChatModels()
   }
 
-  const builtinAgentId = mode === 'smart-reasoning' ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID;
+  const builtinAgentId = BUILTIN_KNOWLEDGE_QA_ID;
   const builtinAgent = agents.value.find(a => a.id === builtinAgentId);
 
   if (builtinAgent) {
     const { keys: notReadyKeys, labels: notReadyReasons } = collectAgentNotReadyReasons(
       builtinAgent,
-      mode === 'smart-reasoning',
+      mode === 'agent',
     );
     if (notReadyReasons.length > 0) {
       showAgentModeSelector.value = false;
@@ -2296,11 +2282,11 @@ const selectAgentMode = async (mode: 'quick-answer' | 'smart-reasoning') => {
     }
   }
 
-  const shouldEnableAgent = mode === 'smart-reasoning';
+  const shouldEnableAgent = mode === 'agent';
   if (shouldEnableAgent !== isAgentEnabled.value) {
     settingsStore.toggleAgent(shouldEnableAgent);
     // 同时更新选中的智能体
-    settingsStore.selectAgent(shouldEnableAgent ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID);
+    settingsStore.selectAgent(shouldEnableAgent ? BUILTIN_KNOWLEDGE_QA_ID : BUILTIN_KNOWLEDGE_QA_ID);
     MessagePlugin.success(shouldEnableAgent ? t('input.messages.agentSwitchedOn') : t('input.messages.agentSwitchedOff'));
   }
   showAgentModeSelector.value = false;
@@ -2322,7 +2308,7 @@ const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) =>
   }
 
   // 根据智能体的 agent_mode 判断是否为 Agent 模式
-  const isAgentType = agent.config?.agent_mode === 'smart-reasoning';
+  const isAgentType = agent.config?.agent_mode === 'agent';
 
   // 统一检查智能体是否就绪（内置和自定义智能体使用相同逻辑）
   const actualAgent = agent.is_builtin && !sourceTenantId
@@ -2375,7 +2361,7 @@ const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) =>
   // otherwise selecting e.g. the Wiki Questioner incorrectly says
   // "Switched to Intelligent Reasoning".
   const isModeBuiltin =
-    agent.id === BUILTIN_QUICK_ANSWER_ID || agent.id === BUILTIN_SMART_REASONING_ID;
+    agent.id === BUILTIN_KNOWLEDGE_QA_ID || agent.id === BUILTIN_KNOWLEDGE_QA_ID;
   const message = isModeBuiltin
     ? (isAgentType ? t('input.messages.agentSwitchedOn') : t('input.messages.agentSwitchedOff'))
     : t('input.messages.agentSelected', { name: agent.name });

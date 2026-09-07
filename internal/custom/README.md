@@ -66,3 +66,7 @@
 幂等、删除、重试和多副本行为补充测试。
 
 - `modules/toolcontract`：按模型实际收到的 JSON Schema 校验工具参数，覆盖嵌套类型与组合约束。
+
+## 统一问答
+
+`agentruntime` 负责全部类型的持久运行、授权工具、检查点和原子结果提交；`usererrors` 提供前后端共享的友好失败词表。Python 唯一循环见 `custom/services/agent-runtime`。各类型独立保留，知识问答 15 次，其余 50 次。

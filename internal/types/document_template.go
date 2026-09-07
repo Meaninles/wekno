@@ -31,7 +31,7 @@ const (
 )
 
 // DocumentTemplateConfig stores document-processing template requirements and
-// soft reference templates. It is intentionally scoped to the Claude SDK
+// soft reference templates. It is intentionally scoped to the Agent Harness
 // document-processing agent type.
 type DocumentTemplateConfig struct {
 	Word  DocumentTemplateFormatConfig `yaml:"word" json:"word"`

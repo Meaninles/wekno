@@ -242,16 +242,6 @@ app:
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
-  # -- One-shot skill execution sandbox. In docker mode the app talks to the
-  # host daemon through a separately configured docker.sock mount; kubelet
-  # imagePullSecrets do not authenticate this host-daemon pull.
-  sandbox:
-    mode: docker
-    timeoutSeconds: "60"
-    dockerImage: wechatopenai/weknora-sandbox:latest
-
-  # -- Resource requests and limits
-  # Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
   resources:
     requests:
       cpu: 100m
@@ -355,15 +345,11 @@ app:
       uri: bolt://neo4j:7687
 
   agentIntegration:
-    enabled: false
-    generalAgentURL: http://weknora-custom-general-agent:8091
-    documentProcessingAgentURL: http://weknora-custom-document-processing-agent:8091
-    # Agent runs are held in the originating API process. Kubernetes expands
-    # POD_IP from the Downward API before the application starts.
-    toolCallbackURL: http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call
-    artifactUploadURL: http://app:8080/api/v1/custom/general-agent/internal/artifacts/upload
+    enabled: true
+    toolCallbackURL: http://app:8080/api/v1/custom/agent-runtime/internal/tools/call
+    artifactUploadURL: http://app:8080/api/v1/custom/agent-runtime/internal/artifacts/upload
     apiKeySecret:
-      name: general-agent-secret
+      name: agent-runtime-secret
       key: apiKey
     artifactStorage:
       # Durable Agent artifacts support only private MinIO or OBS commits.
@@ -373,8 +359,6 @@ app:
       # it stable. Restore drills and test clusters must use a different UUID.
       # Do not put usernames, source filenames or customer data in this path.
       pathPrefix: weknora/__weknora_private_agent_artifacts_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/
-      migrationAllowMissing: "false"
-      migrationAllowInvalid: "false"
 
   # Uploaded professional skills are cluster state, not pod-local workspace
   # data. Configure a private MinIO/OBS namespace whenever this feature is
@@ -388,30 +372,23 @@ app:
   extraEnv: []
   # - name: OLLAMA_BASE_URL
   #   value: "http://ollama:11434"
-  # The two Claude SDK sidecar pools can be deployed by this chart through
-  # generalAgent/documentProcessingAgent below. General, knowledge manager,
-  # data-analysis and table-analysis use the general pool; document-processing
-  # uses the document-processing pool.
-  # - name: CUSTOM_GENERAL_AGENT_URL
-  #   value: "http://weknora-custom-general-agent:8091"
-  # - name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
-  #   value: "http://weknora-custom-document-processing-agent:8091"
-  # - name: CUSTOM_GENERAL_AGENT_API_KEY
+  # The agentRuntime worker pool serves every QA profile.
+  # - name: AGENT_RUNTIME_API_KEY
   #   valueFrom:
   #     secretKeyRef:
-  #       name: general-agent-secret
+  #       name: agent-runtime-secret
   #       key: apiKey
-  # - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
-  #   value: "http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call"
+  # - name: AGENT_RUNTIME_TOOL_CALLBACK_URL
+  #   value: "http://app:8080/api/v1/custom/agent-runtime/internal/tools/call"
   # Final artifacts are uploaded to the app's private object-store endpoint
   # before a run is reported complete. Never place their durable root on RWX.
-  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL
-  #   value: "http://app:8080/api/v1/custom/general-agent/internal/artifacts/upload"
-  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER
+  # - name: AGENT_RUNTIME_ARTIFACT_UPLOAD_URL
+  #   value: "http://app:8080/api/v1/custom/agent-runtime/internal/artifacts/upload"
+  # - name: AGENT_RUNTIME_ARTIFACT_STORAGE_PROVIDER
   #   value: "obs"
-  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX
+  # - name: AGENT_RUNTIME_ARTIFACT_PATH_PREFIX
   #   value: "weknora/__weknora_private_agent_artifacts_v1__/deployment/prod-cce-wk-opaqueid/namespace/replace-with-a-unique-rfc4122-uuid/"
-  # Claude SDK original-file transfer compatibility:
+  # Agent workspace original-file storage:
   # If app.env.STORAGE_TYPE is "obs" and OBS_* are already configured here,
   # general-agent requests automatically reuse OBS with the dedicated prefix
   # shown below. The deployment label and non-zero UUID are stable
@@ -436,9 +413,9 @@ app:
   # - name: OBS_BUCKET_NAME
   #   value: "weknora"
   # Optional explicit override:
-  # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER
+  # - name: AGENT_RUNTIME_ORIGINAL_INPUT_STORAGE_PROVIDER
   #   value: "obs"
-  # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX
+  # - name: AGENT_RUNTIME_ORIGINAL_INPUT_PATH_PREFIX
   #   value: "weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/prod-cce-wk-opaqueid/namespace/replace-with-a-unique-rfc4122-uuid/"
 
   # -- Additional pod volumes and mounts, for example external PostgreSQL and
@@ -777,131 +754,30 @@ docreader:
   affinity: {}
 
 # -----------------------------------------------------------------------------
-# Custom general-agent pool
+# Unified AgentScope worker pool
 # -----------------------------------------------------------------------------
-generalAgent:
-  enabled: false
+agentRuntime:
+  enabled: true
   replicaCount: 2
-  terminationGracePeriodSeconds: 45
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  concurrency: 8
   image:
-    repository: weknora-custom-general-agent
-    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
-    digest: ""
+    repository: weknora-agent-runtime
     tag: local
-    pullPolicy: IfNotPresent
-
-  service:
-    type: ClusterIP
-    port: 8091
-  apiKeySecret:
-    name: general-agent-secret
-    key: apiKey
-  env:
-    maxTurns: "30"
-    maxArtifactMB: "20"
-    apiTimeoutMS: "600000"
-    idleTimeoutMS: "900000"
-  extraEnv: []
-  scratch:
-    volumeType: emptyDir
-    sizeLimit: 4Gi
-    ephemeral:
-      storageClassName: ""
-      size: 20Gi
-      accessModes:
-        - ReadWriteOnce
-      annotations: {}
-    hostPath:
-      path: /mnt/weknora-data/scratch-general-agent
-      type: DirectoryOrCreate
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1Gi
-    limits:
-      cpu: "3"
-      memory: 4Gi
-  topologySpread:
-    enabled: true
-    maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
-  nodeSelector: {}
-  affinity: {}
-  tolerations: []
-
-# -----------------------------------------------------------------------------
-# Custom document-processing-agent pool
-# -----------------------------------------------------------------------------
-documentProcessingAgent:
-  enabled: false
-  replicaCount: 2
-  terminationGracePeriodSeconds: 60
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-  image:
-    repository: weknora-custom-document-processing-agent
-    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
     digest: ""
-    tag: local
     pullPolicy: IfNotPresent
-  service:
-    type: ClusterIP
-    port: 8091
-  apiKeySecret:
-    name: general-agent-secret
-    key: apiKey
-  env:
-    maxTurns: "30"
-    maxArtifactMB: "20"
-    apiTimeoutMS: "600000"
-    idleTimeoutMS: "900000"
-  extraEnv: []
-  scratch:
-    volumeType: emptyDir
-    sizeLimit: 8Gi
-    ephemeral:
-      storageClassName: ""
-      size: 40Gi
-      accessModes:
-        - ReadWriteOnce
-      annotations: {}
-    hostPath:
-      path: /mnt/weknora-data/scratch-document-agent
-      type: DirectoryOrCreate
+  controlURL: http://app:8080/api/v1/custom/agent-runtime/internal
   resources:
-    requests:
-      cpu: "1"
-      memory: 1536Mi
-    limits:
-      cpu: "4"
-      memory: 6Gi
-  topologySpread:
-    enabled: true
-    maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 2Gi}
   nodeSelector: {}
-  affinity: {}
-  tolerations: []
+  workspace:
+    namespace: ""
+    image: weknora-agent-workspace:local
+    storageClass: ""
+    storageSize: 4Gi
+    imagePullSecrets: []
+    nodeSelector: {}
 
-# -----------------------------------------------------------------------------
-# PostgreSQL (ParadeDB - Vector + BM25 Search)
-# -----------------------------------------------------------------------------
 postgresql:
   # -- Enable PostgreSQL
   enabled: true

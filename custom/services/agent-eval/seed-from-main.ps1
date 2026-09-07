@@ -211,8 +211,8 @@ if ($FullMinio) {
 } else {
     $defaultMinioPrefixes = [ordered]@{
         MINIO_PATH_PREFIX = "weknora/__weknora_private_knowledge_objects_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
-        CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX = "weknora/__weknora_private_agent_artifacts_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
-        CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX = "weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
+        AGENT_RUNTIME_ARTIFACT_PATH_PREFIX = "weknora/__weknora_private_agent_artifacts_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
+        AGENT_RUNTIME_ORIGINAL_INPUT_PATH_PREFIX = "weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
         CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX = "weknora/__weknora_private_professional_skills_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
     }
     foreach ($name in $defaultMinioPrefixes.Keys) {

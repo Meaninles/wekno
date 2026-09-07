@@ -184,6 +184,11 @@ func setSSEHeaders(c *gin.Context) {
 
 // buildStreamResponse constructs a StreamResponse from a StreamEvent
 func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.StreamResponse {
+	return BuildStreamResponse(evt, requestID)
+}
+
+// BuildStreamResponse keeps durable replay and live delivery on one wire format.
+func BuildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.StreamResponse {
 	response := &types.StreamResponse{
 		ID:           requestID,
 		ResponseType: evt.Type,

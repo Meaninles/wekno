@@ -71,13 +71,7 @@ export function getAgentNotReadyReasonKeys(
     }
   }
 
-  if (
-    options.isAgentMode
-    && config?.agent_type === 'data-analysis'
-    && (!config.db_data_sources || config.db_data_sources.length === 0)
-  ) {
-    reasons.push('database_sources')
-  }
+
 
   return reasons
 }

@@ -91,6 +91,9 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 		return
 	}
 
+	if h.resumeRuntime != nil && h.resumeRuntime(c, message) {
+		return
+	}
 	// Get initial events from stream (offset 0)
 	events, currentOffset, err := h.streamManager.GetEvents(ctx, sessionID, messageID, 0)
 	if err != nil {
@@ -282,6 +285,12 @@ func (h *Handler) StopSession(c *gin.Context) {
 		return
 	}
 
+	if h.stopRuntime != nil {
+		if err := h.stopRuntime(c, message); err != nil {
+			c.JSON(500, gin.H{"error": "Failed to stop runtime"})
+			return
+		}
+	}
 	// Check if message is already completed (stopped)
 	if message.IsCompleted {
 		logger.Infof(ctx, "Message %s is already completed, no need to stop", assistantMessageID)

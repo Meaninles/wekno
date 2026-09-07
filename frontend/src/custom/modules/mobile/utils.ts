@@ -63,7 +63,7 @@ export async function fileToBase64(file: File): Promise<string> {
 }
 
 export function agentLabel(agent?: CustomAgent | null) {
-  return agent?.name || "快速问答";
+  return agent?.name || "知识问答";
 }
 
 export function modelLabel(model?: ModelConfig | null) {

@@ -72,7 +72,7 @@ func TestResolveBuiltinWikiFixerTenantScope_SharedEditorUsesSourceTenant(t *test
 }
 
 func TestResolveBuiltinWikiFixerTenantScope_SharedViewerDoesNotSwitchTenant(t *testing.T) {
-	agent := &types.CustomAgent{ID: types.BuiltinWikiFixerID, TenantID: 10}
+	agent := &types.CustomAgent{ID: types.BuiltinGeneralAgentID, TenantID: 10}
 	kbLookup := &wikiFixerKBLookupStub{
 		kb: &types.KnowledgeBase{ID: "kb-shared", TenantID: 20},
 	}
@@ -122,7 +122,7 @@ func TestResolveBuiltinWikiFixerTenantScope_IgnoresNonWikiFixerAgents(t *testing
 }
 
 func TestResolveBuiltinWikiFixerTenantScope_RequiresSingleKnowledgeBase(t *testing.T) {
-	agent := &types.CustomAgent{ID: types.BuiltinWikiFixerID, TenantID: 10}
+	agent := &types.CustomAgent{ID: types.BuiltinGeneralAgentID, TenantID: 10}
 	kbLookup := &wikiFixerKBLookupStub{
 		kb: &types.KnowledgeBase{ID: "kb-shared", TenantID: 20},
 	}
@@ -143,7 +143,7 @@ func TestResolveBuiltinWikiFixerTenantScope_RequiresSingleKnowledgeBase(t *testi
 }
 
 func TestResolveBuiltinWikiFixerTenantScope_FallsBackOnLookupOrPermissionErrors(t *testing.T) {
-	agent := &types.CustomAgent{ID: types.BuiltinWikiFixerID, TenantID: 10}
+	agent := &types.CustomAgent{ID: types.BuiltinGeneralAgentID, TenantID: 10}
 
 	t.Run("kb lookup error", func(t *testing.T) {
 		gotAgent, effectiveTenantID := resolveBuiltinWikiFixerTenantScope(

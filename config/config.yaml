@@ -26,7 +26,7 @@ conversation:
     max_input_chars: 16384
     repeat_penalty: 1.0
     temperature: 0.3
-    max_completion_tokens: 4096
+    max_completion_tokens: 16384
     # Local WeKnora calls must explicitly disable model reasoning. Without an
     # explicit value, thinking-capable OpenAI-compatible models use their
     # upstream default and may spend the completion budget on reasoning.

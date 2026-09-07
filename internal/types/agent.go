@@ -27,25 +27,24 @@ type AgentConfig struct {
 	DBDataSources       []string        `json:"db_data_sources,omitempty"`       // Accessible database analytics source IDs
 	SystemPrompt        string          `json:"system_prompt,omitempty"`         // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
 	// DocumentTemplate is scoped to AgentTypeDocumentProcessingAgent and carries
-	// template requirement/reference files into the Claude SDK sidecar.
+	// template requirement/reference files into the Agent Harness workspace.
 	DocumentTemplate *DocumentTemplateConfig `json:"document_template,omitempty"`
 	// KnowledgeManagement is the effective, current-turn mutation scope for a
 	// knowledge-base-manager. It is runtime-only and never loaded directly from
 	// the persisted agent JSON.
 	KnowledgeManagement *KnowledgeManagementRuntimeScope `json:"knowledge_management,omitempty"`
 	// Deprecated: Use SystemPrompt instead. Kept for backward compatibility during migration.
-	SystemPromptWebEnabled    string        `json:"system_prompt_web_enabled,omitempty"`     // Deprecated: Custom prompt when web search is enabled
-	SystemPromptWebDisabled   string        `json:"system_prompt_web_disabled,omitempty"`    // Deprecated: Custom prompt when web search is disabled
-	UseCustomSystemPrompt     bool          `json:"use_custom_system_prompt"`                // Whether to use custom system prompt instead of default
-	WebSearchEnabled          bool          `json:"web_search_enabled"`                      // Whether web search tool is enabled
-	WebSearchMaxResults       int           `json:"web_search_max_results"`                  // Maximum number of web search results (default: 5)
-	WebSearchProviderID       string        `json:"web_search_provider_id,omitempty"`        // WebSearchProviderEntity ID (resolved from agent config)
-	ClaudeSDKWebSearchEnabled bool          `json:"claude_sdk_web_search_enabled,omitempty"` // Whether general-agent enables Claude SDK native WebSearch/WebFetch
-	WebFetchEnabled           bool          `json:"web_fetch_enabled"`                       // Whether web_fetch can fetch full page content
-	WebFetchTopN              int           `json:"web_fetch_top_n,omitempty"`               // Max pages to fetch after web search rerank
-	MultiTurnEnabled          bool          `json:"multi_turn_enabled"`                      // Whether multi-turn conversation is enabled
-	HistoryTurns              int           `json:"history_turns"`                           // Number of history turns to keep in context
-	SearchTargets             SearchTargets `json:"-"`                                       // Pre-computed unified search targets (runtime only)
+	SystemPromptWebEnabled  string        `json:"system_prompt_web_enabled,omitempty"`  // Deprecated: Custom prompt when web search is enabled
+	SystemPromptWebDisabled string        `json:"system_prompt_web_disabled,omitempty"` // Deprecated: Custom prompt when web search is disabled
+	UseCustomSystemPrompt   bool          `json:"use_custom_system_prompt"`             // Whether to use custom system prompt instead of default
+	WebSearchEnabled        bool          `json:"web_search_enabled"`                   // Whether web search tool is enabled
+	WebSearchMaxResults     int           `json:"web_search_max_results"`               // Maximum number of web search results (default: 5)
+	WebSearchProviderID     string        `json:"web_search_provider_id,omitempty"`     // WebSearchProviderEntity ID (resolved from agent config)
+	WebFetchEnabled         bool          `json:"web_fetch_enabled"`                    // Whether web_fetch can fetch full page content
+	WebFetchTopN            int           `json:"web_fetch_top_n,omitempty"`            // Max pages to fetch after web search rerank
+	MultiTurnEnabled        bool          `json:"multi_turn_enabled"`                   // Whether multi-turn conversation is enabled
+	HistoryTurns            int           `json:"history_turns"`                        // Number of history turns to keep in context
+	SearchTargets           SearchTargets `json:"-"`                                    // Pre-computed unified search targets (runtime only)
 	// MCP service selection
 	MCPSelectionMode string   `json:"mcp_selection_mode"` // MCP selection mode: "all", "selected", "none"
 	MCPServices      []string `json:"mcp_services"`       // Selected MCP service IDs (when mode is "selected")
@@ -61,13 +60,8 @@ type AgentConfig struct {
 	// Whether to retain retrieval history (like wiki_read_page results) across turns (default: false)
 	RetainRetrievalHistory bool `json:"retain_retrieval_history"`
 
-	// Skills configuration (Progressive Disclosure pattern)
-	SkillsEnabled bool     `json:"skills_enabled"` // Whether skills are enabled (default: false)
-	SkillDirs     []string `json:"skill_dirs"`     // Directories to search for skills
-	AllowedSkills []string `json:"allowed_skills"` // Skill names whitelist (empty = allow all)
-	// Professional Claude SDK skills selected for this run. These are not
-	// exposed as WeKnora read_skill tools; the Claude SDK sidecar loads them as
-	// native .claude/skills entries.
+	// Professional skills selected for this run are loaded by the unified SDK
+	// toolkit with their package files in the run workspace.
 	ProfessionalSkillsEnabled bool     `json:"professional_skills_enabled,omitempty"`
 	AllowedProfessionalSkills []string `json:"allowed_professional_skills,omitempty"`
 

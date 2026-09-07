@@ -1,0 +1,166 @@
+{{- if .Values.agentRuntime.enabled }}
+{{- $name := printf "%s-agent-runtime" (include "weknora.fullname" .) }}
+{{- $workspaceNS := .Values.agentRuntime.workspace.namespace | default (printf "%s-agent-workspaces" .Release.Namespace) }}
+{{- if eq $workspaceNS .Release.Namespace }}
+{{- fail "agentRuntime.workspace.namespace must be dedicated to execution Pods" }}
+{{- end }}
+{{- if not .Values.app.agentIntegration.enabled }}
+{{- fail "agentRuntime requires app.agentIntegration.enabled and its shared API key Secret" }}
+{{- end }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $workspaceNS }}
+  annotations:
+    helm.sh/resource-policy: keep
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workspaceNS }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, persistentvolumeclaims]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [get, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workspaceNS }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspace-isolation
+  namespace: {{ $workspaceNS }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "agent-runtime" "context" .) | nindent 4 }}
+spec:
+  replicas: {{ ternary 0 .Values.agentRuntime.replicaCount (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended) }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" "agent-runtime" "context" .) | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
+  template:
+    metadata:
+      labels:
+        {{- include "weknora.componentSelectorLabels" (dict "component" "agent-runtime" "context" .) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      terminationGracePeriodSeconds: 35
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if gt (int .Values.agentRuntime.replicaCount) 1 }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "weknora.componentSelectorLabels" (dict "component" "agent-runtime" "context" .) | nindent 18 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: runtime
+          image: {{ include "weknora.agentRuntime.image" . | quote }}
+          imagePullPolicy: {{ .Values.agentRuntime.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: AGENT_RUNTIME_CONTROL_URL
+              value: {{ .Values.agentRuntime.controlURL | quote }}
+            - name: AGENT_RUNTIME_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.app.agentIntegration.apiKeySecret.name | quote }}
+                  key: {{ .Values.app.agentIntegration.apiKeySecret.key | quote }}
+            - name: AGENT_RUNTIME_CONCURRENCY
+              value: {{ .Values.agentRuntime.concurrency | quote }}
+            - name: AGENT_WORKSPACE_BACKEND
+              value: kubernetes
+            - name: AGENT_WORKSPACE_NAMESPACE
+              value: {{ $workspaceNS | quote }}
+            - name: AGENT_WORKSPACE_IMAGE
+              value: {{ .Values.agentRuntime.workspace.image | quote }}
+            - name: AGENT_WORKSPACE_STORAGE_CLASS
+              value: {{ .Values.agentRuntime.workspace.storageClass | quote }}
+            - name: AGENT_WORKSPACE_STORAGE_SIZE
+              value: {{ .Values.agentRuntime.workspace.storageSize | quote }}
+            - name: AGENT_WORKSPACE_IMAGE_PULL_SECRETS
+              value: {{ join "," .Values.agentRuntime.workspace.imagePullSecrets | quote }}
+            - name: AGENT_WORKSPACE_NODE_SELECTOR
+              value: {{ toJson .Values.agentRuntime.workspace.nodeSelector | quote }}
+          ports:
+            - {name: health, containerPort: 8091}
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.agentRuntime.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 512Mi}
+      {{- with .Values.agentRuntime.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if not (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" "agent-runtime" "context" .) | nindent 6 }}
+{{- end }}
+{{- end }}

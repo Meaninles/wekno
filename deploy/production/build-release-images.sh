@@ -291,8 +291,8 @@ fi
 
 app_ref="$registry/weknora-app:$release_tag"
 docreader_ref="$registry/weknora-docreader:$release_tag"
-general_agent_ref="$registry/weknora-general-agent:$release_tag"
-document_agent_ref="$registry/weknora-document-processing-agent:$release_tag"
+agent_runtime_ref="$registry/weknora-agent-runtime:$release_tag"
+agent_workspace_ref="$registry/weknora-agent-workspace:$release_tag"
 frontend_ref="$registry/weknora-frontend:$release_tag"
 mobile_ref="$registry/weknora-mobile-web:$release_tag"
 
@@ -309,8 +309,8 @@ run_build() {
 }
 
 if [[ "$finalize_existing" == true ]]; then
-  for image in "$app_ref" "$docreader_ref" "$general_agent_ref" \
-    "$document_agent_ref" "$frontend_ref" "$mobile_ref"; do
+  for image in "$app_ref" "$docreader_ref" "$agent_runtime_ref" \
+    "$agent_workspace_ref" "$frontend_ref" "$mobile_ref"; do
     docker image inspect "$image" >/dev/null 2>&1 || \
       die "release image is not available locally: $image"
     [[ $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
@@ -321,20 +321,13 @@ if [[ "$finalize_existing" == true ]]; then
       "$(docker image inspect --format '{{.Id}}' "$image")"
   done
 else
-  run_build general-agent \
-    --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
-    --build-arg "APT_MIRROR_ARG=$apt_mirror_host" \
-    --build-arg "PIP_INDEX_URL_ARG=$pip_index_url" \
-    --build-arg "NPM_REGISTRY_ARG=$npm_registry" \
-    -f "$source_dir/custom/services/general-agent/Dockerfile" \
-    -t "$general_agent_ref" "$source_dir"
+  run_build agent-runtime \
+    -f "$source_dir/custom/services/agent-runtime/Dockerfile" \
+    -t "$agent_runtime_ref" "$source_dir"
 
-  run_build document-processing-agent \
-    --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
-    --build-arg "APT_MIRROR_ARG=$apt_mirror_host" \
-    --build-arg "PIP_INDEX_URL_ARG=$pip_index_url" \
-    -f "$source_dir/custom/services/document-processing-agent/Dockerfile" \
-    -t "$document_agent_ref" "$source_dir"
+  run_build agent-workspace \
+    -f "$source_dir/custom/services/agent-runtime/sandbox/Dockerfile" \
+    -t "$agent_workspace_ref" "$source_dir"
 
   run_build docreader \
     --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
@@ -388,8 +381,8 @@ smoke_shell app "$app_ref" \
   'test -x /app/WeKnora && test -d /app/skills/preloaded && test -x /usr/local/bin/docker && test -x /usr/local/bin/uvx && test -s /home/appuser/.duckdb/extensions/v1.5.2/linux_amd64/spatial.duckdb_extension && test -s /home/appuser/.duckdb/extensions/v1.5.2/linux_amd64/excel.duckdb_extension'
 smoke_shell docreader "$docreader_ref" \
   'test -f /app/docreader/main.py && test -x /bin/grpc_health_probe && test -d /root/.cache/ms-playwright'
-smoke_shell general-agent "$general_agent_ref" 'test -f /app/app/main.py'
-smoke_shell document-agent "$document_agent_ref" 'test -f /app/app/main.py'
+smoke_shell agent-runtime "$agent_runtime_ref" 'test -f /app/app/server.py'
+smoke_shell agent-workspace "$agent_workspace_ref" 'test -f /opt/agent/job.py && command -v libreoffice'
 smoke_shell frontend "$frontend_ref" \
   'test -f /usr/share/nginx/html/index.html && test -f /usr/share/nginx/html/mobile/mobile.html'
 smoke_shell mobile "$mobile_ref" \
@@ -417,8 +410,8 @@ push_and_record() {
 
 push_and_record APP "$app_ref"
 push_and_record DOCREADER "$docreader_ref"
-push_and_record GENERAL_AGENT "$general_agent_ref"
-push_and_record DOCUMENT_AGENT "$document_agent_ref"
+push_and_record AGENT_RUNTIME "$agent_runtime_ref"
+push_and_record AGENT_WORKSPACE "$agent_workspace_ref"
 push_and_record FRONTEND "$frontend_ref"
 push_and_record MOBILE_WEB "$mobile_ref"
 

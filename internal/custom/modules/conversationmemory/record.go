@@ -22,7 +22,7 @@ func AssistantRecord(m *types.Message) string {
 	if m == nil {
 		return ""
 	}
-	content := strings.TrimSpace(sourcerefs.StripCitationProtocol(historicalThinking.ReplaceAllString(m.Content, "")))
+	content := AssistantContent(m)
 	if content == "" && len(m.KnowledgeReferences) == 0 {
 		return ""
 	}
@@ -70,4 +70,14 @@ func AssistantRecord(m *types.Message) string {
 		encoded, _ = json.Marshal(record)
 	}
 	return HistoricalAssistantOutput(content) + "\n<conversation_record>" + string(encoded) + "</conversation_record>"
+}
+
+// AssistantContent is used in a native assistant-role message. Provenance is
+// conveyed by the role and separate navigation metadata, not imitation-prone
+// markup around a previous answer.
+func AssistantContent(m *types.Message) string {
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(sourcerefs.StripCitationProtocol(historicalThinking.ReplaceAllString(m.Content, "")))
 }

@@ -357,18 +357,9 @@
         </div>
 
         <div v-if="isChatLikeModel" class="form-item">
-          <label class="form-label">智能体运行方式</label>
-          <t-select v-model="formData.runtimeAdapter">
-            <t-option value="platform" label="平台原生协议" />
-            <t-option v-if="formData.provider === 'anthropic'" value="claude-sdk" label="Claude SDK" />
-          </t-select>
-          <p v-if="formData.runtimeAdapter === 'claude-sdk'" class="form-desc">SDK 不支持 temperature；历史由平台管理，文件工具与原生方式共用。</p>
-        </div>
-
-        <div v-if="isChatLikeModel" class="form-item">
           <label class="form-label">思考强度</label>
           <t-input v-model="reasoningEffort" placeholder="留空使用模型默认值" />
-          <p class="form-desc">按上游模型支持的值填写；仅在开启思考时发送，平台与 Claude SDK 共用。</p>
+          <p class="form-desc">按上游模型支持的值填写；仅在开启思考时发送，由统一运行内核发送。</p>
           <p v-if="formData.extraConfig?.generation_policy === 'gateway'" class="form-desc">此模型由网关按实际模型和思考开关设置官方采样参数，智能体温度不覆盖网关策略。</p>
         </div>
 
@@ -454,7 +445,6 @@ interface ModelFormData {
   baseUrl?: string
   apiKey?: string
   rerankMaxInputTokens?: number
-  runtimeAdapter?: string
   dimension?: number
   supportsDimensionOverride?: boolean
   interfaceType?: 'ollama' | 'openai'
@@ -897,7 +887,6 @@ const formData = ref<ModelFormData>({
   baseUrl: '',
   apiKey: '',
   dimension: undefined,
-  runtimeAdapter: 'platform',
   supportsDimensionOverride: false,
   interfaceType: 'ollama',
   isDefault: false,
@@ -1142,7 +1131,6 @@ const resetForm = () => {
     baseUrl: '',
     apiKey: '',
     dimension: undefined,
-  runtimeAdapter: 'platform', // 默认不填，让用户手动输入或通过检测按钮获取
     supportsDimensionOverride: false,
     interfaceType: undefined,
     isDefault: false,

@@ -8,87 +8,56 @@ import (
 	"gorm.io/gorm"
 )
 
-// BuiltinAgentID constants for built-in agents
+// All conversations run in one harness with two fixed execution budgets.
 const (
-	// BuiltinQuickAnswerID is the ID for the built-in quick answer (RAG) agent
-	BuiltinQuickAnswerID = "builtin-quick-answer"
-	// BuiltinSimpleChatID is the ID for the built-in simple chat agent
-	BuiltinSimpleChatID = "builtin-simple-chat"
-	// BuiltinSmartReasoningID is the ID for the built-in smart reasoning (ReAct) agent
-	BuiltinSmartReasoningID = "builtin-smart-reasoning"
-	// BuiltinDeepResearcherID is the ID for the built-in deep researcher agent
-	BuiltinDeepResearcherID = "builtin-deep-researcher"
-	// BuiltinDataAnalystID is the ID for the built-in Claude SDK data analysis agent
-	BuiltinDataAnalystID = "builtin-data-analyst"
-	// BuiltinTableAnalystID is the ID for the built-in Claude SDK table analysis agent
-	BuiltinTableAnalystID = "builtin-table-analyst"
-	// BuiltinKnowledgeGraphExpertID is the ID for the built-in knowledge graph expert agent
-	BuiltinKnowledgeGraphExpertID = "builtin-knowledge-graph-expert"
-	// BuiltinDocumentProcessingID is the ID for the built-in Claude SDK document processing agent
-	BuiltinDocumentProcessingID = "builtin-document-processing"
-	// BuiltinGeneralAgentID is the ID for the built-in general-purpose Claude SDK agent
-	BuiltinGeneralAgentID = "builtin-general-agent"
-	// BuiltinWikiResearcherID is the ID for the built-in wiki researcher agent
-	BuiltinWikiResearcherID = "builtin-wiki-researcher"
-	// BuiltinWikiFixerID is the ID for the built-in wiki fixer agent
-	BuiltinWikiFixerID = "builtin-wiki-fixer"
-)
-
-// AgentMode constants for agent running mode
-const (
-	// AgentModeQuickAnswer is the RAG mode for quick Q&A
-	AgentModeQuickAnswer = "quick-answer"
-	// AgentModeSmartReasoning is the ReAct mode for multi-step reasoning
-	AgentModeSmartReasoning = "smart-reasoning"
-)
-
-// AgentType constants for Smart-Reasoning agent presets.
-// These presets bundle a recommended system prompt template,
-// tool allowlist, KB compatibility hint, and other defaults so users
-// don't have to configure everything from scratch.
-// AgentTypeCustom means the user wants full control and we won't
-// auto-fill anything based on the preset.
-const (
-	// AgentTypeRAGQA prefers vector/keyword chunk retrieval on document KBs.
-	AgentTypeRAGQA = "rag-qa"
-	// AgentTypeWikiQA prefers wiki-page navigation on wiki-enabled KBs.
-	AgentTypeWikiQA = "wiki-qa"
-	// AgentTypeHybridRAGWiki orchestrates Wiki + RAG on KBs where both are enabled.
-	AgentTypeHybridRAGWiki = "hybrid-rag-wiki"
-	// AgentTypeDataAnalysis runs the Claude SDK data-analysis preset over bound
-	// MySQL/PostgreSQL data sources using db_catalog + db_schema + db_query tools.
-	AgentTypeDataAnalysis = "data-analysis"
-	// AgentTypeTableAnalysis runs the Claude SDK table-analysis preset over CSV/Excel
-	// knowledge files and uploads using DuckDB SQL and structured chart output.
-	AgentTypeTableAnalysis = "table-analysis"
-	// AgentTypeDocumentProcessingAgent runs the Claude Agent SDK sidecar with
-	// document-processing-specific instructions.
+	BuiltinSimpleChatID              = "builtin-simple-chat"
+	BuiltinDeepResearcherID          = "builtin-deep-researcher"
+	BuiltinDataAnalystID             = "builtin-data-analyst"
+	BuiltinTableAnalystID            = "builtin-table-analyst"
+	BuiltinKnowledgeGraphExpertID    = "builtin-knowledge-graph-expert"
+	BuiltinDocumentProcessingID      = "builtin-document-processing"
+	BuiltinGeneralAgentID            = "builtin-general-agent"
+	BuiltinWikiResearcherID          = "builtin-wiki-researcher"
+	BuiltinWikiFixerID               = "builtin-wiki-fixer"
+	AgentTypeWikiQA                  = "wiki-qa"
+	AgentTypeHybridRAGWiki           = "hybrid-rag-wiki"
+	AgentTypeDataAnalysis            = "data-analysis"
+	AgentTypeTableAnalysis           = "table-analysis"
 	AgentTypeDocumentProcessingAgent = "document-processing-agent"
-	// AgentTypeGeneralAgent runs the custom Claude Agent SDK sidecar while reusing
-	// WeKnora's native retrieval, tools, MCP services, Skills, multimodal inputs
-	// and database analytics source bindings.
-	AgentTypeGeneralAgent = "general-agent"
-	// AgentTypeKnowledgeBaseManager runs on the general-agent runtime and adds
-	// server-authorized whole-document inventory/add/replace/delete operations.
-	AgentTypeKnowledgeBaseManager = "knowledge-base-manager"
-	// AgentTypeCustom is the "no preset" option; user-configured end to end.
-	AgentTypeCustom = "custom"
+	AgentTypeGeneralAgent            = "general-agent"
+	AgentTypeKnowledgeBaseManager    = "knowledge-base-manager"
+	AgentTypeCustom                  = "custom"
+	BuiltinKnowledgeQAID             = "builtin-knowledge-qa"
+	AgentModeUnified                 = "agent"
+	AgentTypeKnowledgeQA             = "knowledge-qa"
 )
 
-// IsClaudeSDKAgentType returns true for agent types that run through the custom
-// Claude Agent SDK sidecar instead of the legacy in-process ReAct engine.
-func IsClaudeSDKAgentType(agentType string) bool {
-	return agentType == AgentTypeGeneralAgent ||
-		agentType == AgentTypeKnowledgeBaseManager ||
-		agentType == AgentTypeDocumentProcessingAgent ||
-		agentType == AgentTypeDataAnalysis ||
-		agentType == AgentTypeTableAnalysis
+func AgentIterationBudget(agentType string) int {
+	if agentType == AgentTypeKnowledgeQA {
+		return 15
+	}
+	return 50
+}
+
+func HasWorkspaceCapabilities(agentType string) bool {
+	return agentType == AgentTypeGeneralAgent || agentType == AgentTypeDataAnalysis ||
+		agentType == AgentTypeTableAnalysis || agentType == AgentTypeDocumentProcessingAgent ||
+		agentType == AgentTypeKnowledgeBaseManager
+}
+
+func IsKnownAgentType(agentType string) bool {
+	switch agentType {
+	case AgentTypeKnowledgeQA, AgentTypeGeneralAgent, AgentTypeDataAnalysis, AgentTypeTableAnalysis,
+		AgentTypeDocumentProcessingAgent, AgentTypeKnowledgeBaseManager, AgentTypeWikiQA, AgentTypeHybridRAGWiki, AgentTypeCustom:
+		return true
+	}
+	return false
 }
 
 // CustomAgent represents a configurable AI agent (similar to GPTs)
 type CustomAgent struct {
 	// Unique identifier of the agent (composite primary key with TenantID)
-	// For built-in agents, this is 'builtin-quick-answer' or 'builtin-smart-reasoning'
+	// Built-in IDs identify distinct capability profiles.
 	// For custom agents, this is a UUID
 	ID string `yaml:"id" json:"id" gorm:"type:varchar(36);primaryKey"`
 	// Name of the agent
@@ -125,27 +94,21 @@ type CustomAgent struct {
 type CustomAgentConfig struct {
 	RetrievalBudget RetrievalBudget `json:"retrieval_budget" yaml:"retrieval_budget"`
 	// ===== Basic Settings =====
-	// Agent mode: "quick-answer" for RAG mode, "smart-reasoning" for ReAct agent mode
+	// AgentMode is always "agent": every profile uses the same harness.
 	AgentMode string `yaml:"agent_mode" json:"agent_mode"`
-	// AgentType is a preset category under smart-reasoning mode that pre-fills
+	// AgentType is a distinct capability profile that pre-fills
 	// system prompt, allowed tools and recommended KB compatibility.
-	// Valid values: "rag-qa", "wiki-qa", "hybrid-rag-wiki", "custom".
-	// Empty / unknown values are treated as "custom" (no preset applied).
-	// Ignored for quick-answer mode.
+	// Supported profiles are declared by the AgentType constants.
+	// API validation rejects unknown profile types.
 	AgentType string `yaml:"agent_type" json:"agent_type,omitempty"`
 	// System prompt for the agent (unified prompt, uses web_search_status placeholder for dynamic behavior)
 	SystemPrompt string `yaml:"system_prompt" json:"system_prompt"`
 	// SystemPromptID references a template ID in prompt_templates/ YAML files.
 	// If set and SystemPrompt is empty, the template content will be resolved at startup.
 	SystemPromptID string `yaml:"system_prompt_id" json:"system_prompt_id,omitempty"`
-	// Context template for normal mode (how to format retrieved chunks)
-	ContextTemplate string `yaml:"context_template" json:"context_template"`
-	// ContextTemplateID references a template ID in prompt_templates/ YAML files.
-	// If set and ContextTemplate is empty, the template content will be resolved at startup.
-	ContextTemplateID string `yaml:"context_template_id" json:"context_template_id,omitempty"`
 	// DocumentTemplate configures fixed template requirement/reference files for
-	// the Claude SDK document-processing agent. Nil means "use built-in defaults"
-	// only for AgentTypeDocumentProcessingAgent; an explicit empty value means
+	// the AgentScope document-processing agent. Nil means "use built-in defaults"
+	// only for AgentTypeGeneralAgent; an explicit empty value means
 	// the user intentionally removed all defaults.
 	DocumentTemplate *DocumentTemplateConfig `yaml:"document_template" json:"document_template,omitempty"`
 	// KnowledgeManagement configures the selected-KB mutation ceiling for the
@@ -164,7 +127,7 @@ type CustomAgentConfig struct {
 	MaxCompletionTokens int `yaml:"max_completion_tokens" json:"max_completion_tokens"`
 	// Whether to enable thinking mode (for models that support extended thinking)
 	Thinking *bool `yaml:"thinking" json:"thinking"`
-	// Whether the general-agent sidecar may create downloadable artifacts.
+	// Whether the agent runtime may create downloadable artifacts.
 	EnableArtifacts bool `yaml:"enable_artifacts" json:"enable_artifacts"`
 	// ===== Agent Mode Settings =====
 	// Maximum iterations for ReAct loop (only for agent type)
@@ -181,7 +144,7 @@ type CustomAgentConfig struct {
 	// authorization before skipping. <=0 uses the gate's configured timeout.
 	MCPAuthWaitTimeout int `yaml:"mcp_auth_wait_timeout,omitempty" json:"mcp_auth_wait_timeout,omitempty"`
 
-	// ===== Skills Settings (only for smart-reasoning mode) =====
+	// ===== Skills Settings =====
 	// Deprecated: legacy skills are now treated as lightweight prompt skills.
 	// Skills selection mode: "all" = all lightweight skills, "selected" = specific skills, "none" = no skills
 	SkillsSelectionMode string `yaml:"skills_selection_mode" json:"skills_selection_mode"`
@@ -191,8 +154,8 @@ type CustomAgentConfig struct {
 	// agents and temporarily selected in chat.
 	LightweightSkillsSelectionMode string   `yaml:"lightweight_skills_selection_mode" json:"lightweight_skills_selection_mode,omitempty"`
 	SelectedLightweightSkills      []string `yaml:"selected_lightweight_skills" json:"selected_lightweight_skills,omitempty"`
-	// Professional skills are real Claude SDK skills materialized as
-	// .claude/skills/<name>/SKILL.md for Claude SDK based agents.
+	// Professional skills are real AgentScope skills materialized as
+	// /workspace/skills/<name>/SKILL.md for AgentScope based agents.
 	ProfessionalSkillsSelectionMode string   `yaml:"professional_skills_selection_mode" json:"professional_skills_selection_mode,omitempty"`
 	SelectedProfessionalSkills      []string `yaml:"selected_professional_skills" json:"selected_professional_skills,omitempty"`
 	// ===== Knowledge Base Settings =====
@@ -229,13 +192,6 @@ type CustomAgentConfig struct {
 	// When set, only files with matching extensions can be used with this agent
 	SupportedFileTypes []string `yaml:"supported_file_types" json:"supported_file_types"`
 
-	// ===== Data Analysis Settings =====
-	// Whether to run the legacy in-pipeline DuckDB SQL stage when
-	// the retrieved chunks include CSV/Excel files. This issues an extra LLM
-	// call to generate a SQL query and is disabled by default because most
-	// quick-answer / RAG-style agents do not want the added latency.
-	DataAnalysisEnabled bool `yaml:"data_analysis_enabled" json:"data_analysis_enabled"`
-
 	// ===== FAQ Strategy Settings =====
 	// Whether FAQ priority strategy is enabled (FAQ answers prioritized over document chunks)
 	FAQPriorityEnabled bool `yaml:"faq_priority_enabled" json:"faq_priority_enabled"`
@@ -250,8 +206,6 @@ type CustomAgentConfig struct {
 	// WebSearchProviderID references a specific WebSearchProviderEntity.
 	// If empty, the tenant's default provider (is_default=true) is used.
 	WebSearchProviderID string `yaml:"web_search_provider_id" json:"web_search_provider_id,omitempty"`
-	// Whether the general-agent sidecar enables Claude SDK native WebSearch/WebFetch.
-	ClaudeSDKWebSearchEnabled bool `yaml:"claude_sdk_web_search_enabled" json:"claude_sdk_web_search_enabled,omitempty"`
 	// Whether to auto-fetch full page content for reranked web search results
 	WebFetchEnabled bool `yaml:"web_fetch_enabled" json:"web_fetch_enabled"`
 	// Max number of pages to fetch after rerank (default: 3)
@@ -275,29 +229,6 @@ type CustomAgentConfig struct {
 	// Rerank threshold
 	RerankThreshold float64 `yaml:"rerank_threshold" json:"rerank_threshold"`
 
-	// ===== Advanced Settings (mainly for normal mode) =====
-	// Whether to enable query expansion
-	EnableQueryExpansion bool `yaml:"enable_query_expansion" json:"enable_query_expansion"`
-	// Whether to enable query rewrite for multi-turn conversations
-	EnableRewrite bool `yaml:"enable_rewrite" json:"enable_rewrite"`
-	// Rewrite prompt system message
-	RewritePromptSystem string `yaml:"rewrite_prompt_system" json:"rewrite_prompt_system"`
-	// Rewrite prompt user message template
-	RewritePromptUser string `yaml:"rewrite_prompt_user" json:"rewrite_prompt_user"`
-	// Dedicated chat model ID for the query-understanding (rewrite + intent) step.
-	// When empty, the main conversation ModelID is used as a fallback.
-	QueryUnderstandModelID string `yaml:"query_understand_model_id" json:"query_understand_model_id,omitempty"`
-	// Fallback strategy: "fixed" for fixed response, "model" for model generation
-	FallbackStrategy string `yaml:"fallback_strategy" json:"fallback_strategy"`
-	// Fixed fallback response (when FallbackStrategy is "fixed")
-	FallbackResponse string `yaml:"fallback_response" json:"fallback_response"`
-	// Fallback prompt (when FallbackStrategy is "model")
-	FallbackPrompt string `yaml:"fallback_prompt" json:"fallback_prompt"`
-	// IntentPrompts holds per-intent system prompt overrides for non-retrieval
-	// intents (greeting, chitchat, etc.). Empty values fall back to templates
-	// under config/prompt_templates/intent_prompts.yaml.
-	IntentPrompts map[string]string `yaml:"intent_prompts" json:"intent_prompts,omitempty"`
-
 	// ===== Suggested Prompts =====
 	// 推荐问题列表，用于在前端对话面板展示快捷提问
 	SuggestedPrompts []string `yaml:"suggested_prompts" json:"suggested_prompts,omitempty"`
@@ -306,15 +237,14 @@ type CustomAgentConfig struct {
 func defaultCustomAgentConfig() CustomAgentConfig {
 	return CustomAgentConfig{
 		Temperature:         0.7,
-		MaxIterations:       10,
+		MaxIterations:       50,
 		WebSearchMaxResults: 5,
 		HistoryTurns:        5,
 		EmbeddingTopK:       10,
 		KeywordThreshold:    0.3,
 		VectorThreshold:     0.5,
 		RerankTopK:          5,
-		FallbackStrategy:    "model",
-		MaxCompletionTokens: 2048,
+		MaxCompletionTokens: 16384,
 	}
 }
 
@@ -367,8 +297,13 @@ func (a *CustomAgent) EnsureDefaults() {
 	if a.Config.Temperature < 0 {
 		a.Config.Temperature = 0.7
 	}
-	if a.Config.MaxIterations == 0 {
-		a.Config.MaxIterations = 10
+	a.Config.AgentMode = AgentModeUnified
+	if a.Config.AgentType == "" {
+		a.Config.AgentType = AgentTypeGeneralAgent
+	}
+	a.Config.MaxIterations = AgentIterationBudget(a.Config.AgentType)
+	if a.Config.AgentType == AgentTypeDataAnalysis || a.Config.AgentType == AgentTypeTableAnalysis || a.Config.AgentType == AgentTypeDocumentProcessingAgent {
+		a.Config.EnableArtifacts = true
 	}
 	if a.Config.WebSearchMaxResults == 0 {
 		a.Config.WebSearchMaxResults = 5
@@ -389,15 +324,11 @@ func (a *CustomAgent) EnsureDefaults() {
 	if a.Config.RerankTopK == 0 {
 		a.Config.RerankTopK = 5
 	}
-	// Advanced settings defaults
-	if a.Config.FallbackStrategy == "" {
-		a.Config.FallbackStrategy = "model"
-	}
 	if a.Config.MaxCompletionTokens == 0 {
-		a.Config.MaxCompletionTokens = 2048
+		a.Config.MaxCompletionTokens = 16384
 	}
 	// Agent mode should always enable multi-turn conversation
-	if a.Config.AgentMode == AgentModeSmartReasoning {
+	if a.Config.AgentMode == AgentModeUnified {
 		a.Config.MultiTurnEnabled = true
 	}
 	// An unset capability defers to the model/provider default. Preserve an
@@ -407,7 +338,7 @@ func (a *CustomAgent) EnsureDefaults() {
 
 // IsAgentMode returns true if this agent uses ReAct agent mode
 func (a *CustomAgent) IsAgentMode() bool {
-	return a.Config.AgentMode == AgentModeSmartReasoning
+	return true
 }
 
 // SuggestedQuestion 推荐问题
@@ -425,18 +356,9 @@ type SuggestedQuestion struct {
 // config/builtin_agents.yaml at startup via rebuildRegistryFromConfig.
 var BuiltinAgentRegistry = map[string]func(uint64) *CustomAgent{}
 
-// builtinAgentIDsOrdered defines the fixed display order of built-in agents
-// that are exposed in the user-facing agent list (ListAgents).
-//
-// NOTE: BuiltinWikiFixerID is intentionally excluded here. The wiki fixer is
-// an internal agent invoked programmatically from the Wiki editor
-// (see frontend WikiBrowser.vue) and should not clutter the tenant's agent
-// picker. It remains fully usable via GetAgentByID because the YAML entry
-// still registers it in BuiltinAgentRegistry.
 var builtinAgentIDsOrdered = []string{
-	BuiltinQuickAnswerID,
 	BuiltinSimpleChatID,
-	BuiltinSmartReasoningID,
+	BuiltinKnowledgeQAID,
 	BuiltinWikiResearcherID,
 	BuiltinDeepResearcherID,
 	BuiltinDataAnalystID,

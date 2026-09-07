@@ -584,7 +584,7 @@ func (h *EmbedChannelHandler) delegateEmbedChat(c *gin.Context, agentMode bool) 
 	}
 	c.Request.Body = io.NopCloser(bytes.NewReader(patched))
 	c.Request.ContentLength = int64(len(patched))
-	if agentMode && ch.AgentID != types.BuiltinQuickAnswerID {
+	if agentMode && ch.AgentID != types.BuiltinKnowledgeQAID {
 		h.sessionHandler.AgentQA(c)
 		return
 	}

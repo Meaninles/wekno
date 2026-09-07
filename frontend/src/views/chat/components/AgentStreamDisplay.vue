@@ -341,10 +341,7 @@
 
             <!-- Terminal Error Event -->
             <div v-else-if="event.type === 'error'" class="agent-error-event">
-              <div class="agent-error-card">
-                <t-icon name="error-circle" class="agent-error-icon" />
-                <span class="agent-error-text">{{ event.content || event.error }}</span>
-              </div>
+              <FailureNotice :failure="publicFailure(event.content || event.error, event.error_code)" />
             </div>
 
             <!-- Tool Call Event (non-thinking) -->
@@ -531,6 +528,8 @@
 </template>
 
 <script setup lang="ts">
+import { publicFailure } from '@/custom/modules/failures/failures';
+import FailureNotice from '@/custom/modules/failures/FailureNotice.vue';
 import { ref, computed, watch, onMounted, onBeforeUnmount, onUpdated, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { marked } from 'marked';
@@ -610,7 +609,7 @@ import {
   sourceTypeLabel,
   type SourceReferenceItem,
 } from '@/utils/sourceReferences';
-import { RAG_PIPELINE_TOOL_NAMES } from '@/utils/rag-pipeline-history';
+import { RETRIEVAL_TOOL_NAMES } from '@/custom/modules/agentstream/retrievalTools';
 import {
   createMermaidCodeRenderer,
   ensureMermaidInitialized,
@@ -1057,7 +1056,7 @@ const isRagPipelineToolCallEvent = (event: any): boolean => {
   return Boolean(
     event?.type === 'tool_call' &&
     typeof event.tool_name === 'string' &&
-    RAG_PIPELINE_TOOL_NAMES.has(event.tool_name),
+    RETRIEVAL_TOOL_NAMES.has(event.tool_name),
   );
 };
 
@@ -2099,12 +2098,7 @@ const getToolError = (event: any): string => {
   if (event?.agent_progress || event?.tool_data?.agent_progress) return '';
   const error = event?.error;
   if (error === undefined || error === null) return '';
-  if (typeof error === 'string') return error;
-  try {
-    return JSON.stringify(error, null, 2);
-  } catch {
-    return String(error);
-  }
+  return publicFailure(error).message;
 };
 
 // Check if search/grep tools have results

@@ -20,12 +20,12 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/usererrors"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
 	mcppkg "github.com/Tencent/WeKnora/internal/mcp"
-	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/ratelimit"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -2271,6 +2271,11 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		}
 
 		bufMu.Lock()
+		if data.Replace {
+			agentLiveAnswer.Reset()
+			answerOuter.Reset()
+			answerBuilder.Reset()
+		}
 		if useAgent && !agentDone {
 			if data.Content != "" {
 				agentLiveAnswer.WriteString(data.Content)
@@ -2575,15 +2580,16 @@ loop:
 		msg.Platform,
 		true,
 	).Content
-	if noVisibleContent || finalDisplay == "" {
-		fallback := "抱歉，我暂时无法回答这个问题。"
+	if finalErr != nil || noVisibleContent || strings.TrimSpace(finalDisplay) == "" {
+		failure := usererrors.Classify("empty_response", "")
 		if finalErr != nil {
-			fallback = "抱歉，处理您的问题时出现了异常，请稍后再试。"
+			failure = usererrors.Classify("", finalErr.Error())
 		}
-		finalDisplay = fallback
-		if strings.TrimSpace(answer) == "" {
-			answer = fallback
+		if qaCtx.Err() != nil {
+			failure = usererrors.Classify("cancelled", "")
 		}
+		finalDisplay, answer = failure.Message, failure.Message
+		assistantMsg.ErrorCode = failure.Code
 	}
 	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {
 		finalDisplay = appendIMAuthNotice(finalDisplay, notice)
@@ -2600,7 +2606,8 @@ loop:
 	}
 
 	if answer == "" {
-		answer = "抱歉，我暂时无法回答这个问题。"
+		answer = usererrors.Classify("empty_response", "").Message
+		assistantMsg.ErrorCode = "empty_response"
 	}
 
 	assistantMsg.Content = answer
@@ -2668,6 +2675,9 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 			return nil
 		}
 		answerMu.Lock()
+		if data.Replace {
+			answerBuilder.Reset()
+		}
 		answerBuilder.WriteString(data.Content)
 		answerMu.Unlock()
 		if data.Done {
@@ -2796,7 +2806,8 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		}
 	case <-ctx.Done():
 		// Mark assistant message as completed to avoid dangling incomplete records
-		assistantMsg.Content = "抱歉，回答已被取消。"
+		assistantMsg.Content = usererrors.Classify("cancelled", "").Message
+		assistantMsg.ErrorCode = "cancelled"
 		assistantMsg.IsCompleted = true
 		// Use a fresh context since the original is cancelled
 		if updateErr := s.messageService.UpdateMessage(context.WithoutCancel(ctx), assistantMsg); updateErr != nil {
@@ -2811,11 +2822,12 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	answerMu.Unlock()
 
-	if answer == "" && qaError != nil {
-		return nil, qaError
-	}
-	if answer == "" {
-		answer = "抱歉，我暂时无法回答这个问题。"
+	if qaError != nil || strings.TrimSpace(answer) == "" {
+		failure := usererrors.Classify("empty_response", "")
+		if qaError != nil {
+			failure = usererrors.Classify("", qaError.Error())
+		}
+		answer, assistantMsg.ErrorCode = failure.Message, failure.Code
 	}
 	answer, citationReport := filterIMStoredAnswer(answer, assistantMsg)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
@@ -2825,7 +2837,8 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		)
 	}
 	if strings.TrimSpace(answer) == "" {
-		answer = "抱歉，我暂时无法回答这个问题。"
+		answer = usererrors.Classify("empty_response", "").Message
+		assistantMsg.ErrorCode = "empty_response"
 	}
 	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {
 		answer = appendIMAuthNotice(answer, notice)
@@ -3199,175 +3212,17 @@ const smartReplySystemPrompt = "你是一个专业的 IM 机器人助手。请�
 // in real-time for a better user experience. Otherwise, it falls back to non-streaming.
 // If the LLM is unavailable or fails, it sends the provided fallback text.
 func (s *Service) sendSmartReply(ctx context.Context, adapter Adapter, msg *IncomingMessage, channel *IMChannel, situation string, fallback string) error {
-	chatModel := s.getChatModelForChannel(ctx, channel)
-	if chatModel == nil {
-		return adapter.SendReply(ctx, msg, &ReplyMessage{Content: fallback, IsFinal: true})
-	}
-
-	// If the adapter supports streaming, use stream mode
-	if streamer, ok := adapter.(StreamSender); ok {
-		if err := s.streamSmartReply(ctx, chatModel, streamer, msg, situation); err == nil {
-			return nil
-		}
-		// Stream failed — fall through to non-streaming
-		logger.Warnf(ctx, "[IM] Stream smart reply failed, falling back to non-streaming")
-	}
-
-	// Non-streaming fallback
-	content := s.generateSmartReply(ctx, chatModel, situation, fallback)
-	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: content, IsFinal: true})
+	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: fallback, IsFinal: true})
 }
 
 // streamSmartReply uses ChatStream to generate and stream a notification reply in real-time.
-func (s *Service) streamSmartReply(ctx context.Context, chatModel chat.Chat, streamer StreamSender, msg *IncomingMessage, situation string) error {
-	messages := []chat.Message{
-		{Role: "system", Content: smartReplySystemPrompt},
-		{Role: "user", Content: situation},
-	}
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	streamCh, err := chatModel.ChatStream(timeoutCtx, messages, &chat.ChatOptions{
-		Temperature: 0.7,
-		MaxTokens:   800,
-	})
-	if err != nil {
-		logger.Warnf(ctx, "[IM] ChatStream failed for smart reply: %v", err)
-		return err
-	}
-
-	// Start the stream on the IM platform
-	streamID, err := streamer.StartStream(ctx, msg)
-	if err != nil {
-		logger.Warnf(ctx, "[IM] StartStream failed for smart reply: %v", err)
-		return err
-	}
-
-	// Flush loop with batching (same pattern as handleMessageStream)
-	var (
-		bufMu     sync.Mutex
-		streamRaw strings.Builder
-		done      = make(chan struct{})
-	)
-
-	go func() {
-		defer close(done)
-		for resp := range streamCh {
-			if resp.Content != "" {
-				bufMu.Lock()
-				streamRaw.WriteString(resp.Content)
-				bufMu.Unlock()
-			}
-		}
-	}()
-
-	ticker := time.NewTicker(streamFlushInterval)
-	defer ticker.Stop()
-
-	pushStream := func(phase StreamDisplayPhase) {
-		bufMu.Lock()
-		raw := streamRaw.String()
-		bufMu.Unlock()
-		if raw == "" {
-			return
-		}
-		display := FormatIMDisplayContent(raw, phase)
-		if err := streamer.UpdateStreamContent(ctx, msg, streamID, display); err != nil {
-			logger.Warnf(ctx, "[IM] UpdateStreamContent failed for smart reply: %v", err)
-		}
-	}
-
-loop:
-	for {
-		select {
-		case <-ticker.C:
-			pushStream(StreamDisplayIntermediate)
-		case <-done:
-			break loop
-		case <-timeoutCtx.Done():
-			break loop
-		}
-	}
-
-	bufMu.Lock()
-	finalRaw := streamRaw.String()
-	bufMu.Unlock()
-	finalDisplay := FormatIMDisplayContent(finalRaw, StreamDisplayFinal)
-	if finalDisplay == "" {
-		finalDisplay = finalRaw
-	}
-	if err := streamer.FinalizeStream(ctx, msg, streamID, finalDisplay); err != nil {
-		logger.Warnf(ctx, "[IM] FinalizeStream failed for smart reply: %v", err)
-	}
-
-	// End the stream
-	if err := streamer.EndStream(ctx, msg, streamID); err != nil {
-		logger.Warnf(ctx, "[IM] EndStream failed for smart reply: %v", err)
-	}
-
-	return nil
-}
 
 // generateSmartReply uses the channel's agent LLM to produce a natural-language
 // notification message for the given situation (non-streaming).
 // If the call fails, it returns the provided fallback text.
-func (s *Service) generateSmartReply(ctx context.Context, chatModel chat.Chat, situation string, fallback string) string {
-	messages := []chat.Message{
-		{Role: "system", Content: smartReplySystemPrompt},
-		{Role: "user", Content: situation},
-	}
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	resp, err := chatModel.Chat(timeoutCtx, messages, &chat.ChatOptions{
-		Temperature: 0.7,
-		MaxTokens:   800,
-	})
-	if err != nil {
-		logger.Warnf(ctx, "[IM] Smart reply generation failed, using fallback: %v", err)
-		return fallback
-	}
-
-	reply := strings.TrimSpace(resp.Content)
-	if reply == "" {
-		return fallback
-	}
-	return reply
-}
 
 // getChatModelForChannel resolves the chat.Chat instance configured on the
 // channel's agent. Returns nil if the model cannot be resolved.
-func (s *Service) getChatModelForChannel(ctx context.Context, channel *IMChannel) chat.Chat {
-	if channel == nil || channel.AgentID == "" {
-		return nil
-	}
-
-	// Ensure the context carries tenant ID — some call sites (e.g. handleFileMessage)
-	// may invoke this before the tenant has been injected into ctx.
-	if _, ok := types.TenantIDFromContext(ctx); !ok && channel.TenantID != 0 {
-		ctx = context.WithValue(ctx, types.TenantIDContextKey, channel.TenantID)
-	}
-
-	agent, err := s.agentService.GetAgentByID(ctx, channel.AgentID)
-	if err != nil || agent == nil {
-		logger.Debugf(ctx, "[IM] Cannot get agent %s for smart reply: %v", channel.AgentID, err)
-		return nil
-	}
-
-	modelID := agent.Config.ModelID
-	if modelID == "" {
-		return nil
-	}
-
-	chatModel, err := s.modelService.GetChatModel(ctx, modelID)
-	if err != nil {
-		logger.Debugf(ctx, "[IM] Cannot get chat model %s for smart reply: %v", modelID, err)
-		return nil
-	}
-	return chatModel
-}
 
 // watchAndSendSummary polls the knowledge record until document parsing (and
 // optionally summary generation) completes, then sends the result back to the

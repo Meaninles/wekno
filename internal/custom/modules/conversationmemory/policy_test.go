@@ -17,7 +17,7 @@ func TestGenerationContractsAreIdempotentAndDomainNeutral(t *testing.T) {
 	for _, value := range []string{first, queryContract} {
 		for _, forbidden := range []string{"采购", "培训", "required_claim", "case_id", "reference answer"} {
 			if strings.Contains(strings.ToLower(value), strings.ToLower(forbidden)) {
-				t.Fatalf("domain/Eval-specific term %q leaked into contract: %s", forbidden, value)
+				t.Fatalf("domain-specific term %q leaked into contract: %s", forbidden, value)
 			}
 		}
 	}

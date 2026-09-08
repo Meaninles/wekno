@@ -61,7 +61,6 @@ API Key 在 Web 页面完成账户注册后，前往账户信息页面获取。
 | 知识搜索 | 在知识库中搜索内容 | [knowledge-search.md](../../api/knowledge-search.md) |
 | 聊天功能 | 基于知识库和 Agent 进行问答 | [chat.md](../../api/chat.md) |
 | 消息管理 | 获取和管理对话消息 | [message.md](../../api/message.md) |
-| 评估功能 | 评估模型性能 | [evaluation.md](../../api/evaluation.md) |
 | 初始化管理 | 知识库模型配置与 Ollama 管理 | [initialization.md](../../api/initialization.md) |
 | 系统管理 | 系统信息、解析引擎、存储引擎 | [system.md](../../api/system.md) |
 | MCP 服务 | MCP 工具服务管理 | [mcp-service.md](../../api/mcp-service.md) |

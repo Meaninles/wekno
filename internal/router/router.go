@@ -49,7 +49,6 @@ type RouterParams struct {
 	SessionService               interfaces.SessionService
 	MessageService               interfaces.MessageService
 	ModelService                 interfaces.ModelService
-	EvaluationService            interfaces.EvaluationService
 	KBShareService               interfaces.KBShareService
 	AgentShareService            interfaces.AgentShareService
 	KBHandler                    *handler.KnowledgeBaseHandler
@@ -66,7 +65,6 @@ type RouterParams struct {
 	MessageHandler               *handler.MessageHandler
 	ModelHandler                 *handler.ModelHandler
 	ModelCredentialsHandler      *handler.ModelCredentialsHandler
-	EvaluationHandler            *handler.EvaluationHandler
 	AuthHandler                  *handler.AuthHandler
 	InitializationHandler        *handler.InitializationHandler
 	SystemHandler                *handler.SystemHandler
@@ -249,7 +247,6 @@ func NewRouter(params RouterParams) *gin.Engine {
 		RegisterChatRoutes(v1, params.SessionHandler, rbacGuards)
 		RegisterMessageRoutes(v1, params.MessageHandler, rbacGuards)
 		RegisterModelRoutes(v1, params.ModelHandler, params.ModelCredentialsHandler, rbacGuards)
-		RegisterEvaluationRoutes(v1, params.EvaluationHandler, rbacGuards)
 		RegisterInitializationRoutes(v1, params.InitializationHandler, rbacGuards)
 		RegisterSystemRoutes(v1, params.SystemHandler, rbacGuards)
 		RegisterSystemAdminRoutes(v1, params.SystemHandler, params.AuditLogHandler, rbacGuards)
@@ -697,18 +694,6 @@ func RegisterModelRoutes(
 		// Per-field credential subresource (see internal/handler/model_credentials.go) — Admin+
 		models.PUT("/:id/credentials", g.Admin(), credHandler.Put)
 		models.DELETE("/:id/credentials/:field", g.Admin(), credHandler.DeleteField)
-	}
-}
-
-// RegisterEvaluationRoutes registers evaluation endpoints. Running an
-// evaluation drives LLM calls (cost) and reads from KBs across the
-// tenant; gate to Admin+ until product asks for a finer-grained
-// matrix.
-func RegisterEvaluationRoutes(r *gin.RouterGroup, handler *handler.EvaluationHandler, g *rbacGuards) {
-	evaluationRoutes := r.Group("/evaluation")
-	{
-		evaluationRoutes.POST("/", g.Admin(), handler.Evaluation)
-		evaluationRoutes.GET("/", g.Viewer(), handler.GetEvaluationResult)
 	}
 }
 

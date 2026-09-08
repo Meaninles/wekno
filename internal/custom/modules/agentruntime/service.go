@@ -23,7 +23,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
-	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -172,10 +171,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if err != nil {
 		return err
 	}
-	evalObservability := false
-	if manager := langfuse.GetManager(); manager != nil {
-		evalObservability = manager.CaptureContent() && manager.EnabledFor(ctx)
-	}
 	payload := ChatPayload{
 		RunID:              runID,
 		TenantID:           tenantIDFromContext(ctx),
@@ -210,7 +205,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		ToolCallbackAPIKey:      strings.TrimSpace(os.Getenv("AGENT_RUNTIME_API_KEY")),
 		ArtifactUploadURL:       artifactUploadURL(),
 		EnableArtifacts:         agentConfig.EnableArtifacts,
-		EvalObservability:       evalObservability,
 	}
 
 	payload.RuntimeConfig.RerankModelID = req.CustomAgent.Config.RerankModelID

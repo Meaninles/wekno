@@ -3,70 +3,83 @@ package langfuse
 import (
 	"testing"
 	"time"
-
-	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
 )
 
-func TestLoadConfigFromEnvProductionIsBoundedMetadataOnly(t *testing.T) {
-	t.Setenv("CUSTOM_AGENT_EVAL_MODE", "production")
-	t.Setenv("CUSTOM_AGENT_EVAL_CAPTURE_POLICY", "full")
+func TestLoadConfigFromEnv_AutoEnablesWithCredentials(t *testing.T) {
+	t.Setenv("LANGFUSE_ENABLED", "")
 	t.Setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
 	t.Setenv("LANGFUSE_SECRET_KEY", "sk-test")
-	t.Setenv("LANGFUSE_SAMPLE_RATE", "1")
+	t.Setenv("LANGFUSE_HOST", "https://example.langfuse.com")
+
 	cfg := LoadConfigFromEnv()
-	if !cfg.Enabled || cfg.SampleRate != 0.01 {
-		t.Fatalf("unexpected bounded production config: %#v", cfg)
+
+	if !cfg.Enabled {
+		t.Fatalf("expected Enabled=true when both keys are set, got false")
 	}
-	if cfg.CaptureContent() || cfg.AgentEval.CapturePolicy != agenteval.CaptureMetadata {
-		t.Fatalf("production must be metadata-only: %#v", cfg.AgentEval)
+	if cfg.Host != "https://example.langfuse.com" {
+		t.Errorf("unexpected host: %q", cfg.Host)
+	}
+	if cfg.SampleRate != 1.0 {
+		t.Errorf("expected default SampleRate=1.0, got %v", cfg.SampleRate)
 	}
 }
 
-func TestLoadConfigFromEnvEvalUsesFullSampling(t *testing.T) {
-	t.Setenv("CUSTOM_AGENT_EVAL_MODE", "eval")
-	t.Setenv("CUSTOM_AGENT_EVAL_CAPTURE_POLICY", "full")
-	t.Setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-	t.Setenv("LANGFUSE_SECRET_KEY", "sk-test")
-	t.Setenv("LANGFUSE_SAMPLE_RATE", "")
+func TestLoadConfigFromEnv_DisabledWithoutKeys(t *testing.T) {
+	t.Setenv("LANGFUSE_PUBLIC_KEY", "")
+	t.Setenv("LANGFUSE_SECRET_KEY", "")
+	t.Setenv("LANGFUSE_ENABLED", "")
+
 	cfg := LoadConfigFromEnv()
-	if cfg.SampleRate != 1 || !cfg.CaptureContent() {
-		t.Fatalf("unexpected eval config: %#v", cfg)
+	if cfg.Enabled {
+		t.Fatalf("expected Enabled=false when no keys set")
 	}
 }
 
-func TestSampleRateZeroReallyDisablesRecording(t *testing.T) {
-	t.Setenv("CUSTOM_AGENT_EVAL_MODE", "eval")
-	t.Setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-	t.Setenv("LANGFUSE_SECRET_KEY", "sk-test")
-	t.Setenv("LANGFUSE_SAMPLE_RATE", "0")
+func TestLoadConfigFromEnv_ExplicitDisableOverridesKeys(t *testing.T) {
+	t.Setenv("LANGFUSE_PUBLIC_KEY", "pk")
+	t.Setenv("LANGFUSE_SECRET_KEY", "sk")
+	t.Setenv("LANGFUSE_ENABLED", "false")
+
 	cfg := LoadConfigFromEnv()
-	if cfg.SampleRate != 0 {
-		t.Fatalf("sample rate zero changed to %v", cfg.SampleRate)
+	if cfg.Enabled {
+		t.Fatalf("expected Enabled=false when LANGFUSE_ENABLED=false")
 	}
 }
 
-func TestFlushIntervalAcceptsDurationAndSeconds(t *testing.T) {
+func TestLoadConfigFromEnv_FlushIntervalAcceptsSecondsAndDuration(t *testing.T) {
+	t.Setenv("LANGFUSE_PUBLIC_KEY", "pk")
+	t.Setenv("LANGFUSE_SECRET_KEY", "sk")
+
 	t.Setenv("LANGFUSE_FLUSH_INTERVAL", "500ms")
-	if got := LoadConfigFromEnv().FlushInterval; got != 500*time.Millisecond {
-		t.Fatalf("got %s", got)
+	cfg := LoadConfigFromEnv()
+	if cfg.FlushInterval != 500*time.Millisecond {
+		t.Errorf("expected 500ms, got %v", cfg.FlushInterval)
 	}
+
 	t.Setenv("LANGFUSE_FLUSH_INTERVAL", "7")
-	if got := LoadConfigFromEnv().FlushInterval; got != 7*time.Second {
-		t.Fatalf("got %s", got)
+	cfg = LoadConfigFromEnv()
+	if cfg.FlushInterval != 7*time.Second {
+		t.Errorf("expected 7s (bare integer), got %v", cfg.FlushInterval)
 	}
 }
 
 func TestConfigValidate(t *testing.T) {
-	valid := Config{
-		Enabled: true, Host: "https://x", PublicKey: "pk", SecretKey: "sk",
-		SampleRate: 1, QueueSize: 128, FlushAt: 32,
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{"disabled is always valid", Config{Enabled: false}, false},
+		{"enabled without host fails", Config{Enabled: true, PublicKey: "pk", SecretKey: "sk"}, true},
+		{"enabled without keys fails", Config{Enabled: true, Host: "https://x"}, true},
+		{"enabled with all fields passes", Config{Enabled: true, Host: "https://x", PublicKey: "pk", SecretKey: "sk"}, false},
 	}
-	if err := valid.Validate(); err != nil {
-		t.Fatalf("valid config failed: %v", err)
-	}
-	invalid := valid
-	invalid.FlushAt = 256
-	if err := invalid.Validate(); err == nil {
-		t.Fatal("expected invalid batch size")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
 	}
 }

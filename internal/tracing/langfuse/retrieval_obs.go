@@ -103,6 +103,9 @@ func SummarizeSearchResults(results []*types.SearchResult, limit int) map[string
 			if model, ok := sr.Metadata["model_score"]; ok {
 				item["model_score"] = model
 			}
+			if boosted, ok := sr.Metadata["faq_boosted"]; ok {
+				item["faq_boosted"] = boosted
+			}
 			if orig, ok := sr.Metadata["faq_original_score"]; ok {
 				item["faq_original_score"] = orig
 			}

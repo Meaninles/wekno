@@ -2396,100 +2396,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/evaluation/": {
-            "get": {
-                "security": [
-                    {
-                        "Bearer": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    }
-                ],
-                "description": "根据任务ID获取评估结果",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "评估"
-                ],
-                "summary": "获取评估结果",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "评估任务ID",
-                        "name": "task_id",
-                        "in": "query",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "评估结果",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "400": {
-                        "description": "请求参数错误",
-                        "schema": {
-                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError"
-                        }
-                    }
-                }
-            },
-            "post": {
-                "security": [
-                    {
-                        "Bearer": []
-                    },
-                    {
-                        "ApiKeyAuth": []
-                    }
-                ],
-                "description": "对知识库进行评估测试",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "评估"
-                ],
-                "summary": "执行评估",
-                "parameters": [
-                    {
-                        "description": "评估请求参数",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/internal_handler.EvaluationRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "评估任务",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "400": {
-                        "description": "请求参数错误",
-                        "schema": {
-                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError"
-                        }
-                    }
-                }
-            }
-        },
         "/faq/import/progress/{task_id}": {
             "get": {
                 "security": [
@@ -18844,27 +18750,6 @@ const docTemplate = `{
                     "items": {
                         "type": "integer"
                     }
-                }
-            }
-        },
-        "internal_handler.EvaluationRequest": {
-            "type": "object",
-            "properties": {
-                "chat_id": {
-                    "description": "ID of chat model to use",
-                    "type": "string"
-                },
-                "dataset_id": {
-                    "description": "ID of dataset to evaluate",
-                    "type": "string"
-                },
-                "knowledge_base_id": {
-                    "description": "ID of knowledge base to use",
-                    "type": "string"
-                },
-                "rerank_id": {
-                    "description": "ID of rerank model to use",
-                    "type": "string"
                 }
             }
         },

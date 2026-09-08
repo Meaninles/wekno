@@ -17,7 +17,6 @@ import (
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/config"
 	customadmin "github.com/Tencent/WeKnora/internal/custom/modules/admin"
-	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
 	"github.com/Tencent/WeKnora/internal/custom/modules/agentruntime"
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
@@ -62,7 +61,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware"
-	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -71,7 +69,6 @@ type Handlers struct {
 	SessionTitles        *sessiontitle.Handler
 	chatUploadService    *chatuploads.Service
 	ChatUploads          *chatuploads.Handler
-	AgentEval            *agenteval.Handler
 	ConfigCenter         *configcenter.Handler
 	IAM                  *iam.Handler
 	ScheduledChat        *scheduledchat.Handler
@@ -483,12 +480,9 @@ func NewHandlers(
 		return nil
 	})
 	return &Handlers{
-		ChatUploads:       chatuploads.NewHandler(chatUploadService, sessionHandler.ResolveUploadAgent),
-		SessionTitles:     sessiontitle.NewHandler(sessionService),
-		chatUploadService: chatUploadService,
-		AgentEval: agenteval.NewHandler(agenteval.LoadConfigFromEnv(), func() bool {
-			return langfuse.GetManager().Enabled()
-		}),
+		ChatUploads:                 chatuploads.NewHandler(chatUploadService, sessionHandler.ResolveUploadAgent),
+		SessionTitles:               sessiontitle.NewHandler(sessionService),
+		chatUploadService:           chatUploadService,
 		ConfigCenter:                configcenter.NewHandler(configCenterService),
 		IAM:                         iam.NewHandler(iamService, orgService, iamPublicOrigin),
 		ScheduledChat:               scheduledchat.NewHandler(scheduledChatService),
@@ -744,9 +738,6 @@ func RegisterRoutes(
 		}
 		if handlers.ChatUploads != nil {
 			handlers.ChatUploads.Register(customPublic)
-		}
-		if handlers.AgentEval != nil && viewer != nil {
-			customPublic.GET("/agent-eval/capabilities", viewer, handlers.AgentEval.Capabilities)
 		}
 		if handlers.WikiAccess != nil && viewer != nil {
 			customPublic.GET("/wiki-access/me", viewer, handlers.WikiAccess.GetCurrent)

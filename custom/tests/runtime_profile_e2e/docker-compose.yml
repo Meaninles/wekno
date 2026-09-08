@@ -13,8 +13,6 @@ x-runtime-common: &runtime-common
   environment: &runtime-environment
     GIN_MODE: release
     CUSTOM_RUNTIME_ENV: production
-    CUSTOM_AGENT_EVAL_MODE: ${CUSTOM_AGENT_EVAL_MODE:-production}
-    CUSTOM_AGENT_EVAL_CAPTURE_POLICY: ${CUSTOM_AGENT_EVAL_CAPTURE_POLICY:-metadata}
     CUSTOM_RUNTIME_ROLE_ENFORCED: "true"
     CUSTOM_POSTGRES_MAX_CONNECTIONS: "100"
     CUSTOM_RUNTIME_API_REPLICAS: "3"
@@ -95,9 +93,8 @@ services:
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: migration
-      # Existing main-worktree databases keep native migrations disabled.
-      # A brand-new isolated eval database opts in exactly once through the
-      # environment override below.
+      # The migration role enables custom migrations exactly once; native
+      # migrations remain disabled for the shared development database.
       AUTO_MIGRATE: ${WEKNORA_RUNTIME_NATIVE_AUTO_MIGRATE:-false}
       CUSTOM_AUTO_MIGRATE: "true"
       CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "3"

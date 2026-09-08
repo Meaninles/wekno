@@ -94,10 +94,7 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 	}
 
 	mgr := langfuse.GetManager()
-	var passagesPreview interface{}
-	if mgr.EnabledFor(ctx) {
-		passagesPreview = langfuse.SummarizePassagePreviews(candidatesToRerank, passages, 25)
-	}
+	passagesPreview := langfuse.SummarizePassagePreviews(candidatesToRerank, passages, 25)
 	rerankCtx, rerankSpan := mgr.StartSpan(ctx, langfuse.SpanOptions{
 		Name: "rerank",
 		Input: map[string]interface{}{

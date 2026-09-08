@@ -1,5 +1,6 @@
 """Real cancellation, disconnected clients and worker/API replacement in dev."""
 import json
+import os
 import subprocess
 import threading
 import time
@@ -45,7 +46,8 @@ def run_case(c, case):
     elif case in ('worker-restart','api-restart'):
         wait_for(lambda:any(e.get('response_type')=='tool_call' and (e.get('data') or {}).get('tool_name')=='Bash' for e in events))
         wait_for(lambda: not sql("SELECT row_to_json(t) FROM (SELECT id FROM custom_agent_runs WHERE status IN ('queued','running') AND session_id <> '"+session+"')t;"))
-        names=['weknora-agent-runtime'] if case=='worker-restart' else ['weknora-agent-eval-runtime-api-'+str(i) for i in (1,2,3)]
+        prefix=os.environ.get('WEKNORA_RUNTIME_CONTAINER_PREFIX','weknora-runtime')
+        names=[prefix] if case=='worker-restart' else [prefix+'-api-'+str(i) for i in (1,2,3)]
         subprocess.run(['docker','restart',*names],check=True,capture_output=True)
     current=wait_for(lambda:(r if r and r['status'] in ('completed','failed','cancelled') and r['reserved_tokens']==0 else None) if (r:=row(session)) else None,600)
     assert current['status']==('cancelled' if case=='cancel' else 'completed'),current

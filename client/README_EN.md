@@ -21,7 +21,6 @@ The client includes the following main functional modules:
 6. **Chunk Management**: Query, update, and delete knowledge chunks
 7. **Message Management**: Retrieve and delete session messages
 8. **Model Management**: Create, retrieve, update, and delete models
-9. **Evaluation Function**: Start evaluation tasks and get evaluation results
 
 ## Usage
 

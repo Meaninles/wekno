@@ -90,7 +90,6 @@ WeKnora API 按功能分为以下几类：
 | 知识搜索 | 在知识库中搜索内容 | [knowledge-search.md](./knowledge-search.md) |
 | 聊天功能 | 基于知识库和 Agent 进行问答 | [chat.md](./chat.md) |
 | 消息管理 | 获取和管理对话消息 | [message.md](./message.md) |
-| 评估功能 | 评估模型性能 | [evaluation.md](./evaluation.md) |
 | 初始化管理 | 知识库模型配置与 Ollama 管理 | [initialization.md](./initialization.md) |
 | 系统管理 | 系统信息、解析引擎、存储引擎 | [system.md](./system.md) |
 | MCP 服务 | MCP 工具服务管理 | [mcp-service.md](./mcp-service.md) |

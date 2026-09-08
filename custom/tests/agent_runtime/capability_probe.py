@@ -11,7 +11,7 @@ from dev_client import DevClient, ROOT, KB
 def profiles(c):
     c.qa('general-direct-chat','用一句话解释为什么彩虹有不同颜色。',agent='builtin-general-agent')
     c.qa('restored-profile-wiki','请根据 Wiki 解释安全运营管理平台（SOC平台）的职责和相关架构，附来源。',agent='builtin-wiki-researcher',kb=['b6bb9e65-a5b3-41dd-bed5-2337f30c6b35'])
-    c.qa('restored-profile-data','请查看可用的 DBAnalytics PostgreSQL 测试库（eval），先确认订单相关表及字段，再统计订单总数及金额合计，说明统计口径。只读查询，不修改数据。',agent='builtin-data-analyst')
+    c.qa('restored-profile-data','请查看可用的 DBAnalytics PostgreSQL 测试库（测试），先确认订单相关表及字段，再统计订单总数及金额合计，说明统计口径。只读查询，不修改数据。',agent='builtin-data-analyst')
     session=c.session('表格分析与文件输出');upload=c.upload(session,ROOT/'fixtures/sales.xlsx',agent='builtin-general-agent')
     r=c.qa('restored-profile-table','分析上传的销售表，核对每行数量、单价和小计，计算总金额，并生成含正确公式与已计算结果的核对表.xlsx。',agent='builtin-table-analyst',session=session,uploads=[upload['id']],expected=('52',))
     print(json.dumps({'artifact_checks':c.artifacts(r)},ensure_ascii=False),flush=True)

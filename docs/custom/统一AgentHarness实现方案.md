@@ -1,6 +1,6 @@
 # 统一 Agent Harness 实现与验证
 
-更新：2026-09-07。代码位于 `C:\weknora-agent-eval-loop`，分支 `codex/agent-eval-loop`。本次直接更新该工作树的现有开发环境；eval 仅指工作树，不使用旧 eval 评分或 gate 作为完成标准。
+更新：2026-09-07。代码位于 `C:\weknora-agent-eval-loop`，分支 `codex/agent-eval-loop`。本次直接更新该工作树的现有开发环境；本次只在该工作树验证 Agent Runtime/Harness，以功能行为和服务健康度作为完成标准。
 
 ## 类型与预算
 

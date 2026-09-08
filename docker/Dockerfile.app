@@ -156,7 +156,6 @@ COPY --chown=appuser:appuser --from=builder /app/yanyiwu/ /go/pkg/mod/github.com
 COPY --chown=appuser:appuser --from=builder /app/config ./config
 COPY --chown=appuser:appuser --from=builder /app/scripts ./scripts
 COPY --chown=appuser:appuser --from=builder /app/migrations ./migrations
-COPY --chown=appuser:appuser --from=builder /app/dataset/samples ./dataset/samples
 COPY --chown=appuser:appuser --from=builder /app/skills/preloaded ./skills/preloaded
 COPY --chown=appuser:appuser --from=builder /app/skills/professional ./skills/professional
 # Keep a read-only backup so bind-mount cannot erase built-in skills

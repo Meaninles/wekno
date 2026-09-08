@@ -227,7 +227,6 @@ type ChatPayload struct {
 	ToolCallbackAPIKey      string                      `json:"tool_callback_api_key,omitempty"`
 	ArtifactUploadURL       string                      `json:"artifact_upload_url"`
 	EnableArtifacts         bool                        `json:"enable_artifacts"`
-	EvalObservability       bool                        `json:"eval_observability,omitempty"`
 }
 
 type StreamEvent struct {
@@ -258,7 +257,6 @@ type ChatResult struct {
 	ArtifactDroppedCount  int                   `json:"artifact_dropped_count,omitempty"`
 	ArtifactReturnedSize  int64                 `json:"artifact_returned_size,omitempty"`
 	ArtifactLimitBytes    int64                 `json:"artifact_limit_bytes,omitempty"`
-	PromptObservation     map[string]any        `json:"prompt_observation,omitempty"`
 }
 
 type SidecarArtifact = types.MessageArtifact

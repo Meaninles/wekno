@@ -20,7 +20,7 @@ func (l *langfuseASR) GetModelID() string   { return l.inner.GetModelID() }
 
 func (l *langfuseASR) Transcribe(ctx context.Context, audioBytes []byte, fileName string) (*TranscriptionResult, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.EnabledFor(ctx) {
+	if !mgr.Enabled() {
 		return l.inner.Transcribe(ctx, audioBytes, fileName)
 	}
 
@@ -36,10 +36,6 @@ func (l *langfuseASR) Transcribe(ctx context.Context, audioBytes []byte, fileNam
 			"audio_size": len(audioBytes),
 		},
 	})
-	if !gen.Recording() {
-		gen.Finish(nil, nil, nil)
-		return l.inner.Transcribe(ctx, audioBytes, fileName)
-	}
 
 	result, err := l.inner.Transcribe(genCtx, audioBytes, fileName)
 

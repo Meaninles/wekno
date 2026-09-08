@@ -20,7 +20,7 @@ func (l *langfuseVLM) GetModelID() string   { return l.inner.GetModelID() }
 
 func (l *langfuseVLM) Predict(ctx context.Context, imgBytes [][]byte, prompt string) (string, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.EnabledFor(ctx) {
+	if !mgr.Enabled() {
 		return l.inner.Predict(ctx, imgBytes, prompt)
 	}
 
@@ -37,15 +37,11 @@ func (l *langfuseVLM) Predict(ctx context.Context, imgBytes [][]byte, prompt str
 			"image_count": len(imgBytes),
 		},
 		Metadata: map[string]interface{}{
-			"model_id":          l.inner.GetModelID(),
-			"image_count":       len(imgBytes),
+			"model_id":         l.inner.GetModelID(),
+			"image_count":      len(imgBytes),
 			"image_bytes_total": totalImgSize,
 		},
 	})
-	if !gen.Recording() {
-		gen.Finish(nil, nil, nil)
-		return l.inner.Predict(ctx, imgBytes, prompt)
-	}
 
 	result, err := l.inner.Predict(genCtx, imgBytes, prompt)
 

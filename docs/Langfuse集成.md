@@ -238,7 +238,7 @@ Dev 相关容器都带 `-dev` 后缀、用独立网络 `WeKnora-network-dev`，�
 
 | Langfuse 概念 | WeKnora 对应 | 备注 |
 | --- | --- | --- |
-| Trace | 一次 HTTP 请求（含其触发的所有 asynq 任务） | 对于 `knowledge-chat`、`agent-chat`、`knowledge-search`、`generate_title`、`evaluation`、模型连通性测试等在线请求；以及文件上传/URL 入库/manual/reparse/move/copy、FAQ 导入、知识修改、wiki auto-fix、数据源手工触发等入库请求，HTTP 层都会开启 trace，并把 `trace_id` / `parent_observation_id` 注入 asynq payload。 |
+| Trace | 一次 HTTP 请求（含其触发的所有 asynq 任务） | 对于 `knowledge-chat`、`agent-chat`、`knowledge-search`、`generate_title`、模型连通性测试等在线请求；以及文件上传/URL 入库/manual/reparse/move/copy、FAQ 导入、知识修改、wiki auto-fix、数据源手工触发等入库请求，HTTP 层都会开启 trace，并把 `trace_id` / `parent_observation_id` 注入 asynq payload。 |
 | Span（type=SPAN） | 每个 asynq 任务的执行窗口 / 每次 Agent 执行及其每一轮 / 每次工具调用 | 由 `internal/tracing/langfuse/AsynqMiddleware` 在 `mux.Use` 注册；对每个 handler 自动创建 `asynq.<task_type>` 的 SPAN，并记录 `task_id` / `queue` / `retry` / `payload_bytes`。定时任务（无上游 trace）会退化为 `asynq.<task_type>` 独立 trace。**Agent 相关**：`AgentEngine.Execute` 会开 `agent.execute` 顶层 SPAN，其下每一轮 ReAct 循环开 `agent.round.N` SPAN，每次工具调用开 `agent.tool.<tool_name>` SPAN（参数、输出、耗时、成败、错误都会写入）。 |
 | Generation（type=GENERATION） | 每次 chat / embedding / rerank / VLM / ASR 调用 | 若位于 span 下会自动设置 `parentObservationId`，所以 Langfuse UI 呈现 trace → asynq-span → generation 的树状结构；Agent 模式下是 trace → agent.execute → agent.round.N → (chat.completion.stream + agent.tool.X → rerank/embedding...) 的完整树。 |
 | Input Tokens | `TokenUsage.PromptTokens` | 来自模型返回的 usage 字段。 |

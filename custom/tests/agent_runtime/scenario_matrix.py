@@ -1,4 +1,4 @@
-"""Run named, inspectable development scenarios; no legacy eval thresholds."""
+"""Run named, inspectable development scenarios without legacy thresholds."""
 import argparse
 import json
 

@@ -23,7 +23,7 @@ func (l *langfuseReranker) GetModelID() string   { return l.inner.GetModelID() }
 
 func (l *langfuseReranker) Rerank(ctx context.Context, query string, documents []string) ([]RankResult, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.EnabledFor(ctx) {
+	if !mgr.Enabled() {
 		return l.inner.Rerank(ctx, query, documents)
 	}
 
@@ -48,10 +48,6 @@ func (l *langfuseReranker) Rerank(ctx context.Context, query string, documents [
 			"avg_doc_chars": avgDocChars(documents),
 		},
 	})
-	if !gen.Recording() {
-		gen.Finish(nil, nil, nil)
-		return l.inner.Rerank(ctx, query, documents)
-	}
 
 	results, err := l.inner.Rerank(genCtx, query, documents)
 

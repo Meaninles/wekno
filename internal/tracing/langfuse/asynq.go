@@ -30,7 +30,7 @@ func InjectTracing(ctx context.Context, carrier types.LangfuseTracingCarrier) {
 		return
 	}
 	tc := types.TracingContext{}
-	if trace, ok := TraceFromContext(ctx); ok && trace != nil && trace.Recording() {
+	if trace, ok := TraceFromContext(ctx); ok && trace != nil {
 		tc.LangfuseTraceID = trace.ID
 	}
 	if obs, ok := parentObservationFromCtx(ctx); ok {
@@ -108,8 +108,7 @@ func AsynqMiddleware() asynq.MiddlewareFunc {
 			shouldFinishTrace := false
 			if tc.LangfuseTraceID != "" {
 				ctx, trace = mgr.ResumeTrace(ctx, tc.LangfuseTraceID, tc.LangfuseParentObservationID)
-			}
-			if trace == nil {
+			} else {
 				ctx, trace = mgr.StartTrace(ctx, TraceOptions{
 					Name:      "asynq." + task.Type(),
 					UserID:    firstNonEmptyString(tc.LangfuseUserID, userIDFromCtx(ctx)),
@@ -118,26 +117,11 @@ func AsynqMiddleware() asynq.MiddlewareFunc {
 					Tags:      []string{"asynq", task.Type()},
 				})
 				shouldFinishTrace = true
-			} else {
-				trace.properties = traceProperties{
-					Name:      "asynq." + task.Type(),
-					UserID:    firstNonEmptyString(tc.LangfuseUserID, userIDFromCtx(ctx)),
-					SessionID: firstNonEmptyString(tc.LangfuseSessionID, sessionIDFromCtx(ctx)),
-					Metadata:  meta,
-					Tags:      []string{"asynq", task.Type()},
-				}
-			}
-
-			if !trace.Recording() {
-				if shouldFinishTrace {
-					trace.Finish(nil, nil)
-				}
-				return next.ProcessTask(ctx, task)
 			}
 
 			ctx, span := mgr.StartSpan(ctx, SpanOptions{
 				Name:     "asynq." + task.Type(),
-				Input:    spanInputFromPayload(task.Payload(), mgr.CaptureContent()),
+				Input:    spanInputFromPayload(task.Payload()),
 				Metadata: meta,
 			})
 
@@ -176,15 +160,12 @@ func AsynqMiddleware() asynq.MiddlewareFunc {
 //   - Document-process payloads contain file URLs that, while small, may
 //     include presigned query strings that rotate (adding diff noise).
 //
-// Production records byte count only. Eval mode may preview the first ~1KB,
-// which keeps ingestion bandwidth predictable even for unusually large jobs.
-func spanInputFromPayload(payload []byte, captureContent bool) interface{} {
+// Instead we preview the first ~1KB verbatim, which matches what Langfuse
+// itself would display and keeps ingestion bandwidth predictable.
+func spanInputFromPayload(payload []byte) interface{} {
 	const preview = 1024
 	if len(payload) == 0 {
 		return nil
-	}
-	if !captureContent {
-		return map[string]interface{}{"bytes": len(payload)}
 	}
 	if len(payload) <= preview {
 		return string(payload)

@@ -44,14 +44,6 @@ func GinMiddleware() gin.HandlerFunc {
 		}
 
 		newCtx, trace := mgr.StartTrace(ctx, opts)
-		if !trace.Recording() {
-			// Keep the unsampled decision in the request context. Model adapters
-			// see it through EnabledFor and bypass all recording work.
-			c.Request = c.Request.WithContext(newCtx)
-			c.Next()
-			trace.Finish(nil, nil)
-			return
-		}
 		c.Request = c.Request.WithContext(newCtx)
 
 		c.Next()
@@ -78,8 +70,7 @@ func GinMiddleware() gin.HandlerFunc {
 //     embedding/VLM/chat calls. Tracing the HTTP side means the Langfuse UI
 //     shows a parent trace whose children are the worker spans.
 //   - batch ops: FAQ import + knowledge batch delete also enqueue jobs.
-//   - model/setup diagnostics: initialization endpoints exercise live
-//     models; evaluation runs arbitrary chat pipelines.
+//   - model/setup diagnostics: initialization endpoints exercise live models.
 //   - wiki: auto-fix kicks off wiki ingest, which calls embedding.
 //
 // Read-only listing / GET endpoints are deliberately excluded; they never
@@ -101,8 +92,7 @@ func shouldTrace(c *gin.Context) bool {
 		strings.HasPrefix(path, "/api/v1/initialization/rerank/check"),
 		strings.HasPrefix(path, "/api/v1/initialization/asr/check"),
 		strings.HasPrefix(path, "/api/v1/initialization/multimodal/test"),
-		strings.HasPrefix(path, "/api/v1/initialization/extract/"),
-		strings.HasPrefix(path, "/api/v1/evaluation"):
+		strings.HasPrefix(path, "/api/v1/initialization/extract/"):
 		return true
 	}
 	// Ingestion (all POST/PUT that enqueue LLM-backed async work)

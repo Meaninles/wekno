@@ -1,5 +1,9 @@
-// Package langfuse maps WeKnora's tracing facade to Langfuse v4's
-// OpenTelemetry endpoint. Observability is always fail-open for business work.
+// Package langfuse implements a lightweight client for the Langfuse ingestion
+// API (https://langfuse.com/docs/api). It lets WeKnora record LLM traces,
+// generations and token usage in Langfuse without pulling in a heavy SDK.
+//
+// The integration is fully opt-in: when disabled (the default), all public
+// entry points are cheap no-ops, so callers can wire them unconditionally.
 package langfuse
 
 import (
@@ -8,90 +12,105 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
 )
 
+// Config holds the runtime configuration for the Langfuse client.
+//
+// In practice users enable Langfuse purely through environment variables —
+// Host / PublicKey / SecretKey — which matches every other Langfuse SDK and
+// keeps WeKnora's YAML config free of secrets.
 type Config struct {
-	Enabled                 bool
-	Host                    string
-	PublicKey               string
-	SecretKey               string
-	FlushAt                 int
-	FlushInterval           time.Duration
-	QueueSize               int
-	RequestTimeout          time.Duration
-	Release                 string
-	Environment             string
-	SampleRate              float64
-	ProductionMaxSampleRate float64
-	MaxAttributeBytes       int
-	Debug                   bool
-	AgentEval               agenteval.Config
+	// Enabled is the master switch. If false the entire package is a no-op.
+	Enabled bool
+	// Host is the Langfuse base URL, e.g. https://cloud.langfuse.com or
+	// https://us.cloud.langfuse.com or a self-hosted address.
+	Host string
+	// PublicKey / SecretKey are the project credentials used for Basic Auth.
+	PublicKey string
+	SecretKey string
+	// FlushAt flushes the queued events once the buffer reaches this size.
+	FlushAt int
+	// FlushInterval is the maximum time between automatic flushes.
+	FlushInterval time.Duration
+	// QueueSize bounds the in-memory buffer to avoid unbounded growth if the
+	// Langfuse endpoint is unreachable.
+	QueueSize int
+	// RequestTimeout is the HTTP timeout for a single ingestion batch.
+	RequestTimeout time.Duration
+	// Release / Environment are attached to every trace for filtering in the
+	// Langfuse UI (e.g. release="v0.4.2", environment="production").
+	Release     string
+	Environment string
+	// SampleRate (0..1) controls trace sampling. 0 means "use 1.0".
+	SampleRate float64
+	// Debug enables verbose logging of batch send errors.
+	Debug bool
 }
 
+// LoadConfigFromEnv builds a Config by reading the LANGFUSE_* environment
+// variables, mirroring the official Python / JS SDK conventions.
 func LoadConfigFromEnv() Config {
-	evalConfig := agenteval.LoadConfigFromEnv()
-	defaultSampleRate := 0.01
-	if evalConfig.Mode == agenteval.ModeEval {
-		defaultSampleRate = 1.0
-	}
 	cfg := Config{
-		Host:                    firstNonEmpty(os.Getenv("LANGFUSE_HOST"), "https://cloud.langfuse.com"),
-		PublicKey:               strings.TrimSpace(os.Getenv("LANGFUSE_PUBLIC_KEY")),
-		SecretKey:               strings.TrimSpace(os.Getenv("LANGFUSE_SECRET_KEY")),
-		Release:                 strings.TrimSpace(os.Getenv("LANGFUSE_RELEASE")),
-		Environment:             strings.TrimSpace(os.Getenv("LANGFUSE_ENVIRONMENT")),
-		FlushAt:                 128,
-		FlushInterval:           3 * time.Second,
-		QueueSize:               2048,
-		RequestTimeout:          5 * time.Second,
-		SampleRate:              defaultSampleRate,
-		ProductionMaxSampleRate: 0.01,
-		MaxAttributeBytes:       256 * 1024,
-		AgentEval:               evalConfig,
+		Host:           firstNonEmpty(os.Getenv("LANGFUSE_HOST"), "https://cloud.langfuse.com"),
+		PublicKey:      strings.TrimSpace(os.Getenv("LANGFUSE_PUBLIC_KEY")),
+		SecretKey:      strings.TrimSpace(os.Getenv("LANGFUSE_SECRET_KEY")),
+		Release:        strings.TrimSpace(os.Getenv("LANGFUSE_RELEASE")),
+		Environment:    strings.TrimSpace(os.Getenv("LANGFUSE_ENVIRONMENT")),
+		FlushAt:        15,
+		FlushInterval:  3 * time.Second,
+		QueueSize:      2048,
+		RequestTimeout: 10 * time.Second,
+		SampleRate:     1.0,
 	}
-	if value := strings.TrimSpace(os.Getenv("LANGFUSE_ENABLED")); value != "" {
-		cfg.Enabled = parseBool(value)
-	} else {
-		cfg.Enabled = cfg.PublicKey != "" && cfg.SecretKey != ""
+
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_ENABLED")); v != "" {
+		cfg.Enabled = parseBool(v)
+	} else if cfg.PublicKey != "" && cfg.SecretKey != "" {
+		// Auto-enable when credentials are present — matches the Python SDK.
+		cfg.Enabled = true
 	}
-	parsePositiveIntEnv("LANGFUSE_FLUSH_AT", &cfg.FlushAt)
-	parsePositiveIntEnv("LANGFUSE_QUEUE_SIZE", &cfg.QueueSize)
-	parsePositiveIntEnv("LANGFUSE_MAX_ATTRIBUTE_BYTES", &cfg.MaxAttributeBytes)
-	if value := strings.TrimSpace(os.Getenv("LANGFUSE_FLUSH_INTERVAL")); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil && duration > 0 {
-			cfg.FlushInterval = duration
-		} else if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
-			cfg.FlushInterval = time.Duration(seconds) * time.Second
+
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_FLUSH_AT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FlushAt = n
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv("LANGFUSE_REQUEST_TIMEOUT")); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil && duration > 0 {
-			cfg.RequestTimeout = duration
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_FLUSH_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.FlushInterval = d
+		} else if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FlushInterval = time.Duration(n) * time.Second
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv("LANGFUSE_SAMPLE_RATE")); value != "" {
-		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed >= 0 && parsed <= 1 {
-			cfg.SampleRate = parsed
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_QUEUE_SIZE")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.QueueSize = n
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv("LANGFUSE_PRODUCTION_MAX_SAMPLE_RATE")); value != "" {
-		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed >= 0 && parsed <= 1 {
-			cfg.ProductionMaxSampleRate = parsed
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_REQUEST_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.RequestTimeout = d
 		}
 	}
-	if cfg.AgentEval.Mode == agenteval.ModeProduction && cfg.SampleRate > cfg.ProductionMaxSampleRate {
-		cfg.SampleRate = cfg.ProductionMaxSampleRate
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_SAMPLE_RATE")); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			cfg.SampleRate = f
+		}
 	}
-	if value := strings.TrimSpace(os.Getenv("LANGFUSE_DEBUG")); value != "" {
-		cfg.Debug = parseBool(value)
+	if v := strings.TrimSpace(os.Getenv("LANGFUSE_DEBUG")); v != "" {
+		cfg.Debug = parseBool(v)
 	}
+
+	if cfg.SampleRate == 0 {
+		cfg.SampleRate = 1.0
+	}
+
 	return cfg
 }
 
+// Validate verifies required fields are present when Langfuse is enabled.
 func (c Config) Validate() error {
-	if !c.Enabled || c.SampleRate == 0 {
+	if !c.Enabled {
 		return nil
 	}
 	if strings.TrimSpace(c.Host) == "" {
@@ -100,42 +119,22 @@ func (c Config) Validate() error {
 	if c.PublicKey == "" || c.SecretKey == "" {
 		return fmt.Errorf("langfuse: public_key and secret_key are required when enabled")
 	}
-	if c.QueueSize <= 0 || c.FlushAt <= 0 || c.FlushAt > c.QueueSize {
-		return fmt.Errorf("langfuse: invalid queue/batch sizes")
-	}
 	return nil
 }
 
-func (c Config) OTLPTraceEndpoint() string {
-	return strings.TrimRight(c.Host, "/") + "/api/public/otel/v1/traces"
-}
-
-func (c Config) CaptureContent() bool {
-	return c.AgentEval.CaptureContent()
-}
-
-func parsePositiveIntEnv(name string, target *int) {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
-			*target = parsed
-		}
-	}
-}
-
 func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
 		}
 	}
 	return ""
 }
 
-func parseBool(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
+func parseBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "t", "yes", "y", "on":
 		return true
-	default:
-		return false
 	}
+	return false
 }

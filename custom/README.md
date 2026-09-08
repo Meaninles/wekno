@@ -6,7 +6,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `services/` | agent-eval、agent-runtime、文档拆分器、DocReader 进程隔离运行时及模型网关辅助镜像 |
+| `services/` | agent-runtime、文档拆分器、DocReader 进程隔离运行时及模型网关辅助镜像 |
 | `tests/` | 多实例文档、知识库文件夹、模型容量、迁移和 Agent 验收 |
 | `document-templates/` | Word/Excel/PDF/PPT 生成模板与运行时指令 |
 

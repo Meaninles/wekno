@@ -9,7 +9,7 @@
 
 参数依据：[DeepSeek 模型卡](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)、[Qwen 模型卡](https://huggingface.co/Qwen/Qwen3.8-27B)。强度合法值分别是 low/high/max 和 low/medium/xhigh。Qwen preserve_thinking 默认开启。强度不等于 temperature。
 
-当前策略（v5）：Qwen 上游升级后移除统一关闭思考的临时限制。`Qwen3.8-27B-Agent` 按智能体请求启用或关闭思考，开启时默认强度为 `xhigh`；两种模式分别使用表中的官方采样参数。DS 和旧生产模型名保持既有行为。`enable_qwen_thinking_eval.sql` 恢复本地平台及 Claude SDK 两种 Qwen 模型的强度配置和显示名称，智能体级开关继续决定是否开启思考。
+当前策略（v5）：Qwen 上游升级后移除统一关闭思考的临时限制。`Qwen3.8-27B-Agent` 按智能体请求启用或关闭思考，开启时默认强度为 `xhigh`；两种模式分别使用表中的官方采样参数。DS 和旧生产模型名保持既有行为，智能体级开关继续决定是否开启思考。
 
 ## 边界
 
@@ -18,7 +18,6 @@
 - `deploy.py` 创建不可变、带版本的 ConfigMap，保留部署镜像、密钥、上游地址和旧模型名。3 副本滚动更新，maxUnavailable=0；保留原 drain 钩子，给予正在执行的请求退出时间。
 - Anthropic 流在已经发送 HTTP 200 后发生空终止，必须发送标准 `event: error`，不能抛异常让通用 OpenAI 错误格式截断流。非流响应通过异常返回失败。
 - 不执行 reasoning_content 中的代码，不在网关自行拼接工具调用。Qwen 上游旧解析器的问题应在其模型服务中解决。
-- `configure_eval.sql` 仅用于本地 eval 的 tenant 10000；包含一次性 SDK 模型克隆，不能重复执行或用于生产。
 - 原适配器快照、生成结果、原始对话和部署备份留在私有目录，禁止提交凭据或原始业务日志。
 
 ## 验证
@@ -29,6 +28,6 @@
 
 `canary.py` 和 `smoke_http.py` 会调用真实上游，应在明确授权的验证窗口使用。前者验证两轮工具调用，后者验证新旧模型名、协议和思考开关；不会修改生产 WeKnora。
 
-`eval_tasks.py` 创建真实本地会话并记录事件和消息，供人工核对工具与交付物。它不以回答关键词或预设答案判定业务成功。`replay_upstream.py` 仅用于原始请求诊断，不执行模型返回的工具。
+`replay_upstream.py` 仅用于原始请求诊断，不执行模型返回的工具。
 
 最新部署记录、流程回归和未解决边界见 [v5 思考恢复与历史失败回归](../../../docs/custom/Qwen思考恢复与历史失败回归-20260906.md)。此前 v1–v4 过程见 [模型参数与网关协议修复验证](../../../docs/custom/模型参数与网关协议修复验证-20260906.md)。

@@ -125,3 +125,62 @@ def test_stream_outcome_handles_split_frames_and_missing_termination():
     outcome.feed(b'"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n')
     outcome.finish()
     assert outcome.usage=={"input_tokens":3,"output_tokens":2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('statuses', [(500,200), (429,200), (503,503), (400,), (401,)])
+async def test_transient_http_failure_has_one_fresh_budgeted_attempt(statuses, monkeypatch):
+    import app.models as module
+    timeline = []
+    remaining = iter(statuses)
+    async def no_delay(_): pass
+    monkeypatch.setattr(module.asyncio, 'sleep', no_delay)
+    class Lease:
+        def __init__(self, control): pass
+        async def acquire(self): timeline.append('acquired')
+        async def close(self, status=0, error='', usage=None): timeline.append(('released',status))
+    def provider(req):
+        status=next(remaining);timeline.append(('http',status))
+        return httpx.Response(status, json={'status':status})
+    async with httpx.AsyncClient(transport=GovernedTransport(None,httpx.MockTransport(provider),Lease)) as client:
+        response=await client.post('http://fixture',json={'max_tokens':16384})
+    assert response.status_code == statuses[-1]
+    assert timeline == [item for status in statuses for item in ('acquired',('http',status),('released',status))]
+
+
+@pytest.mark.asyncio
+async def test_http_retry_cannot_bypass_a_new_budget_denial(monkeypatch):
+    import app.models as module
+    from app.control import ControlError
+    attempts = []
+    async def no_delay(_): pass
+    monkeypatch.setattr(module.asyncio, 'sleep', no_delay)
+    class Lease:
+        def __init__(self, control): pass
+        async def acquire(self):
+            if attempts: raise ControlError('task_limit','No remaining budget')
+        async def close(self, *args, **kwargs): pass
+    def provider(req): attempts.append(req);return httpx.Response(503)
+    async with httpx.AsyncClient(transport=GovernedTransport(None,httpx.MockTransport(provider),Lease)) as client:
+        with pytest.raises(ControlError): await client.post('http://fixture')
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_interruption_never_regenerates_content():
+    attempts = []
+    releases = []
+    class Lease:
+        def __init__(self, control): pass
+        async def acquire(self): pass
+        async def close(self, *args): releases.append(args)
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'partial'
+            raise httpx.ReadError('Stream interrupted')
+    def provider(req):
+        attempts.append(req)
+        return httpx.Response(200, stream=BrokenStream())
+    async with httpx.AsyncClient(transport=GovernedTransport(None,httpx.MockTransport(provider),Lease)) as client:
+        with pytest.raises(httpx.ReadError): await client.post('http://fixture')
+    assert len(attempts) == len(releases) == 1

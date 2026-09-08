@@ -114,7 +114,7 @@ func (s *Service) stageArtifact(
 		return nil, errors.New("artifact storage is unavailable")
 	}
 	meta = normalizeArtifactUploadMetadata(meta)
-	run, err := s.ownedRun(ctx, meta.RunID, meta.OwnerEpoch)
+	run, err := s.deliveryRun(ctx, meta.RunID, meta.OwnerEpoch)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func (s *Service) stageArtifact(
 		return nil, err
 	}
 	result := s.db.WithContext(ctx).Model(&Artifact{}).
-		Where("EXISTS (SELECT 1 FROM custom_agent_runs WHERE id = ? AND owner_epoch = ? AND status = 'running' AND lease_until > NOW() AND deadline > NOW())", meta.RunID, meta.OwnerEpoch).
+		Where("EXISTS (SELECT 1 FROM custom_agent_runs WHERE id = ? AND owner_epoch = ? AND status = 'finalizing' AND lease_until > NOW() AND deadline > NOW())", meta.RunID, meta.OwnerEpoch).
 		Where(
 			"id = ? AND tenant_id = ? AND run_id = ? AND file_token = ? AND storage_state = ?",
 			row.ID,
@@ -177,7 +177,7 @@ func (s *Service) stageArtifact(
 		return nil, result.Error
 	}
 	if result.RowsAffected != 1 {
-		if _, err := s.ownedRun(ctx, meta.RunID, meta.OwnerEpoch); err != nil {
+		if _, err := s.deliveryRun(ctx, meta.RunID, meta.OwnerEpoch); err != nil {
 			return nil, err
 		}
 		// A retry may have reached another app replica at the same time. Both

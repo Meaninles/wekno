@@ -277,6 +277,21 @@ func (s *agentService) registerTools(
 		allowedTools = tools.DefaultAllowedTools()
 		logger.Infof(ctx, "Using default allowed tools: %v", allowedTools)
 	}
+	if config.AgentType == types.AgentTypeDocumentProcessingAgent {
+		filtered := make([]string, 0, len(allowedTools))
+		for _, toolName := range allowedTools {
+			switch toolName {
+			case tools.ToolDataAnalysis, tools.ToolDataSchema,
+				tools.ToolDBCatalog, tools.ToolDBSchema, tools.ToolDBQuery,
+				tools.ToolTableAnalysis, tools.ToolTableSchema:
+				continue
+			default:
+				filtered = append(filtered, toolName)
+			}
+		}
+		allowedTools = filtered
+		logger.Infof(ctx, "Document processing agent data-analysis tools disabled; remaining: %v", allowedTools)
+	}
 
 	// ---- Capability detection from SearchTargets ----
 	var hasVectorKB, hasWikiKB bool
@@ -560,7 +575,7 @@ func (s *agentService) ValidateConfig(config *types.AgentConfig) error {
 	if !types.IsKnownAgentType(config.AgentType) {
 		return fmt.Errorf("unsupported agent type: %s", config.AgentType)
 	}
-	config.MaxIterations = types.AgentIterationBudget(config.AgentType)
+	config.MaxIterations = types.AgentIterationBudget(config.AgentType, config.EnableArtifacts)
 
 	return nil
 }

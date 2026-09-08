@@ -75,9 +75,6 @@ func applyReservedProfessionalSkillsToConfig(cfg *types.CustomAgentConfig) {
 	if cfg == nil || cfg.AgentMode != types.AgentModeUnified {
 		return
 	}
-	if cfg.AgentType != types.AgentTypeGeneralAgent && cfg.AgentType != types.AgentTypeDocumentProcessingAgent {
-		return
-	}
 	if cfg.ProfessionalSkillsSelectionMode == "" || cfg.ProfessionalSkillsSelectionMode == "none" {
 		cfg.ProfessionalSkillsSelectionMode = "selected"
 	}
@@ -188,10 +185,6 @@ func (s *Service) applyReferenceModelConfig(
 
 	cfg.SystemPrompt = reference.SystemPrompt
 	cfg.SystemPromptID = reference.SystemPromptID
-
-
-
-
 
 	return cfg, nil
 }

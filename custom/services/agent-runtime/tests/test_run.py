@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import time
 
 import pytest
@@ -12,7 +13,13 @@ from pydantic import BaseModel
 from app.contracts import RunRequest
 from app.delivery import DeliveryError
 from app.budget import BudgetExhausted
-from app.run import execute
+from app.run import execute as execute_sdk
+from app.artifact_delivery import commit_candidate
+
+
+async def execute(payload, control, model, **kwargs):
+    return await commit_candidate(control, await execute_sdk(payload, control, model, **kwargs))
+
 from app.context import KNOWLEDGE_QA_SCOPE, messages, system_prompt
 
 
@@ -49,6 +56,10 @@ class MemoryControl:
     async def checkpoint(self, state, *, boundary):
         self.snapshots.append((boundary, copy.deepcopy(state)))
 
+    async def budget(self, role=""):
+        return {"max_tokens":3000000,"remaining_tokens":3000000,"max_requests":100,
+                "remaining_requests":100,"final_reserve":32768,"remaining_seconds":7200}
+
     async def events(self, events):
         assert self.committed is None, "events cannot be written after terminal commit"
         self.emitted.extend(copy.deepcopy(events))
@@ -72,14 +83,13 @@ class MemoryControl:
         return {"result": result}
 
     async def post(self, path, **kwargs):
-        assert path == "runs/prefetch"
-        return {"output": "The verified value is 42."}
+        pytest.fail("Unexpected automatic control operation: " + path)
 
 
 @pytest.mark.asyncio
 async def test_knowledge_qa_can_redirect_without_prefetch_even_with_history_and_selected_kb():
     payload = request(history=[{"role":"user", "content":"Earlier policy question"}],
-        runtime_config={"agent_type":"knowledge-qa", "prefetch_knowledge":True},
+        runtime_config={"agent_type":"knowledge-qa"},
         tools=[{"name":"read_conversation", "parameters":{"type":"object","properties":{}}}])
     control = MemoryControl(payload)
     async def forbidden(*args, **kwargs):
@@ -117,26 +127,26 @@ def test_history_keeps_image_only_turns_and_image_provenance():
 
 
 @pytest.mark.asyncio
-async def test_uncited_history_sources_are_available_before_one_generation():
+async def test_uncited_history_evidence_is_read_on_demand_with_current_citations():
     payload = request(history=[{"role":"assistant", "content":"Earlier summary without citations",
         "source_id":"assistant_message_prior", "context_metadata":{"source_id":"assistant_message_prior",
         "evidence_catalog":{"read_tool":"read_conversation","section":"evidence","sources":[{"title":"Original policy"}]}}}],
-        runtime_config={"prefetch_knowledge":True},
         tools=[{"name":"read_conversation","parameters":{"type":"object","properties":{}}}])
     control = MemoryControl(payload)
     posts = []
-    async def restored(path, **kwargs):
-        posts.append(path)
-        assert path == "runs/reuse-evidence", "Do not search again when historical evidence is loaded"
-        return {"output":'Original policy: verified value 42. <src id="S1" />',
+    async def restored(name, arguments, call_id):
+        posts.append(name)
+        assert name == "read_conversation"
+        return {"success":True,"output":'Original policy: verified value 42. <src id="S1" />',
                 "source_references":[{"id":"S1"}],"citation_output_contract":"Cite supplied source handles."}
-    control.post = restored
-    model = ScriptedModel([[TextBlock(text='42. <src id="S1" />')]])
+    control.tool = restored
+    model = ScriptedModel([[ToolCallBlock(id="read-history",name="read_conversation",input="{}")], [TextBlock(text='42. <src id="S1" />')]])
     result = await execute(payload, control, model)
     assert result.answer == '42. <src id="S1" />'
-    assert len(model.requests) == 1 and posts == ["runs/reuse-evidence"]
+    assert len(model.requests) == 2 and posts == ["read_conversation"]
     assert "evidence_catalog" in str(model.requests[0])
-    assert "Original policy: verified value 42" in str(model.requests[0])
+    assert "Original policy: verified value 42" not in str(model.requests[0])
+    assert "Original policy: verified value 42" in str(model.requests[-1])
     for message in model.requests[0]:
         if message.role != "system":
             assert "evidence_catalog" not in str(message)
@@ -178,21 +188,15 @@ async def test_failed_turn_is_control_state_not_an_answer_to_rewrite():
 
 
 @pytest.mark.asyncio
-async def test_empty_historical_cache_still_allows_selected_source_prefetch():
+@pytest.mark.parametrize("agent_type", ["knowledge-qa", "general-agent", "document-processing-agent", "data-analysis", "table-analysis", "custom"])
+async def test_history_and_selected_sources_do_not_force_automatic_reads(agent_type):
     payload = request(history=[{"role":"user","content":"previous topic"}],
-        runtime_config={"prefetch_knowledge":True},
+        runtime_config={"agent_type":agent_type,"knowledge_bases":["selected-kb"]},
         tools=[{"name":"read_conversation","parameters":{"type":"object","properties":{}}}])
     control = MemoryControl(payload)
-    posts = []
-    async def restored(path, **kwargs):
-        posts.append(path)
-        if path == "runs/reuse-evidence": return {"output":"", "source_references":[]}
-        return {"output":"New source fact"}
-    control.post = restored
-    model = ScriptedModel([[TextBlock(text="New source fact")]])
+    model = ScriptedModel([[TextBlock(text="不客气。")]])
     await execute(payload, control, model)
-    assert posts == ["runs/reuse-evidence","runs/prefetch"]
-    assert len(model.requests) == 1
+    assert len(model.requests) == 1 and not control.calls
 
 
 def request(**updates):
@@ -214,7 +218,44 @@ async def test_plain_answer_is_committed_once_by_same_harness():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limit", [15, 50])
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("bad_input", ['{"value":"', '[]', 'null'])
+async def test_invalid_tool_arguments_are_recoverable_without_executing_or_repairing_them(local, bad_input):
+    from app.contracts import RuntimeToolSpec
+    from app.tools import BusinessTool
+    spec = RuntimeToolSpec(name="save_file", parameters={"type":"object", "properties":{"value":{"type":"string"}}, "required":["value"]})
+    payload = request(tools=[] if local else [spec])
+    control = MemoryControl(payload)
+    model = ScriptedModel([
+        [ToolCallBlock(id="invalid", name="save_file", input=bad_input)],
+        [ToolCallBlock(id="valid", name="save_file", input='{"value":"complete"}')],
+        [TextBlock(text="Verified final result")],
+    ])
+    result = await execute(payload, control, model,
+                           extra_tools=[BusinessTool(spec, control)] if local else [])
+    assert result.answer == "Verified final result"
+    assert control.calls == [("save_file", {"value":"complete"}, "valid")]
+    assert len(model.requests) == 3  # The existing SDK loop handles the error.
+    from agentscope.message import ToolResultBlock
+    rejected = [b for m in model.requests[1] for b in m.content
+                if isinstance(b, ToolResultBlock) and b.id == 'invalid']
+    assert len(rejected) == 1 and str(rejected[0].state) == 'error'
+    assert rejected[0].metadata['invalid_arguments'] == bad_input
+    # Strict provider templates parse historical tool arguments before
+    # generation. A failed attempt must not poison every subsequent request.
+    formatted = await model.formatter.format(model.requests[1])
+    history = [call for message in formatted for call in message.get('tool_calls', [])]
+    assert json.loads(next(call for call in history if call['id'] == 'invalid')['function']['arguments']) == {}
+    # Non-object JSON is rejected by the SDK before acting middleware runs.
+    if bad_input.startswith('{'):
+        assert "No tool was executed" in str(rejected[0].output)
+    if local and bad_input.startswith('{'):
+        failed = [e for e in control.emitted if e['type'] == 'local_tool_result' and e.get('id') == 'invalid']
+        assert len(failed) == 1 and failed[0]['data']['success'] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [15, 50, 100])
 async def test_budget_is_visible_each_round_and_last_valid_answer_commits(limit):
     payload = request(runtime_config={"max_iterations": limit},
                       tools=[{"name": "lookup", "parameters": {"type": "object", "properties": {}}}])
@@ -229,6 +270,7 @@ async def test_budget_is_visible_each_round_and_last_valid_answer_commits(limit)
     for index, messages in enumerate(model.requests):
         assert f"maximum={limit}" in str(messages)
         assert f"remaining={limit-index} " in str(messages)
+        assert "Single-response output limit=8192 tokens" in str(messages)
     assert "FINAL DECISION" in str(model.requests[-1])
 
 
@@ -243,7 +285,7 @@ async def test_invalid_final_answer_at_budget_does_not_commit_or_retry_beyond_bu
         *[[ToolCallBlock(id=f"lookup-{i}", name="lookup", input="{}")] for i in range(14)],
         [TextBlock(text="invalid candidate")],
     ])
-    with pytest.raises(BudgetExhausted):
+    with pytest.raises(DeliveryError):
         await execute(payload, control, model)
     assert len(model.requests) == 15
     assert control.committed is None
@@ -313,48 +355,29 @@ async def test_tool_decision_persisted_before_execution_then_answer_commits():
 
 
 @pytest.mark.asyncio
-async def test_artifact_delivery_feedback_stays_in_same_sdk_context():
+async def test_delivery_failure_does_not_regenerate_an_answer():
     payload = request()
     control = MemoryControl(payload)
     control.reject_once = True
     model = ScriptedModel([[TextBlock(text="File not yet published")], [TextBlock(text="Published document")]])
-    result = await execute(payload, control, model)
-    assert result.answer == "Published document"
-    assert len(model.requests) == 2
-    assert "Requested file has not been published" in str(model.requests[1])
-
-
-@pytest.mark.asyncio
-async def test_prefetch_is_visible_in_first_model_call():
-    payload = request(runtime_config={"prefetch_knowledge": True})
-    control = MemoryControl(payload)
-    model = ScriptedModel([[TextBlock(text="42")]])
-    await execute(payload, control, model)
+    with pytest.raises(DeliveryError):
+        await execute(payload, control, model)
     assert len(model.requests) == 1
-    assert "The verified value is 42" in str(model.requests[0])
+    assert control.committed is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prefetch", [True, False])
-async def test_source_contract_reaches_model_for_both_retrieval_routes(prefetch):
-    payload = request(runtime_config={"prefetch_knowledge": prefetch},
-                      tools=[{"name": "lookup", "parameters": {"type": "object", "properties": {}}}])
+async def test_source_contract_reaches_model_through_shared_tool_path():
+    payload = request(tools=[{"name":"lookup","parameters":{"type":"object","properties":{}}}])
     control = MemoryControl(payload)
-    evidence = {"success": True, "output": 'Value 42, source <src id="S1" />',
-                "citation_output_contract": "Cite the evidence beside the supported conclusion."}
-
-    async def post(*args, **kwargs):
-        return evidence
-
-    async def tool(*args, **kwargs):
-        return evidence
-
-    control.post, control.tool = post, tool
-    decisions = [] if prefetch else [[ToolCallBlock(id="source-1", name="lookup", input="{}")]]
-    model = ScriptedModel(decisions + [[TextBlock(text='42 <src id="S1" />')]])
+    evidence = {"success":True,"output":'Value 42, source <src id="S1" />',
+                "citation_output_contract":"Cite the evidence beside the supported conclusion."}
+    async def tool(*args, **kwargs): return evidence
+    control.tool = tool
+    model = ScriptedModel([[ToolCallBlock(id="source-1",name="lookup",input="{}")],
+                           [TextBlock(text='42 <src id="S1" />')]])
     result = await execute(payload, control, model)
-    assert result.answer == '42 <src id="S1" />'
-    assert len(model.requests) == (1 if prefetch else 2)
+    assert result.answer == '42 <src id="S1" />' and len(model.requests) == 2
     assert evidence["citation_output_contract"] in str(model.requests[-1])
 
 

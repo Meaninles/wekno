@@ -44,13 +44,13 @@ func TestCallToolRequiresInternalAPIKey(t *testing.T) {
 	}
 }
 
-func TestHistoryEvidenceControlStillRequiresInternalKey(t *testing.T) {
+func TestCheckpointControlRequiresInternalKey(t *testing.T) {
 	t.Setenv("AGENT_RUNTIME_API_KEY", "test-internal-key")
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.POST("/runs/:operation", NewHandler(nil).RunControl)
 	for _, auth := range []string{"", "Bearer wrong", "Bearer test-internal-key"} {
-		req := httptest.NewRequest(http.MethodPost, "/runs/reuse-evidence", strings.NewReader(`invalid-json`))
+		req := httptest.NewRequest(http.MethodPost, "/runs/checkpoint", strings.NewReader(`invalid-json`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", auth)
 		rec := httptest.NewRecorder()

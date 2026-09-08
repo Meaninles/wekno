@@ -92,7 +92,7 @@ func TestApplyReferenceModelDefaultsAddsReservedProfessionalSkills(t *testing.T)
 	}
 }
 
-func TestApplyReferenceModelDefaultsDoesNotAddReservedProfessionalSkillsToDataAnalysis(t *testing.T) {
+func TestApplyReferenceModelDefaultsAddsReservedProfessionalSkillsToDataAnalysis(t *testing.T) {
 	requireBuiltinAgentConfig(t)
 	svc := NewService(nil, nil)
 	agent := &types.CustomAgent{
@@ -110,9 +110,13 @@ func TestApplyReferenceModelDefaultsDoesNotAddReservedProfessionalSkillsToDataAn
 	if err != nil {
 		t.Fatalf("ApplyReferenceModelDefaults returned error: %v", err)
 	}
-	if got.Config.ProfessionalSkillsSelectionMode != "none" || len(got.Config.SelectedProfessionalSkills) != 0 {
-		t.Fatalf("data-analysis professional skills = mode %q skills %#v, want unchanged none",
-			got.Config.ProfessionalSkillsSelectionMode, got.Config.SelectedProfessionalSkills)
+	if got.Config.ProfessionalSkillsSelectionMode != "selected" {
+		t.Fatalf("data-analysis professional mode = %q, want selected", got.Config.ProfessionalSkillsSelectionMode)
+	}
+	for _, name := range []string{"anysearch-skill", "find-skill-skillhub"} {
+		if !stringSliceContains(got.Config.SelectedProfessionalSkills, name) {
+			t.Fatalf("data-analysis selected professional skills = %#v, want %s", got.Config.SelectedProfessionalSkills, name)
+		}
 	}
 }
 

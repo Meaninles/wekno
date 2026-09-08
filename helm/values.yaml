@@ -282,6 +282,12 @@ app:
   # -- Environment variables for the app container
   # Ref: https://github.com/Tencent/WeKnora/blob/main/docker-compose.yml
   env:
+    # Shared run budget; all auxiliary calls participate in the same ledger.
+    AGENT_RUNTIME_MAX_TOTAL_TOKENS: "3000000"
+    AGENT_RUNTIME_KNOWLEDGE_QA_MAX_TOTAL_TOKENS: "1000000"
+    AGENT_RUNTIME_MAX_MODEL_REQUESTS: "100"
+    AGENT_RUNTIME_ARTIFACT_MAX_TOTAL_TOKENS: "6000000"
+    AGENT_RUNTIME_ARTIFACT_MAX_MODEL_REQUESTS: "200"
     GIN_MODE: release
     # -- Canonical browser-visible SPA origin. IAM SSO uses this instead of
     # inferring the public scheme from the internal proxy connection.

@@ -31,7 +31,7 @@ func TestPostgresProfileCutoverPreservesDistinctCapabilities(t *testing.T) {
 	for _, row := range rows {
 		require.Equal(t, row.ID, row.Config.AgentType)
 		require.Equal(t, row.ID, row.Name)
-		require.Equal(t, types.AgentIterationBudget(row.ID), row.Config.MaxIterations)
+		require.Equal(t, types.AgentIterationBudget(row.ID, row.Config.EnableArtifacts), row.Config.MaxIterations)
 		require.Equal(t, types.AgentModeUnified, row.Config.AgentMode)
 		require.Equal(t, "Retain this profile's behavior", row.Config.SystemPrompt)
 		require.Equal(t, []string{"kb-1"}, row.Config.KnowledgeBases)

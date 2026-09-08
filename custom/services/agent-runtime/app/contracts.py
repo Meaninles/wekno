@@ -46,9 +46,8 @@ class RuntimeConfigSpec(BaseModel):
     max_completion_tokens: int = 0
     agent_id: str = ""
     agent_type: str = ""
-    max_iterations: Literal[15, 50] = 50
+    max_iterations: Literal[15, 50, 100] = 50
     max_context_tokens: int = Field(default=128000, ge=4096)
-    prefetch_knowledge: bool = False
     temperature: float = 0
     thinking: bool | None = None
     allowed_tools: list[str] = Field(default_factory=list)
@@ -176,12 +175,12 @@ class LightweightSkillSpec(BaseModel):
 
 
 class RunRequest(BaseModel):
+    finalization: dict[str, Any] | None = None
+    output_baseline: dict[str, str] | None = None
     protocol_version: Literal[1] = 1
     owner_epoch: int = Field(ge=1)
     deadline_unix: float
     checkpoint: dict[str, Any] | None = None
-    max_model_requests: int = Field(default=100, ge=1, le=1000)
-    max_total_tokens: int = Field(default=1000000, ge=1)
     run_id: str
     tenant_id: int = 0
     user_id: str = ""
@@ -204,7 +203,7 @@ class RunRequest(BaseModel):
     professional_skills: list[ProfessionalSkillSpec] = Field(default_factory=list)
     tools: list[RuntimeToolSpec] = Field(default_factory=list)
     runtime_config: RuntimeConfigSpec = Field(default_factory=RuntimeConfigSpec)
-    llm: LLMConfig
+    llm: LLMConfig | None = None
     vision_llm: LLMConfig | None = None
     tool_callback_url: str
     tool_callback_api_key: str = ""
@@ -245,7 +244,8 @@ class Artifact(BaseModel):
 
 
 class RunResult(BaseModel):
-    status: Literal["completed"] = "completed"
+    status: Literal["completed", "incomplete"] = "completed"
+    failure_code: str = ""
     references: list[dict[str, Any]] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
     timings: dict[str, float] = Field(default_factory=dict)
@@ -259,6 +259,11 @@ class RunResult(BaseModel):
     artifact_returned_size: int = 0
     artifact_limit_bytes: int = 128 * 1024 * 1024
     prompt_observation: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator('references', 'artifacts', mode='before')
+    @classmethod
+    def empty_result_lists(cls, value):
+        return empty_list_when_none(value)
 
 
 class RunEvent(BaseModel):

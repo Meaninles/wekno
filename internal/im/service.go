@@ -698,6 +698,9 @@ func applyIMCompleteDataToMessage(msg *types.Message, data event.AgentCompleteDa
 		return
 	}
 	msg.IsCompleted = true
+	if files, ok := data.Extra["artifacts"].([]types.MessageArtifact); ok {
+		msg.Artifacts = files
+	}
 	msg.AgentDurationMs = data.TotalDurationMs
 	if data.KnowledgeRefsAuthoritative {
 		msg.KnowledgeReferences = types.References(data.KnowledgeRefs)
@@ -905,6 +908,7 @@ func (s *Service) RenderFinalOutbound(
 	tenant *types.Tenant,
 	platform Platform,
 	streaming bool,
+	artifactSets ...[]types.MessageArtifact,
 ) imoutput.Result {
 	var tenantID uint64
 	if tenant != nil {
@@ -921,6 +925,9 @@ func (s *Service) RenderFinalOutbound(
 			ReferenceSigner: s.referenceSigner,
 		},
 	)
+	for _, files := range artifactSets {
+		result.Content = imoutput.AppendArtifacts(result.Content, files, s.frontendBaseURL, result.Dialect)
+	}
 	result.Content = cleanIMContent(ctx, result.Content, tenant, s.defaultFileSvc)
 	return result
 }
@@ -1623,9 +1630,11 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	qaResult, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote)
 	answer := ""
 	var refs []*types.SearchResult
+	var artifacts []types.MessageArtifact
 	if qaResult != nil {
 		answer = qaResult.Answer
 		refs = qaResult.References
+		artifacts = qaResult.Artifacts
 	}
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA failed: %v, sending fallback reply", err)
@@ -1633,7 +1642,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	}
 
 	reply := &ReplyMessage{
-		Content: s.RenderFinalOutbound(ctx, answer, refs, req.tenant, req.msg.Platform, false).Content,
+		Content: s.RenderFinalOutbound(ctx, answer, refs, req.tenant, req.msg.Platform, false, artifacts).Content,
 		IsFinal: true,
 	}
 	if err := req.adapter.SendReply(ctx, req.msg, reply); err != nil {
@@ -2579,6 +2588,7 @@ loop:
 		tenant,
 		msg.Platform,
 		true,
+		assistantMsg.Artifacts,
 	).Content
 	if finalErr != nil || noVisibleContent || strings.TrimSpace(finalDisplay) == "" {
 		failure := usererrors.Classify("empty_response", "")
@@ -2625,9 +2635,11 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 	qaResult, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote)
 	answer := ""
 	var refs []*types.SearchResult
+	var artifacts []types.MessageArtifact
 	if qaResult != nil {
 		answer = qaResult.Answer
 		refs = qaResult.References
+		artifacts = qaResult.Artifacts
 	}
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA fallback failed: %v", err)
@@ -2635,12 +2647,13 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 	}
 
 	return adapter.SendReply(ctx, msg, &ReplyMessage{
-		Content: s.RenderFinalOutbound(ctx, answer, refs, tenant, msg.Platform, false).Content,
+		Content: s.RenderFinalOutbound(ctx, answer, refs, tenant, msg.Platform, false, artifacts).Content,
 		IsFinal: true,
 	})
 }
 
 type imQAResult struct {
+	Artifacts  []types.MessageArtifact
 	Answer     string
 	References []*types.SearchResult
 	MessageID  string
@@ -2855,6 +2868,7 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	// final IM delivery path passes this pair through RenderFinalOutbound.
 	return &imQAResult{
 		Answer:     answer,
+		Artifacts:  assistantMsg.Artifacts,
 		References: []*types.SearchResult(assistantMsg.KnowledgeReferences),
 		MessageID:  assistantMsg.ID,
 	}, nil

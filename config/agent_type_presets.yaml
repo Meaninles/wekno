@@ -150,7 +150,7 @@ agent_type_presets:
     - find-skill-skillhub
     temperature: 0.4
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     allowed_tools:
     - thinking
@@ -163,11 +163,6 @@ agent_type_presets:
     - wiki_search
     - wiki_read_page
     - wiki_read_source_doc
-    - data_schema
-    - data_analysis
-    - db_catalog
-    - db_schema
-    - db_query
     retain_retrieval_history: true
     faq_priority_enabled: true
     faq_direct_answer_threshold: 0.9
@@ -196,7 +191,7 @@ agent_type_presets:
     thinking: true
     temperature: 0.2
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     allowed_tools:
     - thinking
@@ -236,7 +231,7 @@ agent_type_presets:
     thinking: true
     temperature: 0.2
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     allowed_tools:
     - thinking
@@ -278,7 +273,7 @@ agent_type_presets:
     thinking: true
     temperature: 0.5
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     allowed_tools:
     - thinking
@@ -323,7 +318,7 @@ agent_type_presets:
     thinking: true
     temperature: 0.3
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     allowed_tools:
     - thinking

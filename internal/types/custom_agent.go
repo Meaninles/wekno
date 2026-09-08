@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// All conversations run in one harness with two fixed execution budgets.
+// All conversations run in one harness with capability-based execution budgets.
 const (
 	BuiltinDeepResearcherID          = "builtin-deep-researcher"
 	BuiltinDataAnalystID             = "builtin-data-analyst"
@@ -31,9 +31,12 @@ const (
 	AgentTypeKnowledgeQA             = "knowledge-qa"
 )
 
-func AgentIterationBudget(agentType string) int {
+func AgentIterationBudget(agentType string, enableArtifacts bool) int {
 	if agentType == AgentTypeKnowledgeQA {
 		return 15
+	}
+	if enableArtifacts {
+		return 100
 	}
 	return 50
 }
@@ -302,10 +305,10 @@ func (a *CustomAgent) EnsureDefaults() {
 	if a.Config.AgentType == "" {
 		a.Config.AgentType = AgentTypeGeneralAgent
 	}
-	a.Config.MaxIterations = AgentIterationBudget(a.Config.AgentType)
 	if a.Config.AgentType == AgentTypeDataAnalysis || a.Config.AgentType == AgentTypeTableAnalysis || a.Config.AgentType == AgentTypeDocumentProcessingAgent {
 		a.Config.EnableArtifacts = true
 	}
+	a.Config.MaxIterations = AgentIterationBudget(a.Config.AgentType, a.Config.EnableArtifacts)
 	if a.Config.WebSearchMaxResults == 0 {
 		a.Config.WebSearchMaxResults = 5
 	}

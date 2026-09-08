@@ -237,7 +237,7 @@ func mergeResetConfig(defaultConfig, currentConfig types.CustomAgentConfig) type
 	cfg.ImageStorageProvider = currentConfig.ImageStorageProvider
 
 	if defaultConfig.AgentType == types.AgentTypeDataAnalysis || defaultConfig.AgentType == types.AgentTypeGeneralAgent ||
-		defaultConfig.AgentType == types.AgentTypeDocumentProcessingAgent || defaultConfig.AgentType == types.AgentTypeKnowledgeBaseManager {
+		defaultConfig.AgentType == types.AgentTypeKnowledgeBaseManager {
 		cfg.DBDataSources = cloneStringSlice(currentConfig.DBDataSources)
 	}
 

@@ -5,6 +5,8 @@ import asyncio
 import contextlib
 import json
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+import math
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -13,8 +15,10 @@ from agentscope.credential import AnthropicCredential, DeepSeekCredential, OpenA
 from agentscope.model import AnthropicChatModel, DeepSeekChatModel, OpenAIChatModel, OpenAIResponseModel
 
 from .contracts import RunRequest
-from .control import Control
+from .control import Control, ControlError, ControlUnavailable
 from .reasoning import TaggedReasoningOpenAIChatModel
+
+finalizing_call = ContextVar("finalizing_call", default=False)
 
 
 class Admission:
@@ -39,11 +43,16 @@ class Admission:
                                     open_timeout=15, ping_interval=10, ping_timeout=10, max_size=65536)
         p = self.control.payload
         await self.socket.send(json.dumps({"run_id": p.run_id, "owner_epoch": p.owner_epoch, "model_role":self.model_role,
-            "estimated_input_tokens":self.estimated_input_tokens,"max_output_tokens":self.max_output_tokens}))
+            "estimated_input_tokens":self.estimated_input_tokens,"max_output_tokens":self.max_output_tokens,
+            "finalization":self.model_role == "" and finalizing_call.get()}))
         result = json.loads(await self.socket.recv())
         if result.get("status") != "acquired":
             await self.socket.close()
-            raise RuntimeError(result.get("error", "Model admission denied"))
+            code = result.get("code", "control_unavailable")
+            if code == "ownership_lost":
+                raise asyncio.CancelledError("Run ownership lost")
+            cls = ControlUnavailable if code == "control_unavailable" else ControlError
+            raise cls(code, result.get("error", "Model admission denied"))
         self.owner = asyncio.current_task()
         self.monitor = asyncio.create_task(self._watch())
 
@@ -153,24 +162,35 @@ class LeasedStream(httpx.AsyncByteStream):
 class GovernedTransport(httpx.AsyncBaseTransport):
     def __init__(self, control: Control, transport=None, lease_factory=Admission):
         self.control = control
-        self.transport = transport or httpx.AsyncHTTPTransport(retries=0)
+        # Only retry connection establishment, before a request is sent. SDK
+        # retries must not mistake a local admission denial for a network fault.
+        self.transport = transport or httpx.AsyncHTTPTransport(retries=2)
         self.lease_factory = lease_factory
 
     async def handle_async_request(self, request):
-        if asyncio.current_task().cancelling():
-            raise asyncio.CancelledError()
-        lease = self.lease_factory(self.control)
         body = json.loads(request.content) if request.content else {}
-        lease.estimated_input_tokens = input_budget(body)
-        lease.max_output_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or body.get("max_output_tokens") or 8192)
-        await lease.acquire()
-        try:
-            response = await self.transport.handle_async_request(request)
-        except BaseException as exc:
-            await lease.close(error=type(exc).__name__)
-            raise
-        return httpx.Response(response.status_code, headers=response.headers,
-                              stream=LeasedStream(response, lease), extensions=response.extensions)
+        for attempt in range(2):
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError()
+            lease = self.lease_factory(self.control)
+            lease.estimated_input_tokens = input_budget(body)
+            lease.max_output_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or body.get("max_output_tokens") or 8192)
+            await lease.acquire()
+            try:
+                response = await self.transport.handle_async_request(request)
+            except BaseException as exc:
+                await lease.close(error=type(exc).__name__)
+                raise
+            stream = LeasedStream(response, lease)
+            if attempt == 0 and response.status_code in (429, 500, 502, 503, 504):
+                # No model content has reached the SDK. Close/account this
+                # attempt before obtaining a fresh lease for one retry. Never
+                # retry admission failures, transport interruptions, or streams.
+                await stream.aclose()
+                await asyncio.sleep(0.5)
+                continue
+            return httpx.Response(response.status_code, headers=response.headers,
+                                  stream=stream, extensions=response.extensions)
 
     async def aclose(self):
         await self.transport.aclose()
@@ -181,7 +201,9 @@ def input_budget(value):
     if isinstance(value, str):
         if value.startswith("data:image/"):
             return 16384
-        return len(value.encode()) + 4
+        # Mixed-language units; the ledger calibrates against actual usage.
+        ascii_chars = sum(ord(char) < 128 for char in value)
+        return math.ceil(ascii_chars / 4 + (len(value) - ascii_chars)) + 4
     if isinstance(value, list):
         return sum(input_budget(item) for item in value) + 4
     if isinstance(value, dict):
@@ -235,7 +257,7 @@ async def model_for(payload: RunRequest, control: Control, *, transport=None, mo
     async with httpx.AsyncClient(transport=transport or GovernedTransport(control, lease_factory=lambda c: Admission(c, model_role)), timeout=timeout) as client:
         kwargs = dict(credential=credential_cls(api_key=config.api_key or "no-auth", base_url=config.base_url or None),
                       model=config.model_name, parameters=cls.Parameters(**values), stream=True, max_retries=0,
-                      context_size=runtime.max_context_tokens, client_kwargs={"http_client": client, "max_retries": 2,
+                      context_size=runtime.max_context_tokens, client_kwargs={"http_client": client, "max_retries": 0,
                                                                             "default_headers": config.headers})
         if issubclass(cls, OpenAIChatModel):
             kwargs["extra_body"] = extra

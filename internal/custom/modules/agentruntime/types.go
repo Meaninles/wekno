@@ -86,7 +86,6 @@ type RuntimeToolSpec struct {
 type RuntimeConfigSpec struct {
 	RerankModelID               string                                 `json:"rerank_model_id,omitempty"`
 	MaxContextTokens            int                                    `json:"max_context_tokens"`
-	PrefetchKnowledge           bool                                   `json:"prefetch_knowledge"`
 	MaxCompletionTokens         int                                    `json:"max_completion_tokens"`
 	AgentID                     string                                 `json:"agent_id"`
 	AgentType                   string                                 `json:"agent_type"`
@@ -195,6 +194,8 @@ type ChatHistoryMessage struct {
 }
 
 type ChatPayload struct {
+	Finalization            *Finalization               `json:"finalization,omitempty"`
+	OutputBaseline          json.RawMessage             `json:"output_baseline"`
 	OwnerEpoch              int64                       `json:"owner_epoch"`
 	DeadlineUnix            float64                     `json:"deadline_unix"`
 	Checkpoint              map[string]any              `json:"checkpoint,omitempty"`
@@ -243,6 +244,8 @@ type StreamEvent struct {
 }
 
 type ChatResult struct {
+	Status                string                `json:"status"`
+	FailureCode           string                `json:"failure_code,omitempty"`
 	References            []*types.SearchResult `json:"references"`
 	Usage                 map[string]any        `json:"usage,omitempty"`
 	Timings               map[string]float64    `json:"timings,omitempty"`
@@ -258,17 +261,7 @@ type ChatResult struct {
 	PromptObservation     map[string]any        `json:"prompt_observation,omitempty"`
 }
 
-type SidecarArtifact struct {
-	FileToken   string `json:"file_token"`
-	FileName    string `json:"filename"`
-	FileType    string `json:"file_type"`
-	FileSize    int64  `json:"file_size"`
-	SHA256      string `json:"sha256"`
-	ContentType string `json:"content_type"`
-	ArtifactID  string `json:"artifact_id,omitempty"`
-	DownloadURL string `json:"download_url,omitempty"`
-	Persisted   bool   `json:"persisted,omitempty"`
-}
+type SidecarArtifact = types.MessageArtifact
 
 type ToolCallRequest struct {
 	OwnerEpoch int64           `json:"owner_epoch"`

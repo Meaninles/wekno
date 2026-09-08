@@ -14,7 +14,7 @@ func TestPostgresModelBudgetRecoversLostUsageAndRejectsAdditionalRequests(t *tes
 	db := testsupport.Postgres(t, &RunRecord{}, &ModelRequest{})
 	row := fixtureRun(t, db)
 	s := &Service{db: db}
-	t.Setenv("AGENT_RUNTIME_MAX_MODEL_REQUESTS", "2")
+	t.Setenv("AGENT_RUNTIME_MAX_MODEL_REQUESTS", "3")
 	call, err := s.reserveModelRequest(context.Background(), row.ID, 2, "", 100, 20)
 	require.NoError(t, err)
 	require.NoError(t, s.finishModelRequest(context.Background(), call, 40, 8))
@@ -22,7 +22,7 @@ func TestPostgresModelBudgetRecoversLostUsageAndRejectsAdditionalRequests(t *tes
 	second, err := s.reserveModelRequest(context.Background(), row.ID, 2, "vision", 60, 10)
 	require.NoError(t, err)
 	_, err = s.reserveModelRequest(context.Background(), row.ID, 2, "", 1, 1)
-	require.ErrorContains(t, err, "budget exhausted")
+	require.ErrorIs(t, err, errFinalizationRequired)
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 		current, err := lockRun(tx, row.ID)
 		if err != nil {
@@ -37,7 +37,7 @@ func TestPostgresModelBudgetRecoversLostUsageAndRejectsAdditionalRequests(t *tes
 	require.NoError(t, s.finishModelRequest(context.Background(), second, 500, 500))
 	require.NoError(t, db.First(row, "id = ?", row.ID).Error)
 	require.EqualValues(t, 0, row.ReservedTokens)
-	require.EqualValues(t, 100, row.InputTokens)
+	require.EqualValues(t, 115, row.InputTokens)
 	require.EqualValues(t, 18, row.OutputTokens)
 	require.EqualValues(t, 1, row.UnknownUsageRequests)
 	require.EqualValues(t, 2, row.ModelRequests)

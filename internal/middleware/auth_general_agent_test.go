@@ -7,7 +7,7 @@ func TestAgentRuntimeInternalCallbacksReachInternalKeyValidation(t *testing.T) {
 		"/api/v1/custom/agent-runtime/internal/tools/call",
 		"/api/v1/custom/agent-runtime/internal/artifacts/upload",
 	}
-	for _, operation := range []string{"claim", "heartbeat", "checkpoint", "prefetch", "events", "validate", "commit", "fail"} {
+	for _, operation := range []string{"claim", "heartbeat", "checkpoint", "prefetch", "reuse-evidence", "events", "validate", "commit", "fail", "status", "budget", "baseline", "finalize"} {
 		paths = append(paths, "/api/v1/custom/agent-runtime/internal/runs/"+operation)
 	}
 

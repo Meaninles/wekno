@@ -1102,6 +1102,8 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         // replace pre-answer retrieval candidates with actually cited sources.
         applyKnowledgeReferences(data)
         normalizeFinalAnswerFromComplete(message, dataPayload)
+        message.artifacts = Array.isArray(dataPayload?.artifacts) ? dataPayload.artifacts : []
+        message.artifact_notice = typeof dataPayload?.artifact_notice === 'string' ? dataPayload.artifact_notice : ''
 		if (dataPayload?.retrieval_stats && typeof dataPayload.retrieval_stats === 'object') {
 		  message.retrieval_stats = { ...(dataPayload.retrieval_stats as Record<string, unknown>) }
 		}

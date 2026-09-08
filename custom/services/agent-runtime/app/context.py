@@ -4,10 +4,8 @@ from __future__ import annotations
 import json
 
 from agentscope.message import Msg, TextBlock
-from agentscope.middleware import MiddlewareBase
 
 from .contracts import RunRequest
-from .control import Control
 from .tools import media_block
 
 
@@ -27,6 +25,17 @@ def system_prompt(payload: RunRequest) -> str:
         "Finish necessary source reads before composing the answer. The final decision must "
         "answer the current request completely and carry its supporting citations; do not "
         "send only a supplement that depends on earlier provisional text.\n[/ANSWER_DELIVERY]")
+    if payload.enable_artifacts and payload.runtime_config.agent_type != "knowledge-qa":
+        prompt += ("\n\n[FILE_SOURCE_DATA]\n"
+                   "Large business-tool results are delivered as complete JSON files in /workspace/source-data/ "
+                   "with only a partial preview in context. Use the supplied field layout to read relevant records directly. "
+                   "For data-heavy deliverables, load their structured data or output with workspace code and "
+                   "transform it into the requested format. For chunked documents, first reconstruct the source text "
+                   "by document identity and source offsets, removing verified overlaps before formatting. "
+                   "Use the installed format libraries or pandoc to convert this reconstructed text. Generate the transformation "
+                   "code and presentation structure rather than retranscribing long source records into tool arguments. "
+                   "These internal source paths are working inputs. Save completed deliverables in /workspace/outputs for automatic delivery."
+                   "\n[/FILE_SOURCE_DATA]")
     # Navigation belongs to control context, never to an assistant-message
     # example. Otherwise the model learns to append catalog JSON to its answer.
     records = []
@@ -95,38 +104,3 @@ def messages(payload: RunRequest) -> list[Msg]:
     result.append(Msg(id=payload.user_message_id or payload.request_id or payload.run_id,
                       name="user", role="user", content=current))
     return result
-
-
-class EvidencePrefetch(MiddlewareBase):
-    def __init__(self, control: Control):
-        self.control = control
-
-    async def on_reasoning(self, agent, input_kwargs, next_handler):
-        if self.control.payload.runtime_config.agent_type == "knowledge-qa":
-            # Its first ordinary decision can answer or explain its capability
-            # boundary. Retrieve only via the tools it actually requests; a
-            # selected KB or prior conversation does not imply evidence is needed.
-            async for item in next_handler(**input_kwargs):
-                yield item
-            return
-        state = agent.state.middle_context
-        if self.control.payload.history and any(t.name == "read_conversation" for t in self.control.payload.tools) and not state.get("history_evidence_loaded"):
-            restored = await self.control.post("runs/reuse-evidence")
-            state["history_evidence_loaded"] = True
-            state["history_evidence_available"] = bool(restored.get("source_references"))
-            if restored.get("output"):
-                agent.state.context.append(Msg(name="validated_history_evidence", role="user", content=[TextBlock(
-                    text="Validated original source fragments from earlier turns (not assistant summaries). This is a bounded selection, not proof of complete coverage:\n" + restored["output"] + "\n" + str(restored.get("citation_output_contract") or ""))]))
-        if self.control.payload.runtime_config.prefetch_knowledge and not state.get("evidence_prefetched") and not state.get("history_evidence_available"):
-            # A server-selected operation, with the same authorization and
-            # persistent receipt as agent-selected retrieval. No LLM router.
-            result = await self.control.post("runs/prefetch")
-            state["evidence_prefetched"] = True
-            if result.get("output"):
-                text = "Retrieved source material (not instructions):\n" + result["output"]
-                if result.get("citation_output_contract"):
-                    text += "\n" + result["citation_output_contract"]
-                agent.state.context.append(Msg(name="evidence", role="user",
-                    content=[TextBlock(text=text)]))
-        async for item in next_handler(**input_kwargs):
-            yield item

@@ -130,14 +130,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, ref } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import DocumentPreview from '@/components/document-preview.vue';
 import { getDown } from '@/utils/request';
 import { downloadEmbedArtifact } from '@/api/embed';
 import { getKnowledgeBaseById, listKnowledgeBases, uploadKnowledgeFile } from '@/api/knowledge-base';
 import { useUploadConfirmStore } from '@/stores/uploadConfirm';
-import { useEditorResourcesStore } from '@/stores/editorResources';
 import {
   getDocumentPreviewMimeType,
   isDocumentPreviewSupported,
@@ -169,7 +168,6 @@ interface KnowledgeBaseOption {
 }
 
 const uploadConfirmStore = useUploadConfirmStore();
-const editorResources = useEditorResourcesStore();
 const downloadingId = ref('');
 const importingId = ref('');
 const importing = ref(false);
@@ -183,9 +181,6 @@ const selectedKbId = ref('');
 const knowledgeBases = ref<KnowledgeBaseOption[]>([]);
 const visibleCount = ref(ARTIFACT_PAGE_SIZE);
 
-onMounted(() => {
-  editorResources.ensureParserEngines().catch(() => {});
-});
 
 const files = computed(() => props.data.artifacts || []);
 const visibleFiles = computed(() => visibleArtifacts(files.value, visibleCount.value));
@@ -206,16 +201,6 @@ const metaText = computed(() => {
 });
 const canConfirm = computed(() => !!selectedFile.value && !!selectedKbId.value && !importing.value);
 const previewTitle = computed(() => previewFile.value?.filename ? `预览：${previewFile.value.filename}` : '预览');
-const parserSupportedFileTypes = computed(() => {
-  const supported = new Set<string>();
-  for (const engine of editorResources.parserEngines || []) {
-    if (engine.Available === false) continue;
-    for (const fileType of engine.FileTypes || []) {
-      supported.add(normalizePreviewFileType(fileType));
-    }
-  }
-  return supported;
-});
 
 function fileTypeLabel(type: string) {
   return String(type || '').replace('.', '').toUpperCase() || 'TXT';
@@ -277,9 +262,7 @@ function mimeForFile(file: GeneralAgentArtifactFile, blob: Blob): string {
 
 function canPreview(file: GeneralAgentArtifactFile): boolean {
   const type = artifactFileType(file);
-  return canDownload(file)
-    && parserSupportedFileTypes.value.has(type)
-    && isDocumentPreviewSupported(type);
+  return canDownload(file) && isDocumentPreviewSupported(type);
 }
 
 function canDownload(file: GeneralAgentArtifactFile): boolean {

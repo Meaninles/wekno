@@ -126,8 +126,7 @@ func (s *Service) callTool(ctx context.Context, req ToolCallRequest) (*ToolCallR
 		if !allowed {
 			return fmt.Errorf("tool is outside the authorized run catalog")
 		}
-		serverRead := (req.ToolCallID == "prefetch-knowledge" && req.ToolName == "knowledge_search") || (req.ToolCallID == "reuse-history-evidence" && req.ToolName == "read_conversation")
-		if !serverRead && !checkpointHasToolCall(row.Checkpoint, req.ToolCallID, req.ToolName, arguments) {
+		if !checkpointHasToolCall(row.Checkpoint, req.ToolCallID, req.ToolName, arguments) {
 			return fmt.Errorf("tool decision has not been checkpointed")
 		}
 		return tx.Create(&ToolReceipt{RunID: row.ID, CallID: req.ToolCallID, OwnerEpoch: req.OwnerEpoch, Name: req.ToolName, Arguments: req.Arguments, Status: "executing", ReadOnly: toolReadOnly(req.ToolName)}).Error
@@ -275,30 +274,6 @@ func payloadQuery(row *RunRecord) string {
 	_ = json.Unmarshal(row.Payload, &p)
 	return p.Query
 }
-func (s *Service) prefetch(ctx context.Context, id string, epoch int64) (*ToolCallResponse, error) {
-	row, err := s.ownedRun(ctx, id, epoch)
-	if err != nil {
-		return nil, err
-	}
-	args, err := json.Marshal(map[string]any{"queries": []string{payloadQuery(row)}})
-	if err != nil {
-		return nil, err
-	}
-	return s.callTool(ctx, ToolCallRequest{RunID: id, OwnerEpoch: epoch, ToolCallID: "prefetch-knowledge", ToolName: "knowledge_search", Arguments: args})
-}
-
-func (s *Service) reuseEvidence(ctx context.Context, id string, epoch int64) (*ToolCallResponse, error) {
-	row, err := s.ownedRun(ctx, id, epoch)
-	if err != nil {
-		return nil, err
-	}
-	args, err := json.Marshal(map[string]any{"section": "evidence", "query": payloadQuery(row)})
-	if err != nil {
-		return nil, err
-	}
-	return s.callTool(ctx, ToolCallRequest{RunID: id, OwnerEpoch: epoch, ToolCallID: "reuse-history-evidence", ToolName: "read_conversation", Arguments: args})
-}
-
 func (s *Service) toolEventBus(row *RunRecord, epoch int64) *event.EventBus {
 	bus := event.NewEventBus()
 	for _, kind := range []event.EventType{event.EventAgentToolCall, event.EventAgentProgress, event.EventToolApprovalRequired, event.EventToolApprovalResolved, event.EventMCPOAuthRequired, event.EventMCPOAuthResolved} {

@@ -35,6 +35,8 @@ type RunRecord struct {
 	Payload              json.RawMessage       `gorm:"type:jsonb;not null"`
 	Scope                json.RawMessage       `gorm:"type:jsonb;not null"`
 	Checkpoint           json.RawMessage       `gorm:"type:jsonb"`
+	Finalization         json.RawMessage       `gorm:"type:jsonb"`
+	OutputBaseline       json.RawMessage       `gorm:"type:jsonb"`
 	Result               json.RawMessage       `gorm:"type:jsonb"`
 	References           []*types.SearchResult `gorm:"serializer:json;type:jsonb"`
 	EventSeq             int64                 `gorm:"not null;default:0"`
@@ -191,19 +193,35 @@ func (s *Service) claimRun(ctx context.Context, worker string) (*ChatPayload, er
 			return err
 		}
 		for i := range expired {
+			var payload ChatPayload
+			if json.Unmarshal(expired[i].Payload, &payload) == nil && payload.EnableArtifacts && expired[i].Status == "running" {
+				if err := beginFinalization(tx, &expired[i], Finalization{Result: ChatResult{RunID: expired[i].ID}, Error: "run deadline exceeded", ErrorCode: "task_limit"}); err != nil {
+					return err
+				}
+				expired[i].LeaseUntil = time.Now().Add(-time.Second)
+				if err := tx.Save(&expired[i]).Error; err != nil {
+					return err
+				}
+				continue
+			}
 			if err := terminateRun(tx, &expired[i], "failed", "run deadline exceeded"); err != nil {
 				return err
 			}
 		}
 		var found RunRecord
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("deadline > NOW() AND (status = 'queued' OR (status = 'running' AND lease_until < NOW()))").Order("created_at").First(&found).Error
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("(deadline > NOW() AND (status = 'queued' OR (status = 'running' AND lease_until < NOW()))) OR (status = 'finalizing' AND (lease_until < NOW() OR deadline <= NOW()))").Order("created_at").First(&found).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil // Commit expired jobs even when there is no new work.
 		}
 		if err != nil {
 			return err
 		}
-		found.Status, found.Owner = "running", worker
+		if found.Status == "finalizing" {
+			found.Deadline = time.Now().Add(deliveryWindow)
+		} else {
+			found.Status = "running"
+		}
+		found.Owner = worker
 		found.OwnerEpoch++
 		found.LeaseUntil = time.Now().Add(runLease)
 		if err := reconcileModelRequests(tx, &found); err != nil {
@@ -225,6 +243,15 @@ func (s *Service) claimRun(ctx context.Context, worker string) (*ChatPayload, er
 	var scope RunScope
 	if err = json.Unmarshal(row.Payload, &p); err != nil {
 		return nil, err
+	}
+	p.OwnerEpoch, p.DeadlineUnix = row.OwnerEpoch, float64(row.Deadline.UnixMilli())/1000
+	p.OutputBaseline = row.OutputBaseline
+	p.ToolCallbackURL, p.ArtifactUploadURL, p.ToolCallbackAPIKey = toolCallbackURL(), artifactUploadURL(), s.apiKey
+	if row.Status == "finalizing" {
+		if err = json.Unmarshal(row.Finalization, &p.Finalization); err != nil {
+			return nil, err
+		}
+		return &p, nil
 	}
 	if err = json.Unmarshal(row.Scope, &scope); err != nil {
 		return nil, err
@@ -289,7 +316,7 @@ func (s *Service) cancelRun(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		if row.Status != "running" && row.Status != "queued" {
+		if row.Status != "running" && row.Status != "queued" && row.Status != "finalizing" {
 			return nil
 		}
 		return terminateRun(tx, row, "cancelled", "cancelled by caller")
@@ -309,6 +336,21 @@ func terminateRun(tx *gorm.DB, row *RunRecord, status, reason string, codes ...s
 	row.ErrorCode = failure.Code
 	if failure.Code == "task_limit" {
 		row.Status = "incomplete"
+	}
+	// Only persisted, scoped artifacts qualify as partial results. Never turn
+	// a tool draft, validation error or interrupted message into a full success.
+	var payload ChatPayload
+	if err := json.Unmarshal(row.Payload, &payload); err != nil {
+		return err
+	}
+	if payload.EnableArtifacts && status != "cancelled" {
+		result, err := partialArtifacts(tx, row, failure.Code)
+		if err != nil {
+			return err
+		}
+		if result != nil {
+			return storeResult(tx, row, result, "incomplete")
+		}
 	}
 	if err := tx.Model(&types.Message{}).Where("id = ? AND session_id = ? AND role = 'assistant'", row.MessageID, row.SessionID).Updates(map[string]any{
 		"is_completed": true, "content": failure.Message, "error_code": failure.Code, "updated_at": time.Now(),

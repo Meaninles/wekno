@@ -26,6 +26,9 @@ func TestAllProfilesRetainIdentityWithFixedBudgets(t *testing.T) {
 		a.Config.MaxIterations = 999
 		a.EnsureDefaults()
 		want := 50
+		if a.Config.EnableArtifacts {
+			want = 100
+		}
 		if id == BuiltinKnowledgeQAID {
 			want = 15
 		}
@@ -39,5 +42,16 @@ func TestAllProfilesRetainIdentityWithFixedBudgets(t *testing.T) {
 		if a.Config.MaxIterations != 50 || a.Config.AgentType != typ {
 			t.Fatalf("custom profile lost: %s", typ)
 		}
+	}
+}
+
+func TestArtifactBudgetFollowsCapabilityAcrossEveryProfile(t *testing.T) {
+	for _, kind := range []string{AgentTypeGeneralAgent, AgentTypeWikiQA, AgentTypeCustom, AgentTypeDataAnalysis, AgentTypeTableAnalysis, AgentTypeDocumentProcessingAgent, AgentTypeKnowledgeBaseManager} {
+		if AgentIterationBudget(kind, true) != 100 || AgentIterationBudget(kind, false) != 50 {
+			t.Fatalf("wrong capability budget for %s", kind)
+		}
+	}
+	if AgentIterationBudget(AgentTypeKnowledgeQA, true) != 15 {
+		t.Fatal("knowledge QA budget changed")
 	}
 }

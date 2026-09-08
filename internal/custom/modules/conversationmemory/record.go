@@ -40,6 +40,9 @@ func AssistantMetadata(m *types.Message) json.RawMessage {
 		return encoded
 	}
 	record := map[string]any{"source_id": AssistantSourceID(m.ID)}
+	if len(m.Artifacts) > 0 {
+		record["delivered_artifacts"] = m.Artifacts
+	}
 	type source struct {
 		KnowledgeBaseID string `json:"knowledge_base_id"`
 		KnowledgeID     string `json:"knowledge_id,omitempty"`

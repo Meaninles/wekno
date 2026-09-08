@@ -854,6 +854,8 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 			"retrieval_stats":      h.assistantMessage.RetrievalStats,
 			"agent_mode":           h.assistantMessage.AgentMode,
 			"agent_tool_count":     h.assistantMessage.AgentToolCount,
+			"artifacts":            data.Extra["artifacts"],
+			"artifact_notice":      data.Extra["artifact_notice"],
 		},
 	}); err != nil {
 		logger.GetLogger(h.ctx).Errorf("Append complete event to stream failed: %v", err)

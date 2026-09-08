@@ -78,6 +78,11 @@ func (t *MCPTool) Name() string {
 }
 
 // Description returns the tool description.
+// ConcurrentReadOnly exposes scheduling metadata, never an authorization grant.
+func (t *MCPTool) ConcurrentReadOnly() bool {
+	return !t.mcpTool.RequireApproval && t.mcpTool.ReadOnlyHint != nil && *t.mcpTool.ReadOnlyHint
+}
+
 // Prefix indicates external/untrusted source to reduce indirect prompt injection impact.
 func (t *MCPTool) Description() string {
 	serviceDesc := fmt.Sprintf("[MCP Service: %s (external)] ", t.service.Name)

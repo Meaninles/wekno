@@ -542,3 +542,26 @@ func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleCompleteDeliversArtifactsWithoutToolEvents(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	h := NewAgentStreamHandler(context.Background(), "session-1", "assistant-1", "request-1", time.Time{}, msg, stream, event.NewEventBus())
+	files := []types.MessageArtifact{{ArtifactID: "file-1", FileName: "result.html", DownloadURL: "/download"}}
+	err := h.handleComplete(context.Background(), event.Event{Type: event.EventAgentComplete, Data: event.AgentCompleteData{MessageID: msg.ID, FinalAnswer: "完成", Extra: map[string]interface{}{"artifacts": files, "artifact_notice": "notice"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stream.events {
+		if e.Type == types.ResponseTypeComplete {
+			if got, ok := e.Data["artifacts"].([]types.MessageArtifact); !ok || len(got) != 1 || got[0].ArtifactID != "file-1" {
+				t.Fatalf("missing artifacts: %#v", e.Data)
+			}
+			if e.Data["final_answer"] != "完成" {
+				t.Fatal("answer was changed")
+			}
+			return
+		}
+	}
+	t.Fatal("missing completion")
+}

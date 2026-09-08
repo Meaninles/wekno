@@ -17,6 +17,16 @@ func applyAgentRuntimeMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := enableAgentMultimodalDefaults(ctx, db); err != nil {
 		return err
 	}
+	// Keep persisted editor/API configuration aligned with the shared policy.
+	// This changes only the budget, preserving each profile's identity and tools.
+	if err := db.WithContext(ctx).Exec(`UPDATE custom_agents SET config = jsonb_set(config::jsonb, '{max_iterations}',
+        to_jsonb(CASE WHEN config->>'agent_type' = 'knowledge-qa' THEN 15
+                      WHEN config->>'enable_artifacts' = 'true' THEN 100 ELSE 50 END))
+        WHERE deleted_at IS NULL AND (config->>'max_iterations')::integer IS DISTINCT FROM
+            CASE WHEN config->>'agent_type' = 'knowledge-qa' THEN 15
+                 WHEN config->>'enable_artifacts' = 'true' THEN 100 ELSE 50 END`).Error; err != nil {
+		return err
+	}
 	if err := db.WithContext(ctx).Exec(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS error_code varchar(40) NOT NULL DEFAULT ''`).Error; err != nil {
 		return err
 	}

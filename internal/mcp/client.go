@@ -384,9 +384,10 @@ func (c *mcpGoClient) ListTools(ctx context.Context) ([]*types.MCPTool, error) {
 	for i, tool := range result.Tools {
 		data, _ := json.Marshal(tool.InputSchema)
 		tools[i] = &types.MCPTool{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: data,
+			Name:         tool.Name,
+			Description:  tool.Description,
+			InputSchema:  data,
+			ReadOnlyHint: tool.Annotations.ReadOnlyHint,
 		}
 	}
 

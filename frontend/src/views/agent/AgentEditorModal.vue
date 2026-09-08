@@ -841,7 +841,7 @@
                         @click="skillsActiveTab = 'lightweight'">
                         轻量技能
                       </button>
-                      <button v-if="isGeneralRuntimeAgent" type="button" class="skill-type-tab"
+                      <button type="button" class="skill-type-tab"
                         :class="{ active: skillsActiveTab === 'professional' }"
                         @click="skillsActiveTab = 'professional'">
                         专业技能
@@ -892,17 +892,17 @@
                     </div>
                     </div>
 
-                    <div v-show="skillsActiveTab === 'professional' && isGeneralRuntimeAgent">
+                    <div v-show="skillsActiveTab === 'professional'">
                       <div class="setting-row">
                         <div class="setting-info">
                           <label>专业技能选择</label>
-                          <p class="desc">专业技能会以通用智能体专业技能形式加载，仅对通用智能体生效。</p>
+                          <p class="desc">专业技能会以统一 Agent Harness 工作目录中的专业技能形式加载，对所有智能体生效。</p>
                         </div>
                         <div class="setting-control">
                           <t-radio-group v-model="professionalSkillsSelectionMode">
                             <t-radio-button value="all">{{ $t('agent.editor.skillsAll') }}</t-radio-button>
                             <t-radio-button value="selected">{{ $t('agent.editor.skillsSelected') }}</t-radio-button>
-                            <t-radio-button value="none" :disabled="isDocumentProcessingAgent">{{ $t('agent.editor.skillsNone') }}</t-radio-button>
+                            <t-radio-button value="none">{{ $t('agent.editor.skillsNone') }}</t-radio-button>
                           </t-radio-group>
                         </div>
                       </div>
@@ -1065,7 +1065,7 @@
                   </div>
                 </div>
 
-                <!-- 数据源配置（数据分析 / 通用智能体） -->
+                <!-- 数据源配置（数据分析 / 通用智能体 / 知识库管理） -->
                 <div v-show="currentSection === 'database' && canUseDatabaseSources" class="section">
                   <div class="section-header">
                     <h2>数据源</h2>
@@ -1531,7 +1531,7 @@ const mcpOptions = ref<{ label: string; value: string }[]>([]);
 const webSearchProviderList = ref<WebSearchProviderEntity[]>([]);
 const skillOptions = ref<{ name: string; description: string }[]>([]);
 const professionalSkillOptions = ref<{ name: string; description: string }[]>([]);
-// 是否有可用轻量/专业 Skills；轻量技能不依赖沙箱，专业技能仅通用智能体使用。
+// 是否有可用轻量/专业 Skills；两类 Skill 均由统一 Agent Harness 提供给所有 Agent 类型。
 const skillsAvailable = ref(false);
 const professionalSkillsAvailable = ref(false);
 // 存储引擎可用状态（用于图片存储 provider 选择）
@@ -1735,11 +1735,18 @@ const availableTools = computed(() => {
   const scope = scopeCapabilities.value;
   const hasAnyKb = hasKnowledgeBase.value;
   return allTools.value.map(tool => {
+    if (isDocumentProcessingAgent.value && (tool.group === 'data' || tool.group === 'database')) {
+      return {
+        ...tool,
+        disabled: true,
+        disabledReason: '文档处理智能体不使用数据分析工具',
+      };
+    }
     if (tool.group === 'database' && !canUseDatabaseSources.value) {
       return {
         ...tool,
         disabled: true,
-        disabledReason: '仅数据分析、通用智能体或文档处理可用',
+        disabledReason: '仅数据分析、通用智能体或知识库管理可用',
       };
     }
     const { ok, missKind } = evaluateToolRequirement(tool.value, scope, hasAnyKb);
@@ -1874,7 +1881,7 @@ const navItems = computed(() => {
     items.push({ key: 'tools', icon: 'tools', label: t('agent.editor.toolsConfig') });
     items.push({ key: 'mcp', icon: 'server', label: t('agentEditor.mcp.label') });
   }
-  if (isAgentMode.value && !isFixedAnalysisAgent.value && (skillsAvailable.value || (isGeneralRuntimeAgent.value && professionalSkillsAvailable.value))) {
+  if (isAgentMode.value && (skillsAvailable.value || professionalSkillsAvailable.value)) {
     items.push({ key: 'skills', icon: 'lightbulb', label: t('agent.editor.skillsConfig') });
   }
   // 发布（仅编辑模式）
@@ -2162,9 +2169,30 @@ const isGeneralAgent = computed(() => agentType.value === 'general-agent');
 const isDocumentProcessingAgent = computed(() => agentType.value === 'document-processing-agent');
 const isKnowledgeBaseManager = computed(() => agentType.value === 'knowledge-base-manager');
 const isGeneralRuntimeAgent = computed(() => isGeneralAgent.value || isDocumentProcessingAgent.value || isKnowledgeBaseManager.value);
-const canUseDatabaseSources = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
-const iterationBudget = computed(() => agentType.value === 'knowledge-qa' ? 15 : 50);
+const canUseDatabaseSources = computed(() => isDataAnalysisAgent.value || isGeneralAgent.value || isKnowledgeBaseManager.value);
+const iterationBudget = computed(() => agentType.value === 'knowledge-qa' ? 15 :
+  (formData.value.config.enable_artifacts || isFixedAnalysisAgent.value || isDocumentProcessingAgent.value) ? 100 : 50);
 watch(iterationBudget, value => { formData.value.config.max_iterations = value; }, { immediate: true });
+
+const DOCUMENT_PROCESSING_DATA_TOOLS = new Set([
+  'data_analysis',
+  'data_schema',
+  'db_catalog',
+  'db_schema',
+  'db_query',
+  'table_analysis',
+  'table_schema',
+]);
+
+const stripDocumentProcessingDataConfig = (config: Record<string, any>) => {
+  if (config.agent_type !== 'document-processing-agent') return;
+  delete config.db_data_sources;
+  if (Array.isArray(config.allowed_tools)) {
+    config.allowed_tools = config.allowed_tools.filter(
+      (toolName: string) => !DOCUMENT_PROCESSING_DATA_TOOLS.has(toolName),
+    );
+  }
+};
 
 const ensureKnowledgeManagementConfig = (): KnowledgeManagementConfig => {
   const raw = formData.value.config.knowledge_management as KnowledgeManagementConfig | undefined;
@@ -2757,6 +2785,7 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
     target.kb_selection_mode = c.kb_selection_mode;
     kbSelectionMode.value = c.kb_selection_mode;
   }
+  stripDocumentProcessingDataConfig(target);
 };
 
 // 用户手动切换类型 → 应用预设
@@ -2769,12 +2798,14 @@ const onAgentTypeChange = (val: AgentType) => {
   agentType.value = val;
   const preset = agentTypePresets.value.find(p => p.id === val) || null;
   applyAgentTypePreset(preset);
-  if (!['general-agent', 'data-analysis', 'document-processing-agent', 'knowledge-base-manager'].includes(val)) {
+  if (val === 'document-processing-agent') {
+    stripDocumentProcessingDataConfig(formData.value.config);
+  } else if (!['general-agent', 'data-analysis', 'knowledge-base-manager'].includes(val)) {
     formData.value.config.db_data_sources = [];
   }
   if (val !== 'document-processing-agent') delete formData.value.config.document_template;
   if (val !== 'knowledge-base-manager') delete formData.value.config.knowledge_management;
-  formData.value.config.max_iterations = val === 'knowledge-qa' ? 15 : 50;
+  formData.value.config.max_iterations = iterationBudget.value;
 
   // 用新预设的默认名/描述刷新自动填充字段
   if (canOverrideName) {
@@ -2823,6 +2854,7 @@ const normalizeAgentFormData = (agent: CustomAgent) => {
   if (!agentData.config.knowledge_bases) agentData.config.knowledge_bases = [];
   if (!agentData.config.db_data_sources) agentData.config.db_data_sources = [];
   if (!agentData.config.allowed_tools) agentData.config.allowed_tools = [];
+  stripDocumentProcessingDataConfig(agentData.config);
   if (!agentData.config.mcp_services) agentData.config.mcp_services = [];
   if (agentData.config.mcp_auth_wait_timeout == null || agentData.config.mcp_auth_wait_timeout <= 0) {
     agentData.config.mcp_auth_wait_timeout = 600;
@@ -3012,9 +3044,6 @@ const initSkillsSelectionMode = () => {
   } else {
     professionalSkillsSelectionMode.value = 'none';
   }
-  if (!isGeneralRuntimeAgent.value && skillsActiveTab.value === 'professional') {
-    skillsActiveTab.value = 'lightweight';
-  }
 };
 
 // 内置智能体：填入系统默认值
@@ -3092,15 +3121,6 @@ watch(professionalSkillsSelectionMode, (mode) => {
   formData.value.config.professional_skills_selection_mode = mode;
   if (mode === 'none' || mode === 'all') {
     formData.value.config.selected_professional_skills = [];
-  }
-});
-
-watch(isGeneralRuntimeAgent, (enabled) => {
-  if (!enabled) {
-    if (skillsActiveTab.value === 'professional') {
-      skillsActiveTab.value = 'lightweight';
-    }
-    professionalSkillsSelectionMode.value = 'none';
   }
 });
 

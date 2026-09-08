@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import time
+import httpx
 from typing import Any
 
 from agentscope.middleware import MiddlewareBase
@@ -30,6 +31,28 @@ def final_decision(message):
     return message.model_copy(update={"content": content})
 
 
+def normalize_failed_tool_arguments(state):
+    """Keep failed calls replayable through strict provider chat templates.
+
+    Raw malformed arguments belong to failure metadata. The historical call
+    keeps its identity and failed result, with an empty JSON object on the wire.
+    This never repairs or executes a tool, or changes successful tool inputs.
+    """
+    failures = {block.id: block for message in state.context for block in message.content
+                if isinstance(block, ToolResultBlock) and str(block.state) == "error"}
+    for message in state.context:
+        for block in message.content:
+            if not isinstance(block, ToolCallBlock) or block.id not in failures:
+                continue
+            try:
+                valid = isinstance(json.loads(block.input), dict)
+            except (ValueError, TypeError):
+                valid = False
+            if not valid:
+                failures[block.id].metadata["invalid_arguments"] = block.input
+                block.input = "{}"
+
+
 def restore(checkpoint: dict[str, Any] | None, run_id: str) -> AgentState:
     if checkpoint is None:
         return AgentState(session_id=run_id)
@@ -43,6 +66,7 @@ class Lifecycle(MiddlewareBase):
         self.control = control
         self.lock = asyncio.Lock()
         self.events = None
+        self.workspace = None
         self.resume_boundary = (control.payload.checkpoint or {}).get("boundary")
         self.checkpoint_seq = (control.payload.checkpoint or {}).get("checkpoint_seq", 0)
 
@@ -71,6 +95,7 @@ class Lifecycle(MiddlewareBase):
                 return
         # At entry the previous complete tool batch has been merged. At exit
         # the new model decision is saved by the SDK, before tools execute.
+        normalize_failed_tool_arguments(agent.state)
         await self.save(agent, "before_reasoning")
         async for item in next_handler(**input_kwargs):
             yield item
@@ -82,11 +107,37 @@ class Lifecycle(MiddlewareBase):
         local = call.name not in {tool.name for tool in self.control.payload.tools}
         started = time.monotonic()
         try:
+            try:
+                arguments = json.loads(call.input) if isinstance(call.input, str) else call.input
+                if not isinstance(arguments, dict):
+                    arguments = None
+            except (ValueError, TypeError):
+                arguments = None
+
+            async def responses():
+                if arguments is None:
+                    # Malformed model output is a recoverable tool error, not
+                    # a lifecycle failure. Do not guess or repair mutation args.
+                    yield ToolResponse(id=call.id, state="error", content=[TextBlock(text=
+                        "Tool arguments must be a complete JSON object. No tool was executed. "
+                        "Submit a complete, smaller tool call within the remaining budget.")])
+                    return
+                if local and self.workspace is not None:
+                    try:
+                        await self.workspace.prepare_tool(call.name, arguments)
+                    except (OSError, ValueError, httpx.HTTPError):
+                        yield ToolResponse(id=call.id, state="error", content=[TextBlock(text=
+                            "Required workspace input could not be prepared or failed its integrity check. "
+                            "No tool was executed. Use other available sources or report the missing input.")])
+                        return
+                async for response in next_handler(**input_kwargs):
+                    yield response
+
             if local:
                 await self.events.push(RunEvent(type="local_tool_start", id=call.id, data={
                     "tool_call_id": call.id, "tool_name": call.name,
-                    "arguments": json.loads(call.input) if isinstance(call.input, str) else call.input}), flush=True)
-            async for item in next_handler(**input_kwargs):
+                    "arguments": arguments or {}}), flush=True)
+            async for item in responses():
                 if local and isinstance(item, ToolResponse):
                     output = "\n".join(block.text for block in item.content if isinstance(block, TextBlock))[:50000]
                     await self.events.push(RunEvent(type="local_tool_result", id=call.id, data={
@@ -94,6 +145,8 @@ class Lifecycle(MiddlewareBase):
                         "success": str(item.state) == "success", "duration": int((time.monotonic()-started)*1000)}), flush=True)
                 yield item
         finally:
+            if local and self.workspace is not None:
+                self.workspace.tool_finished(call.name)
             # SDK cancellation can finalize an async generator in a separate
             # context. Its context dies with that task; never mask the error.
             with contextlib.suppress(ValueError):

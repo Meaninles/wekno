@@ -391,6 +391,7 @@ func NewHandlers(
 	appservice.RegisterModelMutationGuard(derivativeControlService.GuardModelMutation)
 	appservice.RegisterKnowledgeBaseModelPolicy(derivativeControlService.ValidateKnowledgeBase)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
+	handler.RegisterMessageClientEnricher(agentRuntimeService.EnrichMessageArtifacts)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
 	sessionhandler.RegisterChatQueueAdmissionHook(chatQueueManager.Admit)
 	appservice.RegisterRuntimeToolRecognizer(func(_ context.Context, config *types.AgentConfig, toolName string) bool {
@@ -545,7 +546,7 @@ func customMigrationsEnabled() bool {
 
 func supportsDBAnalyticsRuntimeTools(agentType string) bool {
 	return agentType == types.AgentTypeDataAnalysis || agentType == types.AgentTypeGeneralAgent ||
-		agentType == types.AgentTypeDocumentProcessingAgent || agentType == types.AgentTypeKnowledgeBaseManager
+		agentType == types.AgentTypeKnowledgeBaseManager
 }
 
 func runtimeHasPermission(scope *types.KnowledgeManagementRuntimeScope, permission string) bool {

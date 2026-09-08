@@ -20,6 +20,8 @@ import (
 )
 
 type controlRequest struct {
+	OutputBaseline       json.RawMessage `json:"output_baseline"`
+	Finalization         bool            `json:"finalization"`
 	ModelRole            string          `json:"model_role"`
 	EstimatedInputTokens int64           `json:"estimated_input_tokens"`
 	MaxOutputTokens      int64           `json:"max_output_tokens"`
@@ -53,6 +55,26 @@ func (h *Handler) RunControl(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	op := c.Param("operation")
+	if op == "budget" {
+		var budget BudgetState
+		err := h.service.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			row, err := lockRun(tx, req.RunID)
+			if err != nil {
+				return err
+			}
+			if err = owned(row, req.OwnerEpoch); err != nil {
+				return err
+			}
+			budget, err = modelBudget(tx, row, req.ModelRole)
+			return err
+		})
+		if err != nil {
+			controlFailure(c, err)
+			return
+		}
+		c.JSON(200, budget)
+		return
+	}
 	if op == "status" {
 		var row RunRecord
 		if err := h.service.db.WithContext(ctx).Select("id", "status", "owner_epoch").First(&row, "id = ?", req.RunID).Error; err != nil {
@@ -87,24 +109,6 @@ func (h *Handler) RunControl(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 		return
 	}
-	if op == "prefetch" || op == "reuse-evidence" {
-		if op == "reuse-evidence" {
-			result, err := h.service.reuseEvidence(ctx, req.RunID, req.OwnerEpoch)
-			if err != nil {
-				controlFailure(c, err)
-				return
-			}
-			c.JSON(200, result)
-			return
-		}
-		result, err := h.service.prefetch(ctx, req.RunID, req.OwnerEpoch)
-		if err != nil {
-			controlFailure(c, err)
-			return
-		}
-		c.JSON(200, result)
-		return
-	}
 	err := h.service.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		row, err := lockRun(tx, req.RunID)
 		if err != nil {
@@ -112,7 +116,7 @@ func (h *Handler) RunControl(c *gin.Context) {
 		}
 		// Completion is idempotent after a lost acknowledgement, but never permits
 		// a different worker or candidate to replace an already committed result.
-		if op == "commit" && row.Status == "completed" && row.OwnerEpoch == req.OwnerEpoch {
+		if op == "commit" && (row.Status == "completed" || row.Status == "incomplete") && row.OwnerEpoch == req.OwnerEpoch {
 			var prior ChatResult
 			if err = json.Unmarshal(row.Result, &prior); err != nil {
 				return err
@@ -123,10 +127,36 @@ func (h *Handler) RunControl(c *gin.Context) {
 			req.Result = prior
 			return nil
 		}
-		if err = owned(row, req.OwnerEpoch); err != nil {
+		if op == "finalize" {
+			if row.OwnerEpoch != req.OwnerEpoch || req.OwnerEpoch < 1 || !row.LeaseUntil.After(time.Now()) {
+				return errRunFenced
+			}
+			if row.Status == "finalizing" {
+				return nil
+			}
+			if row.Status != "running" {
+				return errRunFenced
+			}
+			return beginFinalization(tx, row, Finalization{Result: req.Result, Error: req.Error, ErrorCode: req.ErrorCode})
+		}
+		if row.Status == "finalizing" && (op == "heartbeat" || op == "commit" || op == "validate" || op == "fail") {
+			err = ownedDelivery(row, req.OwnerEpoch)
+		} else {
+			err = owned(row, req.OwnerEpoch)
+		}
+		if err != nil {
 			return err
 		}
 		switch op {
+		case "baseline":
+			var baseline map[string]string
+			if json.Unmarshal(req.OutputBaseline, &baseline) != nil || baseline == nil {
+				return fmt.Errorf("invalid output baseline")
+			}
+			if len(row.OutputBaseline) == 0 {
+				row.OutputBaseline = req.OutputBaseline
+			}
+			req.OutputBaseline = row.OutputBaseline
 		case "heartbeat":
 			row.LeaseUntil = time.Now().Add(runLease)
 		case "fail":
@@ -184,6 +214,10 @@ func (h *Handler) RunControl(c *gin.Context) {
 		c.JSON(200, gin.H{"result": req.Result})
 		return
 	}
+	if op == "baseline" {
+		c.JSON(200, gin.H{"output_baseline": req.OutputBaseline})
+		return
+	}
 	c.JSON(200, gin.H{"ok": true})
 }
 
@@ -221,6 +255,14 @@ func (s *Service) validateResult(ctx context.Context, tx *gorm.DB, row *RunRecor
 	return violations, nil
 }
 func commitResult(tx *gorm.DB, row *RunRecord, result *ChatResult) error {
+	if result.Status == "incomplete" {
+		return storeResult(tx, row, result, "incomplete")
+	}
+	return storeResult(tx, row, result, "completed")
+}
+
+func storeResult(tx *gorm.DB, row *RunRecord, result *ChatResult, status string) error {
+	result.Status = status
 	body, err := json.Marshal(result)
 	if err != nil {
 		return err
@@ -248,7 +290,7 @@ func commitResult(tx *gorm.DB, row *RunRecord, result *ChatResult) error {
 	if update.RowsAffected != 1 {
 		return fmt.Errorf("assistant message unavailable at commit")
 	}
-	row.Status, row.Result = "completed", body
+	row.Status, row.Result = status, body
 	if err = outbox(tx, row, StreamEvent{Type: "result", Data: body, Done: true}); err != nil {
 		return err
 	}
@@ -281,7 +323,7 @@ func (h *Handler) ModelLease(c *gin.Context) {
 	defer cancel()
 	row, err := h.service.ownedRun(ctx, req.RunID, req.OwnerEpoch)
 	if err != nil {
-		_ = ws.WriteJSON(gin.H{"error": "run fenced"})
+		_ = ws.WriteJSON(gin.H{"code": "ownership_lost", "error": "run fenced"})
 		return
 	}
 	var scope RunScope
@@ -339,9 +381,18 @@ func (h *Handler) ModelLease(c *gin.Context) {
 		return
 	}
 	defer lease.Release()
-	call, err := h.service.reserveModelRequest(ctx, row.ID, req.OwnerEpoch, req.ModelRole, req.EstimatedInputTokens, req.MaxOutputTokens)
+	call, err := h.service.reserveModelRequest(ctx, row.ID, req.OwnerEpoch, req.ModelRole, req.EstimatedInputTokens, req.MaxOutputTokens, req.Finalization)
 	if err != nil {
-		_ = ws.WriteJSON(gin.H{"error": "run model request budget exhausted or ownership lost"})
+		code, message := "control_unavailable", "Run budget service unavailable"
+		switch {
+		case errors.Is(err, errFinalizationRequired):
+			code, message = "finalization_required", errFinalizationRequired.Error()
+		case errors.Is(err, errModelBudget):
+			code, message = "task_limit", errModelBudget.Error()
+		case errors.Is(err, errRunFenced):
+			code, message = "ownership_lost", "Run ownership lost"
+		}
+		_ = ws.WriteJSON(gin.H{"code": code, "error": message})
 		return
 	}
 	accounted := false
@@ -434,15 +485,20 @@ func (s *Service) replayRun(ctx context.Context, initial *RunRecord, bus *event.
 					return err
 				}
 				bus.Emit(ctx, event.Event{ID: initial.MessageID, Type: event.EventAgentFinalAnswer, SessionID: initial.SessionID, Data: event.AgentFinalAnswerData{Content: result.Answer, Replace: true, Revision: revision + 1, Done: true}})
-				bus.Emit(ctx, event.Event{Type: event.EventAgentComplete, SessionID: initial.SessionID, Data: event.AgentCompleteData{SessionID: initial.SessionID, MessageID: initial.MessageID, FinalAnswer: result.Answer, KnowledgeRefs: result.References, KnowledgeRefsAuthoritative: true, AgentSteps: steps, TotalSteps: len(steps), TotalDurationMs: time.Since(initial.CreatedAt).Milliseconds()}})
+				bus.Emit(ctx, event.Event{Type: event.EventAgentComplete, SessionID: initial.SessionID, Data: event.AgentCompleteData{SessionID: initial.SessionID, MessageID: initial.MessageID, FinalAnswer: result.Answer, KnowledgeRefs: result.References, KnowledgeRefsAuthoritative: true, AgentSteps: steps, TotalSteps: len(steps), TotalDurationMs: time.Since(initial.CreatedAt).Milliseconds(), Extra: map[string]interface{}{"status": result.Status, "failure_code": result.FailureCode, "artifacts": result.Artifacts, "artifact_notice": result.ArtifactNotice}}})
 				return nil
 			}
 		}
 		var row RunRecord
-		if err := s.db.WithContext(ctx).Select("status", "error", "error_code").First(&row, "id = ?", initial.ID).Error; err != nil {
+		if err := s.db.WithContext(ctx).Select("status", "error", "error_code", "result").First(&row, "id = ?", initial.ID).Error; err != nil {
 			return err
 		}
 		if row.Status == "failed" || row.Status == "cancelled" || row.Status == "incomplete" {
+			// A terminal result and status are committed atomically. Drain its
+			// outbox even if this reader's previous page preceded that commit.
+			if len(row.Result) > 0 {
+				continue
+			}
 			return errors.New(usererrors.Classify(row.ErrorCode, row.Error).Message)
 		}
 		select {

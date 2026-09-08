@@ -147,3 +147,21 @@ func BenchmarkRenderFinalOutbound(b *testing.B) {
 		_ = service.RenderFinalOutbound(context.Background(), answer, refs, nil, PlatformWeCom, true)
 	}
 }
+
+func TestRenderFinalOutboundAppendsStructuredArtifactsOnlyAtIMBoundary(t *testing.T) {
+	service := &Service{frontendBaseURL: "https://weknora.example.com"}
+	files := []types.MessageArtifact{{ArtifactID: "file", FileName: "result.html", DownloadURL: "/api/v1/custom/agent-runtime/artifacts/file/download"}}
+	raw := "完成"
+	for _, platform := range []Platform{PlatformWeCom, PlatformFeishu, PlatformSlack} {
+		result := service.RenderFinalOutbound(context.Background(), raw, nil, nil, platform, false, files)
+		if !strings.Contains(result.Content, "result.html") || !strings.Contains(result.Content, "https://weknora.example.com/api/v1/custom/agent-runtime/artifacts/file/download") {
+			t.Fatal(result.Content)
+		}
+	}
+	if raw != "完成" {
+		t.Fatal("canonical prose changed")
+	}
+	if service.RenderFinalOutbound(context.Background(), raw, nil, nil, PlatformWeCom, false).Content != raw {
+		t.Fatal("ordinary answer changed")
+	}
+}

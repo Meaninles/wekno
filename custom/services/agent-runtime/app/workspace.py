@@ -29,7 +29,6 @@ from agentscope.tool import BackendBase, ExecResult, Glob, ToolBase, ToolChunk
 from agentscope.workspace import WorkspaceBase
 
 from .tools import invocation_id
-from .artifact_validation import validate_artifact
 
 
 def safe_path(path: str) -> str:
@@ -216,6 +215,9 @@ class RuntimeWorkspace(WorkspaceBase):
         self.skills=[]
         self.offloader=self
         self.payload,self.control=payload,control
+        self.pending_files = {}
+        self.prepare_lock = asyncio.Lock()
+        self.output_revision = 0
 
     async def initialize(self):
         # Provision lazily for plain QA: no container startup on its critical
@@ -223,38 +225,29 @@ class RuntimeWorkspace(WorkspaceBase):
         self.is_alive=True
         self.tools=await self.list_tools()
         self.tools=[WorkspaceGlob(self.get_backend()) if tool.name == "Glob" else tool for tool in self.tools]
+        from .file_context import WorkspaceEdit, WorkspaceWrite
+        file_tools = {"Write": WorkspaceWrite, "Edit": WorkspaceEdit}
+        self.tools=[file_tools[tool.name](backend=self.get_backend()) if tool.name in file_tools else tool for tool in self.tools]
         if not self.payload.enable_artifacts:
             self.tools=[tool for tool in self.tools if tool.is_read_only]
-        else:
-            self.tools.append(PublishArtifact(self))
         instructions=[]
-        staged_files=[]
         image_inputs=[]
-        backend=self.get_backend()
         for spec in self.payload.original_input_files:
-            content=bytearray()
-            async with self.control.client.stream("GET",spec.download_url,timeout=120) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    content.extend(chunk)
-                    if len(content)>128*1024**2:
-                        raise ValueError("Original input exceeds 128 MiB")
-            content=bytes(content)
-            if len(content)!=spec.file_size or hashlib.sha256(content).hexdigest()!=spec.sha256:
-                raise ValueError("Original input integrity verification failed")
             path=safe_path("inputs/"+spec.id+"/"+PurePosixPath(spec.file_name.replace("\\","/")).name)
+            self.pending_files[path] = spec
+            instructions.append({"input_id":spec.id,"path":path,"role":spec.role,"sha256":spec.sha256,
+                                 "knowledge_id":spec.knowledge_id,"knowledge_base_id":spec.knowledge_base_id})
             media_type=mimetypes.guess_type(spec.file_name)[0] or "application/octet-stream"
-            if media_type.startswith("image/"):
+            # Current user images are necessary evidence, unlike unused files.
+            if media_type.startswith("image/") and spec.source == "weknora_chat_image_original":
+                content = await self.input_bytes(spec)
                 image_inputs.append("data:"+media_type+";base64,"+base64.b64encode(content).decode())
-            if self.payload.enable_artifacts or spec.source != "weknora_chat_image_original":
-                staged_files.append((path,content))
-                instructions.append({"input_id":spec.id,"path":path,"role":spec.role,"sha256":spec.sha256,
-                                     "knowledge_id":spec.knowledge_id,"knowledge_base_id":spec.knowledge_base_id})
+                self.pending_files[path] = content
         if image_inputs:
             self.payload.image_urls=list(dict.fromkeys([*self.payload.image_urls,*image_inputs]))
         for index,spec in enumerate(self.payload.document_template_context.files):
             path=safe_path(f"templates/{index}/"+PurePosixPath(spec.file_name.replace("\\","/")).name)
-            staged_files.append((path,base64.b64decode(spec.content_base64,validate=True)))
+            self.pending_files[path] = base64.b64decode(spec.content_base64,validate=True)
             instructions.append({"template_variable":spec.variable,"role":spec.role,"path":path})
         for spec in self.payload.professional_skills:
             directory=safe_path("skills/"+spec.name)
@@ -263,12 +256,10 @@ class RuntimeWorkspace(WorkspaceBase):
                 path=safe_path(posixpath.join(directory,item.path))
                 if not path.startswith(directory+"/"):raise ValueError("Skill package path escapes its directory")
                 content=base64.b64decode(item.content_base64,validate=True)
-                staged_files.append((path,content))
+                self.pending_files[path] = content
                 if item.path=="SKILL.md":markdown=content.decode()
             if not markdown:raise ValueError("Professional skill has no SKILL.md")
             self.skills.append(Skill(name=spec.name,description=spec.description,dir=directory,markdown=markdown,updated_at=time.time()))
-        if staged_files:
-            await backend.write_files(staged_files)
         # Lightweight instructions selected for the current request are facts
         # about capabilities, not a second dynamic prompt/router model.
         prompt={"workspace":"/workspace","files":instructions,"visible_context":self.payload.visible_context,
@@ -279,8 +270,50 @@ class RuntimeWorkspace(WorkspaceBase):
             self.payload.system_prompt += "\nWorkspace capability: read supplied input files as source material."
         self.payload.system_prompt += "\nGround factual claims in the sources actually inspected. A search with no relevant result establishes only that this search found no evidence; it does not establish that a rule or document does not exist. Distinguish explicit provisions from your interpretation. For findings from original files, reuse an existing matching citation handle. If none is available, use list_knowledge_chunks with the file's knowledge_id to obtain the relevant citable excerpt; do not invent source handles or cite a fragment that does not support the finding. Internal conversation metadata is not part of the user-facing answer."
         if self.payload.enable_artifacts:
-            self.payload.system_prompt += "\nFiles are delivered only through publish_artifact, which returns a persistent download link."
+            self.payload.system_prompt += "\nSave finished deliverables in /workspace/outputs. Keep scripts, previews and temporary files elsewhere."
             self.payload.system_prompt += ("\nWorkspace capabilities are already provisioned: Python with openpyxl, xlsxwriter, pandas, python-docx, python-pptx, PyMuPDF, Pillow and matplotlib; Node with pptxgenjs; LibreOffice, pandoc and PDF utilities with CJK fonts. Do not probe or install these dependencies. Combine creation and meaningful validation in one script when their inputs are known. For spreadsheets, verify formulas and recalculate with LibreOffice before publishing if computed values are needed. Use /workspace/outputs for deliverables.")
+
+    async def input_bytes(self, spec):
+        content=bytearray()
+        async with self.control.client.stream("GET",spec.download_url,timeout=120) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk)
+                if len(content)>128*1024**2:
+                    raise ValueError("Original input exceeds 128 MiB")
+        content=bytes(content)
+        if len(content)!=spec.file_size or hashlib.sha256(content).hexdigest()!=spec.sha256:
+            raise ValueError("Original input integrity verification failed")
+        return content
+
+    async def prepare_tool(self, name, arguments):
+        tool = next((tool for tool in self.tools if tool.name == name), None)
+        if tool is None:
+            return
+        async with self.prepare_lock:
+            if not tool.is_read_only:
+                from .artifact_delivery import capture_baseline
+                await capture_baseline(self.payload, self.control, self)
+            # A shell can access arbitrary files. Path-based tools only need
+            # their selected file/subtree. No intent model or keyword router.
+            path = arguments.get("file_path") or arguments.get("path")
+            target = safe_path(path) if isinstance(path, str) else None
+            paths = [p for p in self.pending_files if target is None or p == target or p.startswith(target.rstrip("/")+"/")]
+            for path in paths:
+                value = self.pending_files[path]
+                # On recovery a run may already have edited a supplied file.
+                # Never replace that current file with its original contents.
+                try:
+                    await self.get_backend().read_file(path)
+                except OSError:
+                    content = value if isinstance(value, bytes) else await self.input_bytes(value)
+                    await self.get_backend().write_file(path, content)
+                self.pending_files.pop(path)
+
+    def tool_finished(self, name):
+        tool = next((tool for tool in self.tools if tool.name == name), None)
+        if tool is not None and not tool.is_read_only:
+            self.output_revision += 1
 
     async def close(self):
         await self.get_backend().close()
@@ -289,42 +322,13 @@ class RuntimeWorkspace(WorkspaceBase):
         return "Each run has an isolated workspace at /workspace. Use /workspace/outputs for deliverables."
 
 
-class PublishArtifact(ToolBase):
-    def __init__(self,workspace):
-        super().__init__()
-        self.workspace=workspace
-        self.name="publish_artifact"
-        self.description="Persist a finished workspace file and return its verified private download link."
-        self.input_schema={"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":False}
-        self.is_read_only=False
-        self.is_concurrency_safe=True
-
-    async def check_permissions(self,tool_input,context):
-        return PermissionDecision(behavior=PermissionBehavior.ALLOW,message="Authorized isolated run artifact")
-
-    async def call(self,path):
-        from agentscope.message import ToolResultState
-        p=self.workspace.payload
-        content=await self.workspace.get_backend().read_file(path)
-        name=PurePosixPath(path).name
-        content_type=validate_artifact(name,content)
-        sha=hashlib.sha256(content).hexdigest()
-        metadata={"tenant_id":p.tenant_id,"user_id":p.user_id,"session_id":p.session_id,"assistant_message_id":p.assistant_message_id,
-                  "run_id":p.run_id,"owner_epoch":p.owner_epoch,"file_token":str(uuid.uuid5(uuid.NAMESPACE_URL,p.run_id+":"+name+":"+sha)),
-                  "filename":name,"file_type":PurePosixPath(name).suffix.lstrip("."),"file_size":len(content),"sha256":sha,
-                  "content_type":content_type}
-        encoded=base64.urlsafe_b64encode(json.dumps(metadata).encode()).decode().rstrip("=")
-        response=await self.workspace.control.client.post(p.artifact_upload_url,content=content,
-                    headers={"Authorization":"Bearer "+p.tool_callback_api_key,"X-WeKnora-Artifact-Metadata":encoded},timeout=120)
-        response.raise_for_status()
-        return ToolChunk(content=[TextBlock(text=json.dumps(response.json(),ensure_ascii=False))],state=ToolResultState.SUCCESS)
-
 
 @asynccontextmanager
 async def workspace_for(payload,control):
     workspace=RuntimeWorkspace(payload,control)
     try:
-        await workspace.initialize()
+        if payload.finalization is None:
+            await workspace.initialize()
         yield workspace
     finally:
         await workspace.close()

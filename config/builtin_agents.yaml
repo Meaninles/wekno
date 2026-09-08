@@ -76,7 +76,7 @@ builtin_agents:
     thinking: true
     temperature: 0.2
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     kb_selection_mode: all
     retrieve_kb_only_when_mentioned: false
@@ -133,7 +133,7 @@ builtin_agents:
     thinking: true
     temperature: 0.2
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     kb_selection_mode: all
     retrieve_kb_only_when_mentioned: false
@@ -192,7 +192,7 @@ builtin_agents:
     thinking: true
     temperature: 0.0
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     kb_selection_mode: all
     retrieve_kb_only_when_mentioned: false
@@ -291,11 +291,10 @@ builtin_agents:
     - find-skill-skillhub
     temperature: 0.4
     max_completion_tokens: 16384
-    max_iterations: 50
+    max_iterations: 100
     llm_call_timeout: 600
     kb_selection_mode: all
     retrieve_kb_only_when_mentioned: false
-    db_data_sources: []
     allowed_tools:
     - thinking
     - todo_write
@@ -307,11 +306,6 @@ builtin_agents:
     - wiki_search
     - wiki_read_page
     - wiki_read_source_doc
-    - data_schema
-    - data_analysis
-    - db_catalog
-    - db_schema
-    - db_query
     web_search_enabled: false
     web_search_max_results: 5
     web_fetch_enabled: true

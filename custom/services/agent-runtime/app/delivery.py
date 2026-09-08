@@ -6,7 +6,7 @@ import time
 import asyncio
 
 from agentscope.event import ReplyEndEvent
-from agentscope.message import Msg, TextBlock
+from agentscope.message import TextBlock
 from agentscope.middleware import MiddlewareBase
 from agentscope.types import ReplyFinishedReason
 
@@ -51,25 +51,6 @@ class Delivery(MiddlewareBase):
                       if candidate is not None else "")
             result = RunResult(run_id=self.control.payload.run_id, answer=answer,
                                timings={"runtime_ms": (time.monotonic() - self.started) * 1000})
-            validation = await self.control.validate(result.model_dump(mode="json"))
-            violations = validation.get("violations") or []
-            if violations:
-                if agent.state.cur_iter >= self.control.payload.runtime_config.max_iterations:
-                    raise BudgetExhausted("Iteration budget exhausted without a validated final answer: " + json.dumps(violations))
-                signature = json.dumps(violations, ensure_ascii=False, sort_keys=True)
-                attempts = agent.state.middle_context.setdefault("delivery_violations", [])
-                if signature in attempts or len(attempts) >= 2:
-                    raise DeliveryError("Delivery requirements could not be satisfied: " + signature)
-                attempts.append(signature)
-                agent.state.context.append(Msg(name="delivery", role="user", content=[TextBlock(
-                    text="Internal delivery validation feedback, not a user message. Revise the final answer to resolve these errors. Do not quote this feedback, blame the user, describe internal source handles, or add an apology about validation: " + signature)]))
-                await self.lifecycle.save(agent, "delivery_feedback")
-                # Suppress the end event: the SDK continues this same reply.
-                continue
-            result = RunResult.model_validate(validation.get("result") or result.model_dump())
             await self.lifecycle.save(agent, "before_commit")
-            if self.events:
-                await self.events.flush()
-            committed = await self.control.commit(result.model_dump(mode="json"))
-            self.result = RunResult.model_validate(committed.get("result") or result.model_dump())
+            self.result = result
             yield item

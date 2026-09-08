@@ -11,7 +11,7 @@ from agentscope.model import ChatModelBase
 from agentscope.permission import PermissionMode
 from agentscope.tool import ToolBase, Toolkit
 
-from .context import EvidencePrefetch, messages, system_prompt
+from .context import messages, system_prompt
 from .contracts import RunRequest, RunResult
 from .control import Control
 from .delivery import Delivery, DeliveryError
@@ -20,12 +20,15 @@ from .state import Lifecycle, restore
 from .tools import BusinessTool
 from .vision import Vision
 from .budget import IterationBudget
+from .artifact_delivery import OutputPresentation
+from .context_projection import ContextProjection
 
 
 async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
                   *, extra_tools: Sequence[ToolBase] = (), skills=(), offloader=None) -> RunResult:
     """Run once through the SDK; recovery enters here with the same durable state."""
     lifecycle = Lifecycle(control)
+    lifecycle.workspace = offloader if hasattr(offloader, "prepare_tool") else None
     delivery = Delivery(control, lifecycle)
     events = Events(control)
     lifecycle.events = events
@@ -37,14 +40,18 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
     # Workspace commands run in a dedicated restricted container. Business
     # mutations still pass through Go's live approval and authorization gates.
     state.permission_context.mode = PermissionMode.BYPASS
-    toolkit = Toolkit(tools=[BusinessTool(spec, control) for spec in payload.tools] + list(extra_tools),
+    data_backend = (offloader.get_backend() if payload.enable_artifacts
+                    and payload.runtime_config.agent_type != "knowledge-qa"
+                    and offloader is not None and hasattr(offloader, "get_backend") else None)
+    concurrency = asyncio.Semaphore(4)
+    toolkit = Toolkit(tools=[BusinessTool(spec, control, data_backend, concurrency) for spec in payload.tools] + list(extra_tools),
                       skills_or_loaders=skills or None)
     agent = Agent(
         name="weknora", system_prompt=system_prompt(payload), model=model,
         toolkit=toolkit, state=state, offloader=offloader,
-        middlewares=[Vision(control), EvidencePrefetch(control), IterationBudget(payload.runtime_config.max_iterations), lifecycle, delivery],
+        middlewares=[ContextProjection(data_backend), OutputPresentation(payload, offloader), Vision(control), IterationBudget(payload.runtime_config.max_iterations, control), lifecycle, delivery],
         model_config=ModelConfig(max_retries=0, fallback_model=None),
-        context_config=ContextConfig(),
+        context_config=ContextConfig(tool_result_limit=4096),
         # SDK grants one final text decision after max_iters. Count that call
         # inside our public budget instead of silently exceeding it.
         react_config=ReActConfig(max_iters=payload.runtime_config.max_iterations - 1,
@@ -75,7 +82,7 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
                 await stream.aclose()
             await events.flush()
         if delivery.result is None:
-            raise DeliveryError("SDK ended without a committed result")
+            raise DeliveryError("SDK ended without a final candidate")
         return delivery.result
     finally:
         pump.cancel()

@@ -528,6 +528,7 @@
 </template>
 
 <script setup lang="ts">
+import { artifactResultForMessage } from "@/custom/modules/generalagent/messageArtifacts";
 import { publicFailure } from '@/custom/modules/failures/failures';
 import FailureNotice from '@/custom/modules/failures/FailureNotice.vue';
 import { ref, computed, watch, onMounted, onBeforeUnmount, onUpdated, nextTick } from 'vue';
@@ -971,6 +972,8 @@ interface SessionData {
   is_completed?: boolean;
   agentEventStream?: any[];
   tool_results?: any[];
+  artifacts?: unknown;
+  artifact_notice?: string;
   knowledge_references?: any[];
   retrieval_stats?: {
     attempted?: boolean;
@@ -1867,40 +1870,9 @@ const structuredChartInfos = computed<StructuredChartInfo[]>(() => (
 ));
 
 const generalAgentArtifactResults = computed<PromotedResultBlock[]>(() => {
-  const stream = eventStream.value;
-  if (!stream || !Array.isArray(stream)) return [];
-  const result = buildFullEventList(stream);
-  const completedResults = result
-    .filter((event: any) =>
-      event?.type === 'tool_call' &&
-      event.pending !== true &&
-      event.success !== false &&
-      event.display_type === 'general_agent_artifacts' &&
-      (
-        (Array.isArray(event.tool_data?.artifacts) && event.tool_data.artifacts.length > 0) ||
-        !!event.tool_data?.notice
-      )
-    );
-  const latest = completedResults[completedResults.length - 1];
-  if (!latest) return [];
-  // Each real create_artifact call delivers one file. Keep every filename's
-  // latest successful version; a failed replacement cannot hide a ready file.
-  const files = new Map<string, Record<string, any>>();
-  for (const event of completedResults) {
-    for (const file of event.tool_data?.artifacts || []) {
-      files.set(file.filename || file.artifact_id, file);
-    }
-  }
-  const artifacts = [...files.values()];
-  return [{
-    display_type: 'general_agent_artifacts',
-    tool_data: { ...latest.tool_data, artifacts,
-      artifact_returned_count: artifacts.length,
-      artifact_returned_size: artifacts.reduce((total, file) => total + (file.file_size || 0), 0),
-    },
-    output: latest.output,
-    arguments: latest.arguments,
-  }];
+  if (props.shareMode) return [];
+  const data = artifactResultForMessage(props.session);
+  return data ? [{ display_type: 'general_agent_artifacts', tool_data: data }] : [];
 });
 
 const completedAnswerMarkdown = computed(() => {

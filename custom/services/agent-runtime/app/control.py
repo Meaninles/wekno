@@ -19,6 +19,16 @@ class ControlUnavailable(ControlError):
     pass
 
 
+def control_cause(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ControlError):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
 class Control:
     def __init__(self, payload: RunRequest, client: httpx.AsyncClient):
         self.payload = payload
@@ -57,6 +67,9 @@ class Control:
 
     async def checkpoint(self, state: dict[str, Any], *, boundary: str) -> None:
         await self.post("runs/checkpoint", checkpoint=state, boundary=boundary)
+
+    async def budget(self, role="") -> dict[str, Any]:
+        return await self.post("runs/budget", model_role=role)
 
     async def events(self, events: list[dict[str, Any]]) -> None:
         await self.post("runs/events", events=events)

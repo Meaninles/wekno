@@ -106,7 +106,7 @@ def pod_spec(payload, key):
     mounts = [{"name":"workspace", "mountPath":"/workspace"}, {"name":"receipts", "mountPath":"/control"}]
     return {"apiVersion":"v1", "kind":"Pod", "metadata":{"name":"agent-workspace-"+key, "labels":labels}, "spec":{
         "automountServiceAccountToken":False, "restartPolicy":"Never", "terminationGracePeriodSeconds":3,
-        "activeDeadlineSeconds":int(os.environ.get("AGENT_WORKSPACE_MAX_SECONDS", "7200")),
+        "activeDeadlineSeconds":int(os.environ.get("AGENT_WORKSPACE_MAX_SECONDS", "14400")),
         "securityContext":{"seccompProfile":{"type":"RuntimeDefault"}},
         "imagePullSecrets":[{"name":name} for name in os.environ.get("AGENT_WORKSPACE_IMAGE_PULL_SECRETS", "").split(",") if name],
         "nodeSelector":json.loads(os.environ.get("AGENT_WORKSPACE_NODE_SELECTOR", "{}")),

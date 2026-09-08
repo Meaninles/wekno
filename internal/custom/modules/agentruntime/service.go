@@ -218,16 +218,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if payload.RuntimeConfig.MaxContextTokens < 4096 {
 		payload.RuntimeConfig.MaxContextTokens = 128000
 	}
-	payload.RuntimeConfig.PrefetchKnowledge = false
-	for _, tool := range payload.Tools {
-		// Preload an explicitly selected evidence scope. Merely having access
-		// to every KB is not a reason to retrieve for greetings or calculations;
-		// the same SDK decision can request retrieval when it actually needs it.
-		explicitScope := len(req.KnowledgeBaseIDs) > 0 || len(req.KnowledgeIDs) > 0 || len(req.TagScopes) > 0 || req.CustomAgent.Config.KBSelectionMode == "selected"
-		if payload.RuntimeConfig.AgentType != types.AgentTypeKnowledgeQA && explicitScope && tool.Name == agenttools.ToolKnowledgeSearch && len(agentConfig.SearchTargets) > 0 {
-			payload.RuntimeConfig.PrefetchKnowledge = true
-		}
-	}
 
 	payload.LLM = nil
 	payload.ToolCallbackAPIKey = ""
@@ -244,7 +234,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 	principal, _ := types.PrincipalFromContext(ctx)
 	accountID, _ := types.UserIDFromContext(ctx)
-	row := &RunRecord{ID: runID, TenantID: payload.TenantID, UserID: userID, AccountID: accountID, Principal: principal, SessionID: sessionID, MessageID: req.AssistantMessageID, Status: "queued", Deadline: time.Now().Add(2 * time.Hour), Payload: encoded, Scope: scopeJSON}
+	timeout := 2 * time.Hour
+	if payload.EnableArtifacts && payload.RuntimeConfig.AgentType != types.AgentTypeKnowledgeQA {
+		timeout = 4 * time.Hour
+	}
+	row := &RunRecord{ID: runID, TenantID: payload.TenantID, UserID: userID, AccountID: accountID, Principal: principal, SessionID: sessionID, MessageID: req.AssistantMessageID, Status: "queued", Deadline: time.Now().Add(timeout), Payload: encoded, Scope: scopeJSON}
 	if err = s.db.WithContext(ctx).Create(row).Error; err != nil {
 		return err
 	}
@@ -333,6 +327,9 @@ func (s *Service) buildHistory(
 	msgs, err = conversationmemory.WithArchivedEvidence(ctx, s.db, req.Session.ID, msgs, config.SearchTargets)
 	if err != nil {
 		return nil, "", fmt.Errorf("load conversation evidence: %w", err)
+	}
+	if err := s.attachMessageArtifacts(ctx, msgs); err != nil {
+		return nil, "", err
 	}
 	history, archive := buildGeneralAgentHistory(msgs, turns, req.UserMessageID, req.AssistantMessageID)
 	return history, archive, nil

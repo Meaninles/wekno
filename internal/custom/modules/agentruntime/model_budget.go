@@ -3,7 +3,8 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"math"
 	"os"
 	"reflect"
 	"strconv"
@@ -24,9 +25,62 @@ type ModelRequest struct {
 	OutputTokens   int64
 	ReservedInput  int64
 	ReservedOutput int64
+	InputUnits     int64
 	UsageUnknown   bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+var errModelBudget = errors.New("run model request budget exhausted")
+var errFinalizationRequired = errors.New("final answer budget is reserved")
+
+type BudgetState struct {
+	MaxTokens         int64   `json:"max_tokens"`
+	RemainingTokens   int64   `json:"remaining_tokens"`
+	MaxRequests       int64   `json:"max_requests"`
+	RemainingRequests int64   `json:"remaining_requests"`
+	FinalReserve      int64   `json:"final_reserve"`
+	InputFactor       float64 `json:"input_factor"`
+	RemainingSeconds  int64   `json:"remaining_seconds"`
+}
+
+// One authoritative ledger for primary and auxiliary calls, including recovery.
+func modelBudget(tx *gorm.DB, row *RunRecord, role string) (BudgetState, error) {
+	var p ChatPayload
+	if err := json.Unmarshal(row.Payload, &p); err != nil {
+		return BudgetState{}, err
+	}
+	limit := budgetSetting("AGENT_RUNTIME_MAX_TOTAL_TOKENS", 3000000)
+	requests := budgetSetting("AGENT_RUNTIME_MAX_MODEL_REQUESTS", 100)
+	if p.RuntimeConfig.AgentType == "knowledge-qa" {
+		limit = budgetSetting("AGENT_RUNTIME_KNOWLEDGE_QA_MAX_TOTAL_TOKENS", 1000000)
+	} else if p.EnableArtifacts {
+		limit = budgetSetting("AGENT_RUNTIME_ARTIFACT_MAX_TOTAL_TOKENS", 6000000)
+		requests = budgetSetting("AGENT_RUNTIME_ARTIFACT_MAX_MODEL_REQUESTS", 200)
+	}
+	b := BudgetState{MaxTokens: limit, MaxRequests: requests, InputFactor: 1.25, FinalReserve: 32768}
+	b.RemainingTokens = max(0, limit-row.InputTokens-row.OutputTokens-row.ReservedTokens)
+	b.RemainingRequests = max(0, b.MaxRequests-int64(row.ModelRequests))
+	b.RemainingSeconds = max(0, int64(time.Until(row.Deadline).Seconds()))
+	var last ModelRequest
+	err := tx.Where("run_id = ? AND role = ?", row.ID, "").Order("created_at DESC").Limit(1).Find(&last).Error
+	if err != nil {
+		return b, err
+	}
+	if last.ID != "" {
+		b.FinalReserve = max(8192, last.ReservedInput+last.ReservedOutput)
+	}
+	var recent []ModelRequest
+	if err := tx.Where("run_id = ? AND role = ? AND status = ? AND input_units > 0 AND usage_unknown = false", row.ID, role, "completed").Order("created_at DESC").Limit(8).Find(&recent).Error; err != nil {
+		return b, err
+	}
+	if len(recent) > 0 {
+		b.InputFactor = 0.5
+		for _, call := range recent {
+			b.InputFactor = math.Max(b.InputFactor, 1.15*float64(call.InputTokens)/float64(call.InputUnits))
+		}
+	}
+	return b, nil
 }
 
 func (ModelRequest) TableName() string { return "custom_agent_model_requests" }
@@ -65,7 +119,7 @@ func budgetSetting(name string, fallback int64) int64 {
 	return fallback
 }
 
-func (s *Service) reserveModelRequest(ctx context.Context, runID string, epoch int64, role string, input, output int64) (*ModelRequest, error) {
+func (s *Service) reserveModelRequest(ctx context.Context, runID string, epoch int64, role string, input, output int64, final ...bool) (*ModelRequest, error) {
 	call := &ModelRequest{ID: uuid.NewString(), RunID: runID, OwnerEpoch: epoch, Role: role, Status: "running", ReservedInput: max(input, 1), ReservedOutput: max(output, 1)}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		row, err := lockRun(tx, runID)
@@ -75,9 +129,23 @@ func (s *Service) reserveModelRequest(ctx context.Context, runID string, epoch i
 		if err = owned(row, epoch); err != nil {
 			return err
 		}
+		b, err := modelBudget(tx, row, role)
+		if err != nil {
+			return err
+		}
+		call.InputUnits = max(input, 1)
+		call.ReservedInput = max(1, int64(math.Ceil(float64(call.InputUnits)*b.InputFactor)))
 		reserved := call.ReservedInput + call.ReservedOutput
-		if int64(row.ModelRequests) >= budgetSetting("AGENT_RUNTIME_MAX_MODEL_REQUESTS", 100) || row.InputTokens+row.OutputTokens+row.ReservedTokens+reserved > budgetSetting("AGENT_RUNTIME_MAX_TOTAL_TOKENS", 1000000) {
-			return fmt.Errorf("run model request budget exhausted")
+		finalizing := len(final) > 0 && final[0] && role == ""
+		if b.RemainingRequests < 1 || (finalizing && reserved > b.RemainingTokens) {
+			return errModelBudget
+		}
+		reserve := b.FinalReserve
+		if role == "" {
+			reserve = max(reserve, reserved)
+		}
+		if !finalizing && (b.RemainingRequests <= 1 || b.RemainingTokens-reserved < reserve) {
+			return errFinalizationRequired
 		}
 		row.ModelRequests++
 		row.ReservedTokens += reserved

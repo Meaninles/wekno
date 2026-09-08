@@ -15,7 +15,7 @@ import httpx
 from fastapi import FastAPI
 
 from .contracts import RunRequest
-from .control import Control, ControlUnavailable
+from .control import Control, ControlUnavailable, control_cause
 from .models import model_for
 from .run import execute
 
@@ -47,13 +47,27 @@ async def handle(payload: RunRequest, client: httpx.AsyncClient):
     control = Control(payload, client)
     beat = asyncio.create_task(heartbeat(control, asyncio.current_task()))
     try:
-        async with model_for(payload, control) as model:
-            # Workspace provisioning is bound here, before entering the one
-            # SDK invocation, and teardown is bound to its cancellation scope.
-            from .workspace import workspace_for
-            async with workspace_for(payload, control) as workspace:
-                await execute(payload, control, model, extra_tools=workspace.tools,
-                              skills=workspace.skills, offloader=workspace.offloader)
+        from .workspace import workspace_for
+        from .artifact_delivery import finalize, start_finalization
+        async with workspace_for(payload, control) as workspace:
+            if payload.finalization is None:
+                try:
+                    async with model_for(payload, control) as model:
+                        candidate = await execute(payload, control, model, extra_tools=workspace.tools,
+                            skills=workspace.skills, offloader=workspace.offloader)
+                except ControlUnavailable:
+                    raise
+                except Exception as exc:
+                    if isinstance(control_cause(exc), ControlUnavailable):
+                        raise control_cause(exc)
+                    log.error("run=%s epoch=%s phase=execution failed=%s", payload.run_id,
+                              payload.owner_epoch, exception_frames(exc))
+                    await start_finalization(payload, control, error=exc)
+                else:
+                    await start_finalization(payload, control, result=candidate)
+            # No model or SDK invocation exists in this phase or its recovery.
+            async with asyncio.timeout(max(1, payload.deadline_unix - time.time())):
+                await finalize(payload, control, workspace)
     except asyncio.CancelledError:
         # Shutdown and ownership loss leave the durable run recoverable. A
         # user stop has already changed its authoritative row to cancelled.
@@ -62,8 +76,15 @@ async def handle(payload: RunRequest, client: httpx.AsyncClient):
         # The lease expires and a worker resumes the last durable boundary.
         log.warning("run=%s control_unavailable; awaiting recovery", payload.run_id)
     except Exception as exc:
+        exc = control_cause(exc) or exc
+        if isinstance(exc, ControlUnavailable):
+            log.warning("run=%s control_unavailable; awaiting recovery", payload.run_id)
+            return
         # Do not log prompt content, credentials or provider response bodies.
         log.error("run=%s epoch=%s failed=%s", payload.run_id, payload.owner_epoch, exception_frames(exc))
+        if payload.finalization is not None:
+            # Keep its manifest, files and candidate for code-only recovery.
+            return
         with contextlib.suppress(BaseException):
             async with asyncio.timeout(10):
                 from .failures import error_code

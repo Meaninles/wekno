@@ -7,6 +7,35 @@ import time
 
 from agentscope.state import ToolContext
 from pydantic import PrivateAttr
+from agentscope.tool import Edit, Write
+
+
+class WorkspaceWrite(Write):
+    async def call(self, file_path: str, content: str, _agent_state=None):
+        result = await super().call(file_path=file_path, content=content, _agent_state=_agent_state)
+        if result.is_last and str(result.state) != "error" and _agent_state is not None:
+            text = content.replace("\r\n", "\n").replace("\r", "\n")
+            await _agent_state.tool_context.cache_file(file_path,text.splitlines(keepends=True))
+        return result
+
+
+class WorkspaceEdit(Edit):
+    async def call(self, file_path: str, old_string: str, new_string: str,
+                   replace_all: bool = False, _agent_state=None):
+        # Keep the expected content, not a post-write read that could silently
+        # adopt an external change. The SDK still validates this snapshot
+        # against the backend before it writes.
+        entry = next((item for item in _agent_state.tool_context.read_file_cache
+                      if item.file_path == file_path), None) if _agent_state is not None else None
+        previous = "".join(entry.lines) if entry is not None else None
+        result = await super().call(file_path=file_path, old_string=old_string,
+                                    new_string=new_string, replace_all=replace_all,
+                                    _agent_state=_agent_state)
+        if result.is_last and str(result.state) != "error" and previous is not None:
+            updated = previous.replace(old_string, new_string, -1 if replace_all else 1)
+            updated = updated.replace("\r\n", "\n").replace("\r", "\n")
+            await _agent_state.tool_context.cache_file(file_path, updated.splitlines(keepends=True))
+        return result
 
 
 class WorkspaceToolContext(ToolContext):

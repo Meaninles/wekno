@@ -145,7 +145,7 @@
           <div v-else-if="professionalSkills.length === 0" class="empty-state">
             <t-icon name="tools" class="empty-icon" />
             <span class="empty-title">暂无专业技能</span>
-            <span class="empty-desc">专业技能会以通用智能体专业技能形式加载。</span>
+            <span class="empty-desc">专业技能会以统一 Agent Harness 形式加载，对所有智能体生效。</span>
             <t-button v-if="authStore.hasRole('contributor')" theme="primary" @click="openProfessionalImportDialog">
               新增专业技能
             </t-button>

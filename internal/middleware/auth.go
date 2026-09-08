@@ -71,6 +71,9 @@ var noAuthAPI = map[string][]string{
 	"/api/v1/custom/agent-runtime/internal/runs/commit":         {"POST"},
 	"/api/v1/custom/agent-runtime/internal/runs/fail":           {"POST"},
 	"/api/v1/custom/agent-runtime/internal/runs/status":         {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/budget":         {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/baseline":       {"POST"},
+	"/api/v1/custom/agent-runtime/internal/runs/finalize":       {"POST"},
 	// Agent artifact delivery uses the same dedicated internal API key. Keep
 	// the bypass exact: no sibling path or other method becomes public.
 	"/api/v1/custom/agent-runtime/internal/artifacts/upload": {"POST"},

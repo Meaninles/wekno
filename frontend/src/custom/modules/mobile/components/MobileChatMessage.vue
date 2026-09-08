@@ -527,10 +527,11 @@ const collectArtifactsFromSteps = (steps: any[], results: GeneralAgentArtifactsD
 
 const artifactResult = computed<GeneralAgentArtifactsData | null>(() => {
   const directArtifacts = normalizeMessageArtifacts(props.message.artifacts);
-  if (directArtifacts.length > 0) {
+  if (directArtifacts.length > 0 || props.message.artifact_notice) {
     return {
       display_type: "general_agent_artifacts",
       artifacts: directArtifacts,
+      notice: props.message.artifact_notice,
       artifact_original_count: directArtifacts.length,
     } as GeneralAgentArtifactsData;
   }

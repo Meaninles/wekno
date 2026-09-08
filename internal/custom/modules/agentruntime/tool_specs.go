@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"strings"
 )
@@ -13,10 +14,20 @@ func runtimeToolSpecs(registry interfaces.AgentToolRegistry) []RuntimeToolSpec {
 	defs := registry.GetFunctionDefinitions()
 	out := make([]RuntimeToolSpec, 0, len(defs))
 	for _, def := range defs {
+		readOnly := toolReadOnly(def.Name)
+		if catalog, ok := registry.(interface {
+			GetTool(string) (types.Tool, error)
+		}); ok {
+			if tool, err := catalog.GetTool(def.Name); err == nil {
+				if metadata, ok := tool.(interface{ ConcurrentReadOnly() bool }); ok {
+					readOnly = metadata.ConcurrentReadOnly()
+				}
+			}
+		}
 		out = append(out, RuntimeToolSpec{
 			Name:              def.Name,
-			IsReadOnly:        toolReadOnly(def.Name),
-			IsConcurrencySafe: toolReadOnly(def.Name),
+			IsReadOnly:        readOnly,
+			IsConcurrencySafe: readOnly,
 			TimeoutSeconds:    900,
 			Description:       def.Description,
 			Parameters:        def.Parameters,

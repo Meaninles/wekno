@@ -50,18 +50,7 @@ func recordLocalTool(tx *gorm.DB, row *RunRecord, item StreamEvent) error {
 		if !data.Success {
 			result.Error = data.Output
 		}
-		if data.Name == "publish_artifact" && data.Success {
-			var published SidecarArtifact
-			if err := json.Unmarshal([]byte(data.Output), &published); err != nil {
-				return err
-			}
-			var artifact Artifact
-			if err := tx.Where("id = ? AND run_id = ? AND tenant_id = ? AND storage_state = ?", published.ArtifactID,
-				row.ID, row.TenantID, artifactStorageStateReady).First(&artifact).Error; err != nil {
-				return err
-			}
-			result.Data = map[string]any{"display_type": displayTypeArtifacts, "artifacts": []*SidecarArtifact{sidecarArtifactFromRow(&artifact)}}
-		}
+
 		encoded, err := json.Marshal(result)
 		if err != nil {
 			return err

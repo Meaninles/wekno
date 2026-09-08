@@ -31,3 +31,17 @@ func TestBuiltinKnowledgeQAUsesStableFactualRAGDefaults(t *testing.T) {
 		t.Fatalf("history turns = %d, want 10", agent.Config.HistoryTurns)
 	}
 }
+
+func TestBuiltinDocumentProcessingDisablesWebSearchByDefault(t *testing.T) {
+	if err := LoadBuiltinAgentsConfig("../../config"); err != nil {
+		t.Fatalf("load built-in agent config: %v", err)
+	}
+
+	agent := GetBuiltinAgent(BuiltinDocumentProcessingID, 10000)
+	if agent == nil {
+		t.Fatal("document-processing built-in agent is missing")
+	}
+	if agent.Config.WebSearchEnabled {
+		t.Fatal("document-processing built-in agent must disable web search by default")
+	}
+}

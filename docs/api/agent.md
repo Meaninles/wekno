@@ -494,7 +494,7 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `web_search_enabled` | bool | true | 是否启用网络搜索 |
+| `web_search_enabled` | bool | false | 是否启用网络搜索；文档处理内置智能体默认关闭 |
 | `claude_sdk_web_search_enabled` | bool | false | Claude SDK 运行时是否启用原生 web search 能力 |
 | `web_search_max_results` | int | 5 | 网络搜索最大结果数 |
 | `web_search_provider_id` | string | - | 网络搜索提供者 ID，为空使用租户默认提供者 |

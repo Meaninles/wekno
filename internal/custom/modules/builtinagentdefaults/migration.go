@@ -6,10 +6,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// factualRAGDefaultMigrations update only legacy built-in defaults. Tenant
+// builtinAgentDefaultMigrations update only legacy built-in defaults. Tenant
 // configurations with non-default values are preserved. These statements run
 // in the dedicated migration role, never on a serving request path.
-var factualRAGDefaultMigrations = []string{
+var builtinAgentDefaultMigrations = []string{
 	`UPDATE custom_agents
 		SET config = jsonb_set(config, '{temperature}', '0.1'::jsonb, true),
 		    updated_at = NOW()
@@ -24,6 +24,13 @@ var factualRAGDefaultMigrations = []string{
 		  AND is_builtin = TRUE
 		  AND config->>'agent_type' = 'knowledge-qa'
 		  AND config->>'history_turns' = '5'`,
+	`UPDATE custom_agents
+		SET config = jsonb_set(config, '{web_search_enabled}', 'false'::jsonb, true),
+		    updated_at = NOW()
+		WHERE id = 'builtin-document-processing'
+		  AND is_builtin = TRUE
+		  AND config->>'agent_type' = 'document-processing-agent'
+		  AND config->>'web_search_enabled' = 'true'`,
 }
 
 func (s *Service) Migrate(ctx context.Context) error {
@@ -34,7 +41,7 @@ func (s *Service) Migrate(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for _, statement := range factualRAGDefaultMigrations {
+		for _, statement := range builtinAgentDefaultMigrations {
 			if err := tx.Exec(statement).Error; err != nil {
 				return err
 			}

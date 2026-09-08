@@ -221,7 +221,11 @@ func (s *agentShareService) ListSharedAgents(ctx context.Context, tenantID uint6
 		if share.SourceTenantID == tenantID {
 			continue
 		}
-		if share.Agent == nil {
+		effectiveAgent, err := resolveBuiltinSharedAgentConfig(ctx, share.Agent, share.SourceTenantID)
+		if err != nil {
+			return nil, err
+		}
+		if effectiveAgent == nil {
 			continue
 		}
 		tm, err := s.orgRepo.GetTenantMember(ctx, share.OrganizationID, tenantID)
@@ -231,7 +235,7 @@ func (s *agentShareService) ListSharedAgents(ctx context.Context, tenantID uint6
 		effective := types.MinOrgRole(share.Permission, tm.Role)
 		effective = applyTenantRoleCap(effective, callerTenantRole)
 		info := &types.SharedAgentInfo{
-			Agent:          share.Agent,
+			Agent:          effectiveAgent,
 			ShareID:        share.ID,
 			OrganizationID: share.OrganizationID,
 			OrgName:        "",
@@ -305,7 +309,11 @@ func (s *agentShareService) ListSharedAgentsInOrganization(ctx context.Context, 
 
 	result := make([]*types.OrganizationSharedAgentItem, 0, len(shares))
 	for _, share := range shares {
-		if share.Agent == nil {
+		effectiveAgent, err := resolveBuiltinSharedAgentConfig(ctx, share.Agent, share.SourceTenantID)
+		if err != nil {
+			return nil, err
+		}
+		if effectiveAgent == nil {
 			continue
 		}
 
@@ -317,7 +325,7 @@ func (s *agentShareService) ListSharedAgentsInOrganization(ctx context.Context, 
 			orgName = share.Organization.Name
 		}
 		info := &types.SharedAgentInfo{
-			Agent:          share.Agent,
+			Agent:          effectiveAgent,
 			ShareID:        share.ID,
 			OrganizationID: share.OrganizationID,
 			OrgName:        orgName,
@@ -386,7 +394,11 @@ func (s *agentShareService) ListSharedAgentsInOrganizations(ctx context.Context,
 		tm := members[orgID]
 		result := make([]*types.OrganizationSharedAgentItem, 0, len(list))
 		for _, share := range list {
-			if share.Agent == nil {
+			effectiveAgent, err := resolveBuiltinSharedAgentConfig(ctx, share.Agent, share.SourceTenantID)
+			if err != nil {
+				return nil, err
+			}
+			if effectiveAgent == nil {
 				continue
 			}
 			effective := types.MinOrgRole(share.Permission, tm.Role)
@@ -396,7 +408,7 @@ func (s *agentShareService) ListSharedAgentsInOrganizations(ctx context.Context,
 				orgName = share.Organization.Name
 			}
 			info := &types.SharedAgentInfo{
-				Agent:          share.Agent,
+				Agent:          effectiveAgent,
 				ShareID:        share.ID,
 				OrganizationID: share.OrganizationID,
 				OrgName:        orgName,
@@ -462,7 +474,24 @@ func (s *agentShareService) GetSharedAgentForTenant(ctx context.Context, tenantI
 		}
 		return nil, err
 	}
+	if agent.IsBuiltin || types.IsBuiltinAgentID(agent.ID) {
+		return resolveBuiltinAgentConfig(ctx, agent, share.SourceTenantID)
+	}
 	_ = callerTenantRole
+	return agent, nil
+}
+
+func resolveBuiltinSharedAgentConfig(
+	ctx context.Context,
+	agent *types.CustomAgent,
+	sourceTenantID uint64,
+) (*types.CustomAgent, error) {
+	if agent == nil {
+		return nil, nil
+	}
+	if agent.IsBuiltin || types.IsBuiltinAgentID(agent.ID) {
+		return resolveBuiltinAgentConfig(ctx, agent, sourceTenantID)
+	}
 	return agent, nil
 }
 

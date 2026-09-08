@@ -22,6 +22,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
+	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentpolicy"
 	"github.com/Tencent/WeKnora/internal/custom/modules/capacitycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
@@ -99,6 +100,7 @@ type Handlers struct {
 	adminService                *customadmin.Service
 	authSecurityService         *authsecurity.Service
 	builtinAgentDefaultsService *builtinagentdefaults.Service
+	builtinAgentPolicyService   *builtinagentpolicy.Service
 	chatShareService            *chatshare.Service
 	dbAnalyticsService          *dbanalytics.Service
 	agentRuntimeService         *agentruntime.Service
@@ -164,6 +166,7 @@ func NewHandlers(
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
+	builtinAgentPolicyService := builtinagentpolicy.NewService(db, builtinAgentDefaultsService)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
 	agentRuntimeService := agentruntime.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
 	sessionHandler.SetRuntimeStreamControl(agentruntime.NewHandler(agentRuntimeService).Resume, agentruntime.NewHandler(agentRuntimeService).Stop)
@@ -284,6 +287,9 @@ func NewHandlers(
 		if err := builtinAgentDefaultsService.Migrate(ctx); err != nil {
 			return nil, err
 		}
+		if err := builtinAgentPolicyService.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := dbAnalyticsService.Migrate(ctx); err != nil {
 			return nil, err
 		}
@@ -373,6 +379,10 @@ func NewHandlers(
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
 	appservice.RegisterEffectiveLightweightSkillContextResolver(skillHubService.EffectiveLightweightSkillContext)
 	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
+	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentPolicyService.Apply)
+	appservice.RegisterBuiltinAgentConfigMutator(builtinAgentPolicyService.Mutate)
+	appservice.RegisterBuiltinAgentVisibilityResolver(builtinAgentPolicyService.ResolveVisibility)
+	appservice.RegisterBuiltinAgentVisibilityUpdater(builtinAgentPolicyService.SetVisibility)
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
 	appservice.RegisterCustomAgentConfigNormalizer(func(_ context.Context, agent *types.CustomAgent) error {
 		resolved, err := agentconfig.NormalizePrompts(agent.Config, cfg.PromptTemplates)
@@ -382,6 +392,7 @@ func NewHandlers(
 		return err
 	})
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
+	appservice.RegisterAgentRuntimeConfigHook(builtinAgentPolicyService.ConfigureRuntime)
 	appservice.RegisterSessionDeletedHook(agentRuntimeService.DeleteSessionArtifacts)
 	appservice.RegisterAgentRuntime(agentRuntimeService.Run)
 	appservice.RegisterSessionDeletedHook(chatUploadService.DeleteSessionUploads)
@@ -505,6 +516,7 @@ func NewHandlers(
 		adminService:                adminService,
 		authSecurityService:         authSecurityService,
 		builtinAgentDefaultsService: builtinAgentDefaultsService,
+		builtinAgentPolicyService:   builtinAgentPolicyService,
 		chatShareService:            chatShareService,
 		dbAnalyticsService:          dbAnalyticsService,
 		agentRuntimeService:         agentRuntimeService,
@@ -691,6 +703,15 @@ func RegisterPublicRoutes(r *gin.Engine, handlers *Handlers) {
 		r.GET("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
 		r.HEAD("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
 	}
+	// HTML artifact share pages are bearer-capability URLs. They must stay
+	// outside the global Web authentication middleware so recipients can open
+	// them without signing in; the token and artifact checks remain enforced by
+	// the handler. Conversation-share routes below remain authenticated.
+	if handlers.ChatShare != nil {
+		r.GET("/api/v1/custom/artifact-share/:token", handlers.ChatShare.ArtifactShare)
+		r.POST("/api/v1/custom/artifact-share/:token/access", middleware.PublicAuthRateLimit(), handlers.ChatShare.ArtifactShareAccess)
+		r.GET("/api/v1/custom/artifact-share/:token/content", handlers.ChatShare.ArtifactShareContent)
+	}
 	// IM citations use a dedicated capability boundary registered before the
 	// normal Web authentication middleware. No knowledge-base or Wiki API is
 	// made public by these exact routes.
@@ -875,6 +896,9 @@ func RegisterRoutes(
 			chatShareRoutes.GET("/:token/files", handlers.ChatShare.File)
 			chatShareRoutes.GET("/:token/artifacts/:artifact_id/download", handlers.ChatShare.Artifact)
 		}
+		artifactShareRoutes := v1.Group("/custom/artifact-share")
+		artifactShareRoutes.POST("/artifacts/:artifact_id", handlers.ChatShare.CreateArtifactShare)
+		artifactShareRoutes.POST("/artifacts/:artifact_id/password", handlers.ChatShare.SetArtifactSharePassword)
 	}
 
 	if handlers.SessionState != nil {

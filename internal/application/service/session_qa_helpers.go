@@ -86,8 +86,8 @@ func (s *sessionService) restrictTagScopesToAgentScope(
 // resolveChatModelID resolves the effective chat model ID for a QA request.
 //
 // When an agent is selected, its model configuration must be complete and
-// valid. A request-level override may choose another valid model for this
-// request, but it must not make an unconfigured or stale agent appear usable.
+// valid. The request-level model field is ignored for agent-backed turns;
+// agent-less legacy callers retain the normal fallback behavior.
 //
 // Without an agent, the legacy KB / session / system fallback remains
 // available for non-agent callers.
@@ -112,14 +112,19 @@ func (s *sessionService) resolveChatModelID(
 		}
 	}
 
-	summaryModelID = strings.TrimSpace(summaryModelID)
-	if summaryModelID != "" {
-		if model, err := s.modelService.GetModelByID(ctx, summaryModelID); err == nil &&
-			model.IsInteractiveChatModel() {
-			logger.Infof(ctx, "Using request's summary model override: %s", summaryModelID)
-			return summaryModelID, nil
+	// An agent's model binding is configured only in the agent editor. Ignore
+	// request-level overrides for both built-in and custom agents; otherwise an
+	// old conversation payload could bypass the editor configuration.
+	if customAgent == nil {
+		summaryModelID = strings.TrimSpace(summaryModelID)
+		if summaryModelID != "" {
+			if model, err := s.modelService.GetModelByID(ctx, summaryModelID); err == nil &&
+				model.IsInteractiveChatModel() {
+				logger.Infof(ctx, "Using request's summary model override: %s", summaryModelID)
+				return summaryModelID, nil
+			}
+			logger.Warnf(ctx, "Request provided invalid summary model ID %s, falling back", summaryModelID)
 		}
-		logger.Warnf(ctx, "Request provided invalid summary model ID %s, falling back", summaryModelID)
 	}
 	if customAgent != nil && strings.TrimSpace(customAgent.Config.ModelID) != "" {
 		logger.Infof(ctx, "Using custom agent's model_id: %s", strings.TrimSpace(customAgent.Config.ModelID))

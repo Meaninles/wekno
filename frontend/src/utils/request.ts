@@ -86,9 +86,14 @@ let failedQueue: Array<{ resolve: Function; reject: Function }> = [];
 // covers '/auth/register-by-invite' via substring match.
 const PUBLIC_AUTH_PATHS = ['/auth/auto-setup', '/auth/login', '/auth/register', '/auth/oidc/', '/custom/iam/sso/', '/custom/auth-security/challenge', '/auth/invitations/lookup', '/api/v1/embed/'];
 
+// A password-protected HTML share is intentionally anonymous. Wrong-password
+// responses must stay on the share page instead of triggering the normal JWT
+// refresh/login redirect used by authenticated application requests.
+const PUBLIC_ARTIFACT_SHARE_ACCESS = /\/api\/v1\/custom\/artifact-share\/[^/]+\/access(?:\?|$)/;
+
 function isPublicAuthRequest(url?: string): boolean {
   if (!url) return false;
-  return PUBLIC_AUTH_PATHS.some(p => url.includes(p));
+  return PUBLIC_AUTH_PATHS.some(p => url.includes(p)) || PUBLIC_ARTIFACT_SHARE_ACCESS.test(url);
 }
 
 function uploadLimitForRequest(url?: string): number {

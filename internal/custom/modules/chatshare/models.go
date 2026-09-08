@@ -49,6 +49,46 @@ func (l *Link) BeforeCreate(_ *gorm.DB) error {
 	return nil
 }
 
+// ArtifactShareLink is a capability link for one immutable HTML artifact.
+// It intentionally lives beside the conversation-share models while keeping
+// its own table: an artifact share must never snapshot or expose a chat.
+type ArtifactShareLink struct {
+	ID              string     `json:"id" gorm:"primaryKey;type:varchar(36)"`
+	TokenHash       string     `json:"-" gorm:"type:varchar(64);uniqueIndex;not null"`
+	TokenCiphertext string     `json:"-" gorm:"type:text;not null"`
+	TenantID        uint64     `json:"tenant_id" gorm:"not null;index;uniqueIndex:idx_chatshare_artifact_link_artifact,priority:1"`
+	SessionID       string     `json:"session_id" gorm:"type:varchar(36);not null;index"`
+	MessageID       string     `json:"message_id" gorm:"type:varchar(36);index"`
+	ArtifactID      string     `json:"artifact_id" gorm:"type:varchar(36);not null;uniqueIndex:idx_chatshare_artifact_link_artifact,priority:2"`
+	Filename        string     `json:"filename" gorm:"type:varchar(255);not null"`
+	FileType        string     `json:"file_type" gorm:"type:varchar(32);not null"`
+	FileSize        int64      `json:"file_size" gorm:"not null;default:0"`
+	SHA256          string     `json:"sha256" gorm:"type:varchar(64);not null"`
+	ContentType     string     `json:"content_type" gorm:"type:varchar(128)"`
+	PasswordHash    string     `json:"-" gorm:"type:varchar(255)"`
+	CreatedByUserID string     `json:"created_by_user_id" gorm:"type:varchar(512);index"`
+	Status          string     `json:"status" gorm:"type:varchar(32);not null;default:'active';index"`
+	ViewCount       int64      `json:"view_count" gorm:"default:0"`
+	LastViewedAt    *time.Time `json:"last_viewed_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+func (ArtifactShareLink) TableName() string {
+	return "custom_chatshare_artifact_links"
+}
+
+func (l *ArtifactShareLink) BeforeCreate(_ *gorm.DB) error {
+	if l.ID == "" {
+		l.ID = uuid.NewString()
+	}
+	if l.Status == "" {
+		l.Status = ShareStatusActive
+	}
+	return nil
+}
+
 type MessageSnapshot struct {
 	ID                  string                   `json:"id" gorm:"primaryKey;type:varchar(36)"`
 	ShareID             string                   `json:"share_id" gorm:"type:varchar(36);not null;index"`
@@ -177,6 +217,37 @@ type LinkDTO struct {
 	URL       string    `json:"url,omitempty"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type ArtifactShareLinkDTO struct {
+	ID                 string    `json:"id"`
+	ArtifactID         string    `json:"artifact_id"`
+	Filename           string    `json:"filename"`
+	URL                string    `json:"url"`
+	PreviewURL         string    `json:"preview_url"`
+	PasswordConfigured bool      `json:"password_configured"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+type ArtifactShareViewDTO struct {
+	ID               string    `json:"id"`
+	ArtifactID       string    `json:"artifact_id"`
+	Filename         string    `json:"filename"`
+	FileType         string    `json:"file_type"`
+	FileSize         int64     `json:"file_size"`
+	ContentType      string    `json:"content_type"`
+	ContentURL       string    `json:"content_url"`
+	RequiresPassword bool      `json:"requires_password"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type ArtifactShareAccessDTO struct {
+	AccessToken string    `json:"access_token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+type ArtifactSharePasswordRequest struct {
+	Password string `json:"password"`
 }
 
 type CreateRequest struct {

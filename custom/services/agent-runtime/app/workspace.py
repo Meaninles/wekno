@@ -69,7 +69,11 @@ class SandboxBackend(BackendBase):
                 "Image":os.environ["AGENT_WORKSPACE_IMAGE"], "Cmd":["sleep","infinity"],
                 "WorkingDir":"/workspace", "Env":["HOME=/workspace","PYTHONUNBUFFERED=1"],
                 "Labels":labels,
-                "HostConfig":{"NetworkMode":"none","ReadonlyRootfs":True,"CapDrop":["ALL"],
+                # The workspace is intentionally kept on Docker's default
+                # bridge network: skills may need direct Internet access,
+                # while the workspace must not join the internal WeKnora
+                # network that contains databases and infrastructure.
+                "HostConfig":{"NetworkMode":"bridge","ReadonlyRootfs":True,"CapDrop":["ALL"],
                               "CapAdd":["SETUID","SETGID","KILL"],"SecurityOpt":["no-new-privileges:true"],
                               "Memory":int(os.environ.get("AGENT_WORKSPACE_MEMORY_BYTES",str(2*1024**3))),
                               "NanoCpus":2_000_000_000,"PidsLimit":128,

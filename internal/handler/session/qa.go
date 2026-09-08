@@ -87,7 +87,7 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		RequestID:                 rc.requestID,
 		Query:                     rc.query,
 		AssistantMessageID:        rc.assistantMessage.ID,
-		SummaryModelID:            rc.summaryModelID,
+		SummaryModelID:            effectiveRequestModelID(rc),
 		CustomAgent:               rc.customAgent,
 		KnowledgeBaseIDs:          rc.knowledgeBaseIDs,
 		KnowledgeIDs:              rc.knowledgeIDs,
@@ -474,12 +474,7 @@ func (h *Handler) startTitleGeneration(
 	if !generateTitle || reqCtx.session.Title != "" {
 		return
 	}
-	modelID := ""
-	if reqCtx.summaryModelID != "" {
-		modelID = reqCtx.summaryModelID
-	} else if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
-		modelID = reqCtx.customAgent.Config.ModelID
-	}
+	modelID := effectiveRequestModelID(reqCtx)
 	logger.Infof(
 		reqCtx.ctx,
 		"Session has no title, starting async title generation, session ID: %s, model: %s",
@@ -489,6 +484,21 @@ func (h *Handler) startTitleGeneration(
 	h.sessionService.GenerateTitleAsync(
 		streamCtx.asyncCtx, reqCtx.session, reqCtx.query, modelID, streamCtx.eventBus,
 	)
+}
+
+// effectiveRequestModelID is the server-side model value used by auxiliary
+// conversation paths (queue admission, title generation and persisted UI
+// state). Once an agent is selected, its editor configuration is authoritative
+// for both built-in and custom agents; the request payload is only a legacy
+// fallback for agent-less callers.
+func effectiveRequestModelID(reqCtx *qaRequestContext) string {
+	if reqCtx == nil {
+		return ""
+	}
+	if reqCtx.customAgent != nil {
+		return strings.TrimSpace(reqCtx.customAgent.Config.ModelID)
+	}
+	return strings.TrimSpace(reqCtx.summaryModelID)
 }
 
 // SearchKnowledge godoc
@@ -666,8 +676,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 
 	agentModelID := ""
 	if reqCtx.customAgent != nil {
-		agentModelID = reqCtx.customAgent.Config.ModelID
+		agentModelID = strings.TrimSpace(reqCtx.customAgent.Config.ModelID)
 	}
+	queueModelID := effectiveRequestModelID(reqCtx)
 	principalID := types.SessionOwnerIDFromContext(ctx)
 	if principalID == "" && reqCtx.session != nil {
 		principalID = reqCtx.session.UserID
@@ -682,7 +693,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		PrincipalID:      principalID,
 		RequestID:        reqCtx.requestID,
 		SessionID:        reqCtx.sessionID,
-		SummaryModelID:   reqCtx.summaryModelID,
+		SummaryModelID:   queueModelID,
 		AgentModelID:     agentModelID,
 		KnowledgeBaseIDs: append([]string(nil), reqCtx.knowledgeBaseIDs...),
 		KnowledgeIDs:     append([]string(nil), reqCtx.knowledgeIDs...),
@@ -928,7 +939,7 @@ func (h *Handler) persistLastRequestState(parentCtx context.Context, reqCtx *qaR
 	state := &types.SessionLastRequestState{
 		AgentID:                reqCtx.reqAgentID,
 		AgentEnabled:           agentEnabled,
-		ModelID:                reqCtx.summaryModelID,
+		ModelID:                effectiveRequestModelID(reqCtx),
 		KnowledgeBaseIDs:       append([]string(nil), reqCtx.knowledgeBaseIDs...),
 		KnowledgeIDs:           append([]string(nil), reqCtx.knowledgeIDs...),
 		TagIDs:                 append([]string(nil), reqCtx.tagIDs...),
@@ -972,7 +983,7 @@ func (h *Handler) completeAssistantMessage(ctx context.Context, assistantMessage
 			KnowledgeBaseIDs:    append([]string(nil), reqCtx.knowledgeBaseIDs...),
 			KnowledgeIDs:        append([]string(nil), reqCtx.knowledgeIDs...),
 			SkillNames:          append([]string(nil), reqCtx.skillNames...),
-			SummaryModelID:      reqCtx.summaryModelID,
+			SummaryModelID:      effectiveRequestModelID(reqCtx),
 			WebSearchEnabled:    reqCtx.webSearchEnabled,
 			EnableMemory:        reqCtx.enableMemory,
 			EffectiveTenantID:   reqCtx.effectiveTenantID,

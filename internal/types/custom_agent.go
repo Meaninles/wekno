@@ -89,6 +89,13 @@ type CustomAgent struct {
 	// 让前端列表卡片区分「我创建」与「同租户其他成员创建」。不落库，内建 agent / 老数据
 	// 仍可能为空。
 	CreatorName string `yaml:"-" json:"creator_name,omitempty" gorm:"-"`
+
+	// Effective tenant-scoped presentation metadata. These fields are not
+	// persisted in custom_agents; the built-in policy module resolves them on
+	// every read so all users in a tenant observe changes immediately.
+	VisibleInChat     *bool  `yaml:"-" json:"visible_in_chat,omitempty" gorm:"-"`
+	ModelFieldsLocked bool   `yaml:"-" json:"model_fields_locked,omitempty" gorm:"-"`
+	ModelGroup        string `yaml:"-" json:"model_group,omitempty" gorm:"-"`
 }
 
 // CustomAgentConfig represents the configuration of a custom agent

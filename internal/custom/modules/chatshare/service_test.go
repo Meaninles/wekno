@@ -2,6 +2,9 @@ package chatshare
 
 import (
 	"context"
+	"errors"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,6 +230,139 @@ func TestCreateShareRejectsInvalidOrIncompleteSelection(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidMessageSelection)
 	_, err = svc.CreateShare(ctx, "session-1", []string{"pending-answer"})
 	require.ErrorIs(t, err, ErrInvalidMessageSelection)
+}
+
+func TestArtifactShareIsLazyIdempotentAndAnonymousOnRead(t *testing.T) {
+	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
+	svc, db, ctx := newChatShareTestService(t)
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	require.NoError(t, db.Create(&artifactRow{
+		ID:           "artifact-html",
+		TenantID:     7,
+		UserID:       "user-1",
+		SessionID:    "session-1",
+		MessageID:    "answer-1",
+		FilePath:     "minio://bucket/artifact-html.html",
+		StorageState: "ready",
+		FileName:     "报告.html",
+		FileType:     "html",
+		FileSize:     42,
+		SHA256:       digest,
+		ContentType:  "text/html",
+	}).Error)
+
+	first, err := svc.CreateArtifactShare(ctx, "artifact-html")
+	require.NoError(t, err)
+	require.NotEmpty(t, first.URL)
+	require.NotEmpty(t, first.PreviewURL)
+	require.False(t, first.PasswordConfigured)
+	second, err := svc.CreateArtifactShare(ctx, "artifact-html")
+	require.NoError(t, err)
+	require.Equal(t, first.URL, second.URL)
+
+	var count int64
+	require.NoError(t, db.Model(&ArtifactShareLink{}).Where("artifact_id = ?", "artifact-html").Count(&count).Error)
+	require.Equal(t, int64(1), count)
+	var link ArtifactShareLink
+	require.NoError(t, db.Where("artifact_id = ?", "artifact-html").First(&link).Error)
+	require.Contains(t, link.TokenCiphertext, "enc:v1:")
+
+	tokenURL, err := url.Parse(first.URL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(tokenURL.Path, "/share/artifact/")
+	previewURL, err := url.Parse(first.PreviewURL)
+	require.NoError(t, err)
+	previewToken := previewURL.Query().Get("preview")
+	require.NotEmpty(t, previewToken)
+	view, err := svc.GetArtifactShare(context.Background(), token, previewToken, "")
+	require.NoError(t, err)
+	require.Equal(t, "报告.html", view.Filename)
+	require.Contains(t, view.ContentURL, "/content")
+	require.False(t, view.RequiresPassword)
+
+	var refreshed ArtifactShareLink
+	require.NoError(t, db.First(&refreshed, "id = ?", link.ID).Error)
+	require.Equal(t, int64(1), refreshed.ViewCount)
+}
+
+func TestArtifactShareRejectsNonHTMLAndRevokedLinks(t *testing.T) {
+	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
+	svc, db, ctx := newChatShareTestService(t)
+	require.NoError(t, db.Create(&artifactRow{
+		ID:           "artifact-text",
+		TenantID:     7,
+		UserID:       "user-1",
+		SessionID:    "session-1",
+		StorageState: "ready",
+		FileName:     "notes.txt",
+		FileType:     "txt",
+		FileSize:     4,
+		SHA256:       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}).Error)
+	_, err := svc.CreateArtifactShare(ctx, "artifact-text")
+	require.ErrorIs(t, err, ErrArtifactShareUnsupported)
+
+	require.NoError(t, db.Create(&ArtifactShareLink{
+		TokenHash:       tokenHash("revoked-token"),
+		TokenCiphertext: "revoked-token",
+		TenantID:        7,
+		SessionID:       "session-1",
+		ArtifactID:      "artifact-text",
+		Filename:        "notes.txt",
+		FileType:        "txt",
+		Status:          "revoked",
+	}).Error)
+	_, err = svc.GetArtifactShare(context.Background(), "revoked-token", "", "")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrArtifactShareNotFound) || errors.Is(err, ErrArtifactShareRevoked))
+}
+
+func TestArtifactSharePasswordPublishesAndIssuesAccessCapability(t *testing.T) {
+	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
+	svc, db, ctx := newChatShareTestService(t)
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	require.NoError(t, db.Create(&artifactRow{
+		ID:           "artifact-password",
+		TenantID:     7,
+		UserID:       "user-1",
+		SessionID:    "session-1",
+		MessageID:    "answer-1",
+		FilePath:     "minio://bucket/artifact-password.html",
+		StorageState: "ready",
+		FileName:     "需密码.html",
+		FileType:     "html",
+		FileSize:     42,
+		SHA256:       digest,
+		ContentType:  "text/html",
+	}).Error)
+
+	link, err := svc.CreateArtifactShare(ctx, "artifact-password")
+	require.NoError(t, err)
+	tokenURL, err := url.Parse(link.URL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(tokenURL.Path, "/share/artifact/")
+
+	published, err := svc.SetArtifactSharePassword(ctx, "artifact-password", "abc123")
+	require.NoError(t, err)
+	require.True(t, published.PasswordConfigured)
+
+	metadata, err := svc.GetArtifactShare(context.Background(), token, "", "")
+	require.NoError(t, err)
+	require.True(t, metadata.RequiresPassword)
+	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "wrong-password")
+	require.ErrorIs(t, err, ErrArtifactSharePasswordInvalid)
+
+	access, err := svc.VerifyArtifactSharePassword(context.Background(), token, "abc123")
+	require.NoError(t, err)
+	require.NotEmpty(t, access.AccessToken)
+	view, err := svc.GetArtifactShare(context.Background(), token, "", access.AccessToken)
+	require.NoError(t, err)
+	require.False(t, view.RequiresPassword)
+	second, err := svc.SetArtifactSharePassword(ctx, "artifact-password", "different-password")
+	require.NoError(t, err)
+	require.True(t, second.PasswordConfigured)
+	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "different-password")
+	require.ErrorIs(t, err, ErrArtifactSharePasswordInvalid)
 }
 
 func TestProviderResourcesFromContent(t *testing.T) {

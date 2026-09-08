@@ -59,7 +59,7 @@ Run 使用 PostgreSQL 所有权租约与 epoch、检查点、工具回执和 out
 
 开发继续使用现有三 API、分角色后台及三 DocReader 编排；API `http://localhost:8080`，前端 `http://localhost:5177`，移动端 `/mobile/`。统一 Worker 使用 `custom/docker-compose.agent-runtime.yml`。工作区延迟创建，普通问答无需启动代码执行容器。
 
-生产 Helm 使用 `agentRuntime` 与独立 `workspace` 镜像配置。工作区不携带模型或业务凭据，非 root 运行、网络隔离和资源限制；产物走私有对象存储与应用鉴权下载。构建、容量、拓扑与 Helm 校验脚本已调整。此次没有向实际生产集群推送或部署；Kubernetes 工作区仅完成静态与代码测试，不能据此宣称已通过真实集群运行验证。
+生产 Helm 使用 `agentRuntime` 与独立 `workspace` 镜像配置。工作区不携带模型或业务凭据，非 root 运行并受资源限制；Docker 工作区使用默认 `bridge` 网络直接访问互联网，但不加入包含数据库和基础设施的 WeKnora 内部业务网络。Kubernetes 工作区的出网由集群网络策略负责；产物走私有对象存储与应用鉴权下载。构建、容量、拓扑与 Helm 校验脚本已调整。此次没有向实际生产集群推送或部署；Kubernetes 工作区仅完成静态与代码测试，不能据此宣称已通过真实集群运行验证。
 
 ## 已执行验证
 

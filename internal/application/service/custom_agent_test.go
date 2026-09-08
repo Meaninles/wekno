@@ -56,8 +56,8 @@ func TestRefreshBuiltinAgentMetadataUsesCurrentRegistry(t *testing.T) {
 	assert.Equal(t, "通用智能体最新描述", refreshed.Description)
 	assert.Equal(t, "🧠", refreshed.Avatar)
 	assert.Equal(t, types.AgentTypeGeneralAgent, refreshed.Config.AgentType)
-	assert.Equal(t, "general_agent", refreshed.Config.SystemPromptID)
-	assert.Equal(t, "最新系统提示词", refreshed.Config.SystemPrompt)
+	assert.Equal(t, "legacy_general_agent", refreshed.Config.SystemPromptID)
+	assert.Equal(t, "旧系统提示词", refreshed.Config.SystemPrompt)
 	assert.Equal(t, "旧名称", stale.Name)
 	assert.Equal(t, "旧系统提示词", stale.Config.SystemPrompt)
 }

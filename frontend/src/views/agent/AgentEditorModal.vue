@@ -419,6 +419,7 @@
                       <div class="setting-control">
                         <ModelSelector model-type="KnowledgeQA" :selected-model-id="formData.config.model_id"
                           :all-models="allModels"
+                          :disabled="builtinModelFieldsLocked"
                           @update:selected-model-id="(val: string) => formData.config.model_id = val"
                           @add-model="handleAddModel('llm')" :placeholder="$t('agent.editor.modelPlaceholder')" />
                       </div>
@@ -491,6 +492,7 @@
                       <div class="setting-control">
                         <ModelSelector model-type="Rerank" :selected-model-id="formData.config.rerank_model_id"
                           :all-models="allModels"
+                          :disabled="builtinModelFieldsLocked"
                           @update:selected-model-id="(val: string) => formData.config.rerank_model_id = val"
                           @add-model="handleAddModel('rerank')"
                           :placeholder="$t('agent.editor.rerankModelPlaceholder')" />
@@ -569,6 +571,7 @@
                       <div class="setting-control">
                         <ModelSelector model-type="VLLM" :selected-model-id="formData.config.vlm_model_id"
                           :all-models="allModels"
+                          :disabled="builtinModelFieldsLocked"
                           @update:selected-model-id="(val: string) => formData.config.vlm_model_id = val"
                           @add-model="handleAddModel('vllm')"
                           :placeholder="$t('agentEditor.imageUpload.vlmModelPlaceholder')" />
@@ -621,6 +624,7 @@
                       <div class="setting-control">
                         <ModelSelector model-type="ASR" :selected-model-id="formData.config.asr_model_id"
                           :all-models="allModels"
+                          :disabled="builtinModelFieldsLocked"
                           @update:selected-model-id="(val: string) => formData.config.asr_model_id = val"
                           @add-model="handleAddModel('asr')"
                           :placeholder="$t('agentEditor.audioUpload.asrModelPlaceholder')" />
@@ -1031,7 +1035,6 @@
                           v-model="formData.config.knowledge_management"
                           :knowledge-base-ids="formData.config.knowledge_bases || []"
                           :knowledge-bases="kbOptions"
-                          :disabled="isBuiltinAgent"
                         />
                       </div>
                     </div>
@@ -2834,6 +2837,11 @@ const thinkingEnabled = computed({
 const isBuiltinAgent = computed(() => {
   return formData.value.is_builtin === true;
 });
+// Built-in model bindings are tenant-wide policy values. Administrators may
+// change them; ordinary users can inspect the effective IDs but cannot edit.
+const builtinModelFieldsLocked = computed(() =>
+  isBuiltinAgent.value && !authStore.hasRole('admin'),
+);
 const canResetBuiltinAgent = computed(() => {
   return editorMode.value === 'edit' && isBuiltinAgent.value && !!formData.value.id && !props.readOnly;
 });

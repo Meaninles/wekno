@@ -18,11 +18,12 @@ import (
 
 // Custom agent related errors
 var (
-	ErrAgentNotFound                = errors.New("agent not found")
-	ErrCannotModifyBuiltin          = errors.New("cannot modify built-in agent basic info")
-	ErrCannotDeleteBuiltin          = errors.New("cannot delete built-in agent")
-	ErrAgentNameRequired            = errors.New("agent name is required")
-	ErrAgentDocumentTemplateInvalid = errors.New("document template config is invalid")
+	ErrAgentNotFound                  = errors.New("agent not found")
+	ErrCannotModifyBuiltin            = errors.New("cannot modify built-in agent basic info")
+	ErrBuiltinAgentModelPolicyInvalid = errors.New("built-in agent model policy is invalid")
+	ErrCannotDeleteBuiltin            = errors.New("cannot delete built-in agent")
+	ErrAgentNameRequired              = errors.New("agent name is required")
+	ErrAgentDocumentTemplateInvalid   = errors.New("document template config is invalid")
 	// ErrAgentCustomConfigInvalid wraps validation failures returned by custom
 	// agent-type normalizers so the HTTP layer can consistently return 400.
 	ErrAgentCustomConfigInvalid = errors.New("custom agent config is invalid")
@@ -77,7 +78,7 @@ func normalizeCustomAgentDocumentTemplateConfig(agent *types.CustomAgent) error 
 }
 
 func refreshBuiltinAgentMetadata(ctx context.Context, agent *types.CustomAgent, tenantID uint64) *types.CustomAgent {
-	if agent == nil || !types.IsBuiltinAgentID(agent.ID) {
+	if agent == nil || (!agent.IsBuiltin && !isBuiltinAgentIDForService(agent.ID)) {
 		return agent
 	}
 	defaultAgent := types.GetBuiltinAgentWithContext(ctx, agent.ID, tenantID)
@@ -89,24 +90,17 @@ func refreshBuiltinAgentMetadata(ctx context.Context, agent *types.CustomAgent, 
 	refreshed.Description = defaultAgent.Description
 	refreshed.Avatar = defaultAgent.Avatar
 	refreshed.IsBuiltin = true
-	refreshBuiltinAgentManagedPrompt(&refreshed, defaultAgent)
 	refreshed.EnsureDefaults()
 	return &refreshed
+}
+
+func isBuiltinAgentIDForService(id string) bool {
+	return types.IsBuiltinAgentID(id) || strings.HasPrefix(strings.TrimSpace(id), "builtin-")
 }
 
 func resolveBuiltinAgentConfig(ctx context.Context, agent *types.CustomAgent, tenantID uint64) (*types.CustomAgent, error) {
 	refreshed := refreshBuiltinAgentMetadata(ctx, agent, tenantID)
 	return applyBuiltinAgentConfigOverlays(ctx, refreshed, tenantID)
-}
-
-func refreshBuiltinAgentManagedPrompt(agent *types.CustomAgent, defaultAgent *types.CustomAgent) {
-	if agent == nil || defaultAgent == nil {
-		return
-	}
-	if defaultAgent.Config.SystemPromptID != "" {
-		agent.Config.SystemPromptID = defaultAgent.Config.SystemPromptID
-		agent.Config.SystemPrompt = defaultAgent.Config.SystemPrompt
-	}
 }
 
 func compactStringList(in []string) []string {
@@ -232,7 +226,7 @@ func (s *customAgentService) GetAgentByID(ctx context.Context, id string) (*type
 	}
 
 	// Check if it's a built-in agent using the registry
-	if types.IsBuiltinAgentID(id) {
+	if isBuiltinAgentIDForService(id) {
 		// Try to get from database first (for customized config)
 		agent, err := s.repo.GetAgentByID(ctx, id, tenantID)
 		if err == nil {
@@ -260,7 +254,7 @@ func (s *customAgentService) GetAgentByID(ctx context.Context, id string) (*type
 	return agent, nil
 }
 
-// GetAgentByIDAndTenant retrieves an agent by ID and tenant (for shared agents; does not resolve built-in)
+// GetAgentByIDAndTenant retrieves an agent by ID and tenant (for shared agents).
 func (s *customAgentService) GetAgentByIDAndTenant(ctx context.Context, id string, tenantID uint64) (*types.CustomAgent, error) {
 	if id == "" {
 		logger.Error(ctx, "Agent ID is empty")
@@ -272,6 +266,9 @@ func (s *customAgentService) GetAgentByIDAndTenant(ctx context.Context, id strin
 			return nil, ErrAgentNotFound
 		}
 		return nil, err
+	}
+	if agent.IsBuiltin || isBuiltinAgentIDForService(agent.ID) {
+		return resolveBuiltinAgentConfig(ctx, agent, tenantID)
 	}
 	return agent, nil
 }
@@ -295,7 +292,7 @@ func (s *customAgentService) ListAgents(ctx context.Context) ([]*types.CustomAge
 	// Track which built-in agents exist in database
 	builtinInDB := make(map[string]bool)
 	for _, agent := range allAgents {
-		if types.IsBuiltinAgentID(agent.ID) {
+		if agent.IsBuiltin || isBuiltinAgentIDForService(agent.ID) {
 			builtinInDB[agent.ID] = true
 		}
 	}
@@ -331,8 +328,46 @@ func (s *customAgentService) ListAgents(ctx context.Context) ([]*types.CustomAge
 	}
 
 	// Add custom agents
+	knownBuiltins := make(map[string]bool, len(result))
+	for _, agent := range result {
+		if agent != nil {
+			knownBuiltins[agent.ID] = true
+		}
+	}
+	// Internal built-ins are intentionally absent from the normal picker order,
+	// but remain visible in the management response so their centrally locked
+	// policy can be inspected and their tenant-wide visibility can be managed.
 	for _, agent := range allAgents {
-		if !types.IsBuiltinAgentID(agent.ID) {
+		if !agent.IsBuiltin && !isBuiltinAgentIDForService(agent.ID) {
+			continue
+		}
+		if knownBuiltins[agent.ID] {
+			continue
+		}
+		resolved, err := resolveBuiltinAgentConfig(ctx, agent, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, resolved)
+		knownBuiltins[agent.ID] = true
+	}
+	for _, internalBuiltinID := range []string{types.BuiltinWikiFixerID} {
+		if knownBuiltins[internalBuiltinID] {
+			continue
+		}
+		if agent := types.GetBuiltinAgentWithContext(ctx, internalBuiltinID, tenantID); agent != nil {
+			resolved, err := resolveBuiltinAgentConfig(ctx, agent, tenantID)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, resolved)
+			knownBuiltins[internalBuiltinID] = true
+		}
+	}
+
+	// Add custom agents
+	for _, agent := range allAgents {
+		if !agent.IsBuiltin && !isBuiltinAgentIDForService(agent.ID) {
 			result = append(result, agent)
 		}
 	}
@@ -354,7 +389,7 @@ func (s *customAgentService) UpdateAgent(ctx context.Context, agent *types.Custo
 	}
 
 	// Handle built-in agents specially using registry
-	if types.IsBuiltinAgentID(agent.ID) {
+	if isBuiltinAgentIDForService(agent.ID) {
 		return s.updateBuiltinAgent(ctx, agent, tenantID)
 	}
 
@@ -426,12 +461,15 @@ func (s *customAgentService) updateBuiltinAgent(ctx context.Context, agent *type
 	if existingAgent != nil {
 		// Update existing record - persist the customized config and refresh
 		// built-in metadata from the current registry.
+		previousAgent := *existingAgent
 		existingAgent.Name = defaultAgent.Name
 		existingAgent.Description = defaultAgent.Description
 		existingAgent.Avatar = defaultAgent.Avatar
 		existingAgent.IsBuiltin = true
+		if err := applyBuiltinAgentConfigMutators(ctx, &previousAgent, agent, tenantID); err != nil {
+			return nil, err
+		}
 		existingAgent.Config = agent.Config
-		refreshBuiltinAgentManagedPrompt(existingAgent, defaultAgent)
 		existingAgent.UpdatedAt = time.Now()
 		existingAgent.EnsureDefaults()
 		if err := normalizeCustomAgentDocumentTemplateConfig(existingAgent); err != nil {
@@ -474,7 +512,10 @@ func (s *customAgentService) updateBuiltinAgent(ctx context.Context, agent *type
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
-	refreshBuiltinAgentManagedPrompt(newAgent, defaultAgent)
+	if err := applyBuiltinAgentConfigMutators(ctx, nil, agent, tenantID); err != nil {
+		return nil, err
+	}
+	newAgent.Config = agent.Config
 	newAgent.EnsureDefaults()
 	if err := normalizeCustomAgentDocumentTemplateConfig(newAgent); err != nil {
 		return nil, err
@@ -513,7 +554,7 @@ func (s *customAgentService) DeleteAgent(ctx context.Context, id string) error {
 	}
 
 	// Cannot delete built-in agents using registry check
-	if types.IsBuiltinAgentID(id) {
+	if isBuiltinAgentIDForService(id) {
 		return ErrCannotDeleteBuiltin
 	}
 

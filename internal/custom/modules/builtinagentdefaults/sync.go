@@ -22,13 +22,25 @@ const (
 
 var modelCloneNamespace = uuid.NewSHA1(uuid.NameSpaceOID, []byte("weknora builtin agent default model clone"))
 
+// ResolveModelForTenant validates a model binding and, when the source model
+// belongs to the reference tenant, creates or reuses the deterministic
+// tenant-local clone used by the built-in defaults module.
+func (s *Service) ResolveModelForTenant(
+	ctx context.Context,
+	targetTenantID uint64,
+	sourceModelID string,
+	expectedType types.ModelType,
+) (string, error) {
+	return s.resolveTenantModelID(ctx, targetTenantID, sourceModelID, expectedType)
+}
+
 func (s *Service) ApplyReferenceModelDefaults(
 	ctx context.Context,
 	agent *types.CustomAgent,
 	tenantID uint64,
 ) (*types.CustomAgent, error) {
 	agent = applyReservedProfessionalSkillDefaults(agent)
-	if s == nil || s.db == nil || agent == nil || !types.IsBuiltinAgentID(agent.ID) {
+	if s == nil || s.db == nil || agent == nil || (!agent.IsBuiltin && !types.IsBuiltinAgentID(agent.ID)) {
 		return agent, nil
 	}
 
@@ -63,7 +75,7 @@ func (s *Service) ApplyReferenceModelDefaults(
 }
 
 func applyReservedProfessionalSkillDefaults(agent *types.CustomAgent) *types.CustomAgent {
-	if agent == nil || !types.IsBuiltinAgentID(agent.ID) {
+	if agent == nil || (!agent.IsBuiltin && !types.IsBuiltinAgentID(agent.ID)) {
 		return agent
 	}
 	resolved := *agent
@@ -136,16 +148,6 @@ func (s *Service) referenceBuiltinAgent(
 		}
 		return nil, err
 	}
-	if defaultAgent != nil {
-		if defaultAgent.Config.SystemPromptID != "" {
-			agent.Config.SystemPromptID = defaultAgent.Config.SystemPromptID
-			agent.Config.SystemPrompt = defaultAgent.Config.SystemPrompt
-		}
-
-		if agent.Config.Thinking == nil {
-			agent.Config.Thinking = cloneBoolPtr(defaultAgent.Config.Thinking)
-		}
-	}
 	agent.EnsureDefaults()
 	return &agent, nil
 }
@@ -176,15 +178,6 @@ func (s *Service) applyReferenceModelConfig(
 	if err != nil {
 		return cfg, err
 	}
-
-	cfg.Temperature = reference.Temperature
-	cfg.MaxCompletionTokens = reference.MaxCompletionTokens
-	cfg.Thinking = cloneBoolPtr(reference.Thinking)
-	cfg.ImageUploadEnabled = reference.ImageUploadEnabled
-	cfg.AudioUploadEnabled = reference.AudioUploadEnabled
-
-	cfg.SystemPrompt = reference.SystemPrompt
-	cfg.SystemPromptID = reference.SystemPromptID
 
 	return cfg, nil
 }
@@ -341,14 +334,6 @@ func modelCloneMatches(existing *types.Model, desired *types.Model) bool {
 		existing.IsBuiltin == desired.IsBuiltin &&
 		existing.ManagedBy == desired.ManagedBy &&
 		existing.Status == desired.Status
-}
-
-func cloneBoolPtr(in *bool) *bool {
-	if in == nil {
-		return nil
-	}
-	v := *in
-	return &v
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

@@ -292,7 +292,9 @@ const agentsList = computed(() => props.agents ?? []);
 
 const localizedBuiltinAgents = computed(() => {
   const apiBuiltins = agentsList.value.filter(a => a.is_builtin);
-  return apiBuiltins;
+  // Management pages still receive every built-in. The conversation picker
+  // only receives the tenant-admin-enabled subset.
+  return apiBuiltins.filter(agent => agent.visible_in_chat === true);
 });
 
 const builtinAgents = computed(() =>
@@ -305,13 +307,15 @@ const customAgents = computed(() =>
 
 const toCustomAgent = (agent: SharedAgentInfo['agent']): CustomAgent => ({
   ...agent,
-  is_builtin: false,
+  // Preserve the source agent's built-in identity so model locking and the
+  // tenant-wide conversation visibility policy also apply to shared built-ins.
+  is_builtin: agent.is_builtin,
   config: agent.config ?? {},
 });
 
 const allSharedAgentsList = computed<SharedAgentSelection[]>(() =>
   (orgStore.sharedAgents || [])
-    .filter(shared => !shared.disabled_by_me)
+    .filter(shared => !shared.disabled_by_me && (!shared.agent?.is_builtin || shared.agent.visible_in_chat === true))
     .map(shared => ({ ...shared, agent: toCustomAgent(shared.agent) })),
 );
 

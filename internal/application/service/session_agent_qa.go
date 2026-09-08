@@ -25,10 +25,20 @@ func (s *sessionService) AgentQA(ctx context.Context, req *types.QARequest, bus 
 			return err
 		}
 		tenantID, _ := types.TenantIDFromContext(ctx)
-		copyReq.CustomAgent = types.GetBuiltinAgent(types.BuiltinKnowledgeQAID, tenantID)
-		if copyReq.CustomAgent == nil {
+		builtinAgent := types.GetBuiltinAgent(types.BuiltinKnowledgeQAID, tenantID)
+		if builtinAgent == nil {
 			return errors.New("default QA profile is unavailable")
 		}
+		// The legacy agent-less endpoint still resolves a model from the
+		// request/session fallback. Once the built-in QA profile is materialized,
+		// put that effective value on the profile so the agent-authoritative
+		// model rule does not erase the legacy path.
+		builtinAgent.Config.ModelID = modelID
+		resolvedAgent, resolveErr := resolveBuiltinAgentConfig(ctx, builtinAgent, tenantID)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		copyReq.CustomAgent = resolvedAgent
 		copyReq.CustomAgent.Config.KBSelectionMode = "selected"
 		copyReq.CustomAgent.Config.KnowledgeBases = kbIDs
 		copyReq.KnowledgeIDs = knowledgeIDs

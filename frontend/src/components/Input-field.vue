@@ -24,14 +24,11 @@ import MentionSelector from './MentionSelector.vue';
 import AgentSelector from './AgentSelector.vue';
 import { getCaretCoordinates } from '@/utils/caret';
 import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom';
-import { type ModelConfig } from '@/api/model';
 import { type CustomAgent, BUILTIN_GENERAL_AGENT_ID, BUILTIN_KNOWLEDGE_QA_ID } from '@/api/agent';
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
 import AttachmentUpload, { type AttachmentFile } from './AttachmentUpload.vue';
-import { dedupeChatModelOptions } from '@/custom/modules/model-options/dedupe';
-import { resolveChatModelSelection } from '@/custom/modules/chatModelSelection/policy';
 import { resolveAgentEnabledFromMode } from '@/custom/modules/agentConversationMode/policy';
 import {
   kbSatisfiesAgentRequirements,
@@ -72,6 +69,9 @@ const { t, locale } = useI18n();
 let query = ref("");
 const showKbSelector = ref(false);
 const showSkillSelector = ref(false);
+
+// 暂时隐藏对话界面的联网选择入口，保留相关状态与业务逻辑，后续恢复时改为 true。
+const SHOW_WEB_SEARCH_SELECTOR = false;
 
 // Image upload state
 const uploadedImages = ref<Array<{ file: File; preview: string }>>([]);
@@ -465,11 +465,6 @@ const isImageUploadEnabledByAgent = computed(() => {
   return currentAgentConfig.value?.image_upload_enabled === true;
 });
 
-// 模型选择是否被智能体锁定 - 已移除锁定逻辑，允许用户自由切换模型
-const isModelLockedByAgent = computed(() => {
-  return false;
-});
-
 // Mention related state
 const showMention = ref(false);
 const mentionQuery = ref("");
@@ -785,18 +780,15 @@ const clearSelectedReferences = () => {
   mcpServiceIds.forEach((id) => settingsStore.removeMCPService(id));
 };
 
-// 使用 computed 从 store 读取，并通过 setter 同步回 store
-const selectedModelId = computed({
-  get: () => settingsStore.conversationModels.selectedChatModelId || '',
-  set: (val: string) => settingsStore.updateConversationModels({ selectedChatModelId: val })
+// The conversation input never chooses a model. The effective model always
+// comes from the selected agent's editor configuration; the store fallback is
+// only used while an agent is still loading or for the default empty profile.
+const selectedModelId = computed(() => {
+  const configured = String(agentModelId.value || '').trim();
+  if (configured) return configured;
+  return String(settingsStore.conversationModels.selectedChatModelId || '').trim();
 });
-const availableModels = computed<ModelConfig[]>(() =>
-  dedupeChatModelOptions(rawChatModels.value, selectedModelId.value)
-);
 const modelsLoading = ref(false);
-const showModelSelector = ref(false);
-const modelButtonRef = ref<HTMLElement>();
-const modelDropdownStyle = ref<Record<string, string>>({});
 
 // 显示的知识库标签（最多显示2个）
 const displayedKbs = computed(() => selectedKbs.value.slice(0, 2));
@@ -970,18 +962,17 @@ const loadAgents = async (force = false) => {
 const ensureSelectedAgentNotDisabled = () => {
   if (settingsStore.selectedAgentSourceTenantId) return
   const currentId = settingsStore.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID
-  if (agents.value.some(a => a.id === currentId) && !disabledOwnAgentIds.value.includes(currentId)) return
+  const isEnabled = (agent: CustomAgent) =>
+    !disabledOwnAgentIds.value.includes(agent.id) && (!agent.is_builtin || agent.visible_in_chat === true)
+  if (agents.value.some(a => a.id === currentId && isEnabled(a))) return
 
-  const isEnabled = (id: string) =>
-    agents.value.some(a => a.id === id) && !disabledOwnAgentIds.value.includes(id)
+  const isEnabledByID = (id: string) => agents.value.some(a => a.id === id && isEnabled(a))
 
   let fallback: CustomAgent | undefined
-  if (isEnabled(BUILTIN_KNOWLEDGE_QA_ID)) {
-    fallback = agents.value.find(a => a.id === BUILTIN_KNOWLEDGE_QA_ID)
-  } else if (isEnabled(BUILTIN_KNOWLEDGE_QA_ID)) {
+  if (isEnabledByID(BUILTIN_KNOWLEDGE_QA_ID)) {
     fallback = agents.value.find(a => a.id === BUILTIN_KNOWLEDGE_QA_ID)
   } else {
-    fallback = agents.value.find(a => !disabledOwnAgentIds.value.includes(a.id))
+    fallback = agents.value.find(isEnabled)
   }
   if (!fallback) return
 
@@ -995,39 +986,10 @@ const ensureSelectedAgentNotDisabled = () => {
 
 // 对话下拉中展示的「我的」智能体（排除当前租户已停用的）
 const enabledAgents = computed(() =>
-  agents.value.filter(a => !disabledOwnAgentIds.value.includes(a.id))
+  agents.value.filter(a =>
+    !disabledOwnAgentIds.value.includes(a.id) && (!a.is_builtin || a.visible_in_chat === true),
+  )
 );
-
-// Persist the user's last selected chat model under the active user + tenant.
-// Model IDs are tenant-owned; a global key can make a newly logged-in user post
-// an old tenant's model ID as summary_model_id.
-const LAST_CHAT_MODEL_KEY = 'weknora_last_chat_model_id'
-
-const lastChatModelStorageKey = computed(() => {
-  const userId = String(authStore.currentUserId || '').trim()
-  const tenantId = String(authStore.effectiveTenantId || authStore.currentTenantId || '').trim()
-  return userId && tenantId ? `${LAST_CHAT_MODEL_KEY}:${tenantId}:${userId}` : LAST_CHAT_MODEL_KEY
-})
-
-const readLastChatModelID = (): string => {
-  try {
-    return localStorage.getItem(lastChatModelStorageKey.value) || ''
-  } catch {
-    return ''
-  }
-}
-
-const writeLastChatModelID = (id: string) => {
-  try {
-    if (id) {
-      localStorage.setItem(lastChatModelStorageKey.value, id)
-    } else {
-      localStorage.removeItem(lastChatModelStorageKey.value)
-    }
-  } catch {
-    // localStorage may be disabled in incognito mode; ignore.
-  }
-}
 
 const normalizeModelId = (id?: string | null) => (id || '').trim();
 
@@ -1047,37 +1009,6 @@ const isUsableChatModelId = (id?: string | null) => {
   return !!modelId && (!!findRawChatModelById(modelId) || isSelectedAgentModelId(modelId));
 };
 
-const applyChatModelSelection = (modelId: string) => {
-  settingsStore.updateConversationModels({
-    summaryModelId: modelId,
-    selectedChatModelId: modelId,
-    rerankModelId: '',
-  });
-};
-
-const preferredChatModelSelection = () => resolveChatModelSelection({
-  currentModelId: selectedModelId.value,
-  agentModelId: agentModelId.value,
-  lastUserModelId: readLastChatModelID(),
-  availableModelIds: rawChatModels.value.map(model => model.id),
-  catalogReady: chatResources.isFresh('models'),
-});
-
-const applyPreferredChatModelSelection = () => {
-  const resolution = preferredChatModelSelection();
-  if (resolution.modelId !== selectedModelId.value) {
-    applyChatModelSelection(resolution.modelId);
-  }
-  return resolution;
-};
-
-// A model selected in the UI is a request-level override and must survive the
-// create-chat -> chat route remount. Switching agents still applies that
-// agent's configured model because handleSelectAgent updates the current model.
-const initChatModelSelection = () => {
-  applyPreferredChatModelSelection();
-};
-
 const loadChatModels = async (force = false) => {
   if (modelsLoading.value) return;
   modelsLoading.value = true;
@@ -1093,21 +1024,37 @@ const loadChatModels = async (force = false) => {
 };
 
 const ensureModelSelection = () => {
-  const resolution = applyPreferredChatModelSelection();
-  const lastPick = readLastChatModelID();
-  if (
-    chatResources.isFresh('models')
-    && lastPick
-    && resolution.source !== 'explicit-user'
-    && resolution.source !== 'last-user'
-    && !isUsableChatModelId(lastPick)
-  ) {
-    writeLastChatModelID('');
+  const effective = normalizeModelId(agentModelId.value);
+  if (effective) {
+    if (
+      settingsStore.conversationModels.summaryModelId !== effective ||
+      settingsStore.conversationModels.selectedChatModelId !== effective
+    ) {
+      settingsStore.updateConversationModels({
+        summaryModelId: effective,
+        selectedChatModelId: effective,
+        rerankModelId: '',
+      });
+    }
+    return;
+  }
+
+  // If the selected agent is still loading or has no model configured, choose
+  // the first available model automatically. This is not exposed as a chat
+  // control and can only be changed in the agent editor/settings.
+  if (!normalizeModelId(settingsStore.conversationModels.selectedChatModelId)) {
+    const firstModelID = normalizeModelId(rawChatModels.value[0]?.id);
+    if (firstModelID) {
+      settingsStore.updateConversationModels({
+        summaryModelId: firstModelID,
+        selectedChatModelId: firstModelID,
+        rerankModelId: '',
+      });
+    }
   }
 };
 
-// 智能体身份或其数据到位时重新计算有效模型：保留用户在下拉框中的
-// 显式选择，否则回退到智能体配置的 model_id。
+// 智能体身份或其数据到位时重新计算有效模型。
 watch(
   [selectedAgentId, () => settingsStore.selectedAgentSourceTenantId, agentModelId],
   () => {
@@ -1115,159 +1062,6 @@ watch(
   },
   { immediate: true }
 );
-
-const handleGoToConversationModels = () => {
-  showModelSelector.value = false;
-  router.push('/platform/settings');
-  setTimeout(() => {
-    const event = new CustomEvent('settings-nav', {
-      detail: { section: 'models', subsection: 'chat' },
-    });
-    window.dispatchEvent(event);
-  }, 100);
-};
-
-const handleModelChange = (value: string | number | Array<string | number> | undefined) => {
-  const normalized = Array.isArray(value) ? value[0] : value;
-  const val = normalized !== undefined && normalized !== null ? String(normalized) : '';
-
-  if (!val) {
-    selectedModelId.value = '';
-    return;
-  }
-  if (val === '__add_model__') {
-    const lastPick = readLastChatModelID();
-    selectedModelId.value = isUsableChatModelId(lastPick) ? lastPick : '';
-    handleGoToConversationModels();
-    return;
-  }
-
-  if (!isUsableChatModelId(val)) {
-    writeLastChatModelID('');
-    ensureModelSelection();
-    return;
-  }
-
-  writeLastChatModelID(val);
-  selectedModelId.value = val;
-  showModelSelector.value = false;
-
-  settingsStore.updateConversationModels({
-    summaryModelId: val,
-    selectedChatModelId: val,
-    rerankModelId: '',
-  });
-};
-
-const selectedModel = computed(() => {
-  return availableModels.value.find(model => model.id === selectedModelId.value);
-});
-
-// 模型展示名：本租户列表中有则用名称；若当前 ID 来自智能体但不在模型列表中，仍显示为智能体模型而非“未配置”。
-const selectedModelDisplayName = computed(() => {
-  if (selectedModel.value) return modelDisplayName(selectedModel.value);
-  if (!selectedModelId.value) return t('input.notConfigured');
-  const isSharedAgent = !!settingsStore.selectedAgentSourceTenantId;
-  const modelFromAgent = normalizeModelId(agentModelId.value) === selectedModelId.value;
-  if (modelFromAgent) {
-    return isSharedAgent ? t('input.sharedAgentModelLabel') : t('input.agentModelLabel');
-  }
-  return t('input.notConfigured');
-});
-
-const modelDisplayName = (model: ModelConfig) => {
-  const displayName = model.display_name?.trim();
-  return displayName || model.name;
-};
-
-const updateModelDropdownPosition = () => {
-  const anchor = modelButtonRef.value;
-  if (!anchor) {
-    modelDropdownStyle.value = {
-      position: 'fixed',
-      top: '50%',
-      left: '50%',
-      transform: 'translate(-50%, -50%)',
-    };
-    return;
-  }
-
-  // Normalize coordinates to CSS pixels so they are interpreted the same way
-  // the browser will render them under the root `zoom` (see utils/zoom.ts).
-  const zoom = getRootZoom();
-  const rect = rectToCssPx(anchor.getBoundingClientRect(), zoom);
-
-  const dropdownWidth = 280;
-  const offsetY = 8;
-  const { width: vw, height: vh } = cssViewportSize(zoom);
-
-  // 左对齐到触发元素的左边缘
-  // 使用 Math.floor 而不是 Math.round，避免像素对齐问题
-  let left = Math.floor(rect.left);
-
-  // 边界处理：不超出视口左右（留 16px margin）
-  const minLeft = 16;
-  const maxLeft = Math.max(16, vw - dropdownWidth - 16);
-  left = Math.max(minLeft, Math.min(maxLeft, left));
-
-  // 垂直定位：紧贴按钮，使用合理的高度避免空白
-  const preferredDropdownHeight = 280; // 优选高度（紧凑且够用）
-  const maxDropdownHeight = 360; // 最大高度
-  const minDropdownHeight = 200; // 最小高度
-  const topMargin = 20; // 顶部留白
-  const spaceBelow = vh - rect.bottom; // 下方剩余空间
-  const spaceAbove = rect.top; // 上方剩余空间
-
-  let actualHeight: number;
-  let shouldOpenBelow: boolean;
-
-  // 优先考虑下方空间
-  if (spaceBelow >= minDropdownHeight + offsetY) {
-    // 下方有足够空间，向下弹出
-    actualHeight = Math.min(preferredDropdownHeight, spaceBelow - offsetY - 16);
-    shouldOpenBelow = true;
-  } else {
-    // 向上弹出，优先使用 preferredHeight，必要时才扩展到 maxHeight
-    const availableHeight = spaceAbove - offsetY - topMargin;
-    if (availableHeight >= preferredDropdownHeight) {
-      // 有足够空间显示优选高度
-      actualHeight = preferredDropdownHeight;
-    } else {
-      // 空间不够，使用可用空间（但不小于最小高度）
-      actualHeight = Math.max(minDropdownHeight, availableHeight);
-    }
-    shouldOpenBelow = false;
-  }
-
-  // 根据弹出方向使用不同的定位方式
-  if (shouldOpenBelow) {
-    // 向下弹出：使用 top 定位，左对齐
-    const top = Math.floor(rect.bottom + offsetY);
-    modelDropdownStyle.value = {
-      position: 'fixed !important',
-      width: `${dropdownWidth}px`,
-      left: `${left}px`,
-      top: `${top}px`,
-      maxHeight: `${actualHeight}px`,
-      transform: 'none !important',
-      margin: '0 !important',
-      padding: '0 !important'
-    };
-  } else {
-    // 向上弹出：使用 bottom 定位，左对齐
-    const bottom = vh - rect.top + offsetY;
-    modelDropdownStyle.value = {
-      position: 'fixed !important',
-      width: `${dropdownWidth}px`,
-      left: `${left}px`,
-      bottom: `${bottom}px`,
-      maxHeight: `${actualHeight}px`,
-      transform: 'none !important',
-      margin: '0 !important',
-      padding: '0 !important'
-    };
-  }
-};
 
 // Mention Logic
 let lastMentionQuery = '';
@@ -1743,7 +1537,6 @@ const triggerMention = () => {
 
   // 关闭其他选择器
   showAgentModeSelector.value = false;
-  showModelSelector.value = false;
 
   textarea.focus();
 
@@ -1874,39 +1667,6 @@ const removeFile = (id: string) => {
   delete fileIdToKbId.value[id];
 };
 
-const toggleModelSelector = () => {
-  // 如果智能体锁定了模型，不允许打开选择器
-  if (isModelLockedByAgent.value) {
-    MessagePlugin.warning(t('input.modelLockedByAgent'));
-    return;
-  }
-
-  // 互斥：关闭其他
-  showMention.value = false;
-  showAgentModeSelector.value = false;
-
-  showModelSelector.value = !showModelSelector.value;
-  if (showModelSelector.value) {
-    if (!availableModels.value.length) {
-      loadChatModels();
-    }
-    // 多次更新位置确保准确
-    nextTick(() => {
-      updateModelDropdownPosition();
-      requestAnimationFrame(() => {
-        updateModelDropdownPosition();
-        setTimeout(() => {
-          updateModelDropdownPosition();
-        }, 50);
-      });
-    });
-  }
-};
-
-const closeModelSelector = () => {
-  showModelSelector.value = false;
-};
-
 // 关闭 Agent 模式选择器（点击外部）
 const closeAgentModeSelector = () => {
   showAgentModeSelector.value = false;
@@ -1930,7 +1690,6 @@ onMounted(() => {
   if (props.embeddedMode) return;
 
   // 并行拉取；若 platform 已预取且缓存未过期则直接复用
-  initChatModelSelection();
   void Promise.all([
     loadKnowledgeBases(),
     loadWebSearchConfig(),
@@ -1968,22 +1727,15 @@ onMounted(() => {
 
   // 监听点击外部关闭下拉菜单
   document.addEventListener('click', closeAgentModeSelector);
-  document.addEventListener('click', closeModelSelector);
   document.addEventListener('click', closeMentionSelector);
 
   // 监听窗口大小变化和滚动，重新计算位置
   resizeHandler = () => {
-    if (showModelSelector.value) {
-      updateModelDropdownPosition();
-    }
     if (showAgentModeSelector.value) {
       updateAgentModeDropdownPosition();
     }
   };
   scrollHandler = () => {
-    if (showModelSelector.value) {
-      updateModelDropdownPosition();
-    }
     if (showAgentModeSelector.value) {
       updateAgentModeDropdownPosition();
     }
@@ -1996,7 +1748,6 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener(CHAT_FILE_DROP_EVENT, handleChatFileDrop as EventListener);
   document.removeEventListener('click', closeAgentModeSelector);
-  document.removeEventListener('click', closeModelSelector);
   document.removeEventListener('click', closeMentionSelector);
   clearUploadedImages();
   if (resizeHandler) {
@@ -2020,12 +1771,6 @@ watch(() => uiStore.showSettingsModal, (visible, prevVisible) => {
     loadChatModels(true);
   }
 });
-
-watch([selectedKbIds, selectedFileIds], ([kbIds, fileIds]) => {
-  if (!kbIds.length && !fileIds.length) {
-    closeModelSelector();
-  }
-}, { deep: true });
 
 const emit = defineEmits<{
   (e: 'send-msg', query: string, modelId: string, mentionedItems: MentionRequestItem[], imageFiles: File[], attachmentFiles: AttachmentFile[]): void;
@@ -2231,7 +1976,6 @@ const updateAgentModeDropdownPosition = () => {
 const toggleAgentModeSelector = () => {
   // 互斥
   showMention.value = false;
-  showModelSelector.value = false;
 
   showAgentModeSelector.value = !showAgentModeSelector.value;
   if (showAgentModeSelector.value) {
@@ -2328,17 +2072,16 @@ const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) =>
     // 内置智能体未配置时保留当前用户设置
   }
 
-  // 2. 同步模型（选中的对话模型随智能体切换，含共享智能体）
+  // 2. 同步模型。模型只来自智能体编辑器配置，不提供对话级覆盖。
   const agentModel = agent.config?.model_id;
   if (agentModel && agentModel.trim() !== '') {
-    selectedModelId.value = agentModel;
+    settingsStore.updateConversationModels({
+      summaryModelId: agentModel,
+      selectedChatModelId: agentModel,
+      rerankModelId: '',
+    });
   } else {
-    const lastPick = readLastChatModelID();
-    if (isUsableChatModelId(lastPick)) {
-      selectedModelId.value = lastPick;
-    } else {
-      ensureModelSelection();
-    }
+    ensureModelSelection();
   }
 
   showAgentModeSelector.value = false;
@@ -2545,7 +2288,6 @@ const showAgentNotReadyMessage = (
 const toggleWebSearch = () => {
   // 互斥：虽然不是弹出层，但操作时关闭其他弹出层体验更好
   showMention.value = false;
-  showModelSelector.value = false;
   showAgentModeSelector.value = false;
   showSkillSelector.value = false;
 
@@ -2758,8 +2500,9 @@ defineExpose({
             :currentAgentId="selectedAgentId" :agents="enabledAgents" :all-models="allModels"
             @close="closeAgentModeSelector" @select="handleSelectAgent" @not-ready="handleAgentNotReady" />
 
-          <!-- WebSearch 开关按钮 -->
-          <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
+          <!-- WebSearch 开关按钮：入口暂时隐藏，相关逻辑保留 -->
+          <t-tooltip v-if="SHOW_WEB_SEARCH_SELECTOR" placement="top" theme="light"
+            :popupProps="{ overlayClassName: 'input-field-tooltip' }">
             <template #content>
               <div v-if="isWebSearchDisabledByAgent" class="tooltip-with-link">
                 <span>{{ $t('input.webSearchDisabledByAgent') }}</span>
@@ -2875,53 +2618,7 @@ defineExpose({
             </div>
           </t-tooltip>
 
-          <!-- 模型显示 -->
-          <t-tooltip :content="isModelLockedByAgent ? $t('input.modelLockedByAgent') : ''"
-            :disabled="!isModelLockedByAgent">
-            <div class="model-display" :class="{ 'agent-controlled': isModelLockedByAgent }">
-              <div ref="modelButtonRef" class="model-selector-trigger" @click.stop="toggleModelSelector">
-                <span class="model-selector-name">
-                  {{ selectedModelDisplayName }}
-                </span>
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" class="model-dropdown-arrow"
-                  :class="{ 'rotate': showModelSelector }">
-                  <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z" />
-                </svg>
-              </div>
-            </div>
-          </t-tooltip>
         </div>
-
-        <Teleport to="body">
-          <div v-if="showModelSelector" class="model-selector-overlay" @click="closeModelSelector">
-            <div class="model-selector-dropdown" :style="modelDropdownStyle" @click.stop>
-              <div class="model-selector-header">
-                <span>{{ $t('conversationSettings.models.chatGroupLabel') }}</span>
-                <button class="model-selector-add" type="button" @click="handleModelChange('__add_model__')">
-                  <span class="add-icon">+</span>
-                  <span class="add-text">{{ $t('input.addModel') }}</span>
-                </button>
-              </div>
-              <div class="model-selector-content">
-                <div v-for="model in availableModels" :key="model.id" class="model-option"
-                  :class="{ selected: model.id === selectedModelId }" @click="handleModelChange(model.id || '')">
-                  <div class="model-option-left">
-                    <div class="model-option-icon">
-                      <t-icon name="chat" size="14px" />
-                    </div>
-                    <div class="model-option-name-wrap">
-                      <span class="model-option-name">{{ modelDisplayName(model) }}</span>
-                      <span v-if="model.display_name" class="model-option-raw-name">{{ model.name }}</span>
-                    </div>
-                  </div>
-                </div>
-                <div v-if="availableModels.length === 0" class="model-option empty">
-                  {{ $t('input.noModel') }}
-                </div>
-              </div>
-            </div>
-          </div>
-        </Teleport>
 
         <!-- 右侧控制按钮组 -->
         <div class="control-right">
@@ -3700,229 +3397,6 @@ const getImgSrc = (url: string) => {
     width: 16px;
     height: 16px;
   }
-}
-
-/* 模型显示样式 */
-.model-display {
-  display: flex;
-  align-items: center;
-  margin-left: auto;
-  flex-shrink: 0;
-
-  &.agent-controlled {
-    .model-selector-trigger {
-      cursor: not-allowed;
-      opacity: 0.5;
-    }
-  }
-}
-
-.model-selector-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  min-width: 100px;
-  height: 22px;
-  border-radius: 6px;
-  border: .5px solid var(--td-component-border, #e7e7e7);
-  transition: background 0.12s, border-color 0.12s;
-  cursor: pointer;
-
-  &:hover {
-    background: var(--td-bg-color-secondarycontainer-hover, #e6e6e6);
-  }
-
-  &.disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-
-    &:hover {
-      background: var(--td-bg-color-secondarycontainer, #f5f5f5);
-    }
-  }
-}
-
-.model-selector-name {
-  flex: 1;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--td-text-color-secondary, #666);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.model-dropdown-arrow {
-  width: 10px;
-  height: 10px;
-  color: var(--td-text-color-placeholder, #999);
-  flex-shrink: 0;
-  transition: transform 0.12s;
-
-  &.rotate {
-    transform: rotate(180deg);
-  }
-}
-
-.model-selector-trigger.disabled .model-dropdown-arrow {
-  color: var(--td-text-color-placeholder, #999);
-}
-
-.model-selector-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  background: transparent;
-  touch-action: none;
-}
-
-.model-selector-dropdown {
-  position: fixed !important;
-  z-index: 10000;
-  background: var(--td-bg-color-container);
-  border: .5px solid var(--td-component-border);
-  border-radius: 10px;
-  box-shadow: var(--td-shadow-2);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  margin: 0 !important;
-  padding: 0 !important;
-  transform: none !important;
-  transform-origin: top left;
-  animation: modelSelectorFadeIn 0.15s ease-out;
-}
-
-@keyframes modelSelectorFadeIn {
-  from {
-    opacity: 0;
-    transform: scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-.model-selector-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border-bottom: .5px solid var(--td-component-stroke);
-  background: var(--td-bg-color-container);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--td-text-color-secondary);
-}
-
-.model-selector-content {
-  flex: 1;
-  min-height: 0;
-  max-height: 260px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 6px 8px;
-}
-
-.model-selector-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  border: .5px solid transparent;
-  background: transparent;
-  color: var(--td-brand-color);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.12s;
-
-  .add-icon {
-    font-size: 14px;
-    line-height: 1;
-    font-weight: 400;
-  }
-
-  &:hover {
-    color: var(--td-brand-color-hover);
-    background: var(--td-bg-color-secondarycontainer);
-  }
-}
-
-.model-option {
-  display: flex;
-  align-items: center;
-  padding: 6px 8px;
-  cursor: pointer;
-  transition: background 0.12s;
-  border-radius: 6px;
-  margin-bottom: 4px;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-
-  &:hover,
-  &.selected {
-    background: var(--td-bg-color-secondarycontainer);
-  }
-
-  &.empty {
-    color: var(--td-text-color-placeholder);
-    cursor: default;
-    text-align: center;
-    padding: 20px 8px;
-
-    &:hover {
-      background: transparent;
-    }
-  }
-}
-
-.model-option-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-width: 0;
-}
-
-.model-option-icon {
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  color: var(--td-text-color-secondary);
-}
-
-.model-option-name-wrap {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  flex: 1;
-}
-
-.model-option-name {
-  font-size: 12px;
-  color: var(--td-text-color-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.4;
-}
-
-.model-option-raw-name {
-  font-size: 11px;
-  color: var(--td-text-color-placeholder);
-  flex-shrink: 0;
 }
 
 /* Agent 模式选择下拉菜单 */

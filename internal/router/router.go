@@ -1028,6 +1028,8 @@ func RegisterCustomAgentRoutes(r *gin.RouterGroup, agentHandler *handler.CustomA
 		agents.GET("", g.Viewer(), agentHandler.ListAgents)
 		// Get agent by ID — Viewer+
 		agents.GET("/:id", g.Viewer(), agentHandler.GetAgent)
+		// Built-in conversation visibility is a tenant-wide admin setting.
+		agents.PUT("/:id/chat-visibility", g.Admin(), agentHandler.SetChatVisibility)
 		// Update agent — creator OR Admin+
 		agents.PUT("/:id", g.OwnedAgentOrAdmin(), agentHandler.UpdateAgent)
 		// Delete agent — creator OR Admin+

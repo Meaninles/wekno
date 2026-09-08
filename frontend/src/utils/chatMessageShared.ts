@@ -103,8 +103,13 @@ export const buildManualMarkdown = (_question: string, answer: string): string =
 
 export const copyTextToClipboard = async (content: string): Promise<void> => {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(content);
-    return;
+    try {
+      await navigator.clipboard.writeText(content);
+      return;
+    } catch {
+      // Clipboard permission can be lost after an asynchronous API call. Fall
+      // back to the legacy path so callers keep one consistent copy action.
+    }
   }
 
   const textArea = document.createElement('textarea');
@@ -113,6 +118,7 @@ export const copyTextToClipboard = async (content: string): Promise<void> => {
   textArea.style.opacity = '0';
   document.body.appendChild(textArea);
   textArea.select();
-  document.execCommand('copy');
+  const copied = document.execCommand('copy');
   document.body.removeChild(textArea);
+  if (!copied) throw new Error('clipboard copy failed');
 };

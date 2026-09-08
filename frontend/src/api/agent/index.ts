@@ -133,6 +133,11 @@ export interface CustomAgent {
   created_by?: string;
   // creator_name 由后端 list 接口批量回填，仅用于列表卡片来源徽章。
   creator_name?: string;
+  // Effective tenant-wide built-in policy metadata. Custom agents omit these
+  // fields; built-ins always return the effective model lock and visibility.
+  visible_in_chat?: boolean;
+  model_fields_locked?: boolean;
+  model_group?: 'qwen' | 'deepseek' | string;
   config: CustomAgentConfig;
   created_at?: string;
   updated_at?: string;
@@ -187,6 +192,12 @@ export function createAgent(data: CreateAgentRequest) {
 // 更新智能体
 export function updateAgent(id: string, data: UpdateAgentRequest) {
   return put(`/api/v1/agents/${id}`, data) as unknown as Promise<{ data: CustomAgent }>;
+}
+
+// Tenant-wide built-in conversation-picker visibility. The backend enforces
+// tenant-admin authorization; regular users only receive the effective flag.
+export function setAgentChatVisibility(id: string, visible: boolean) {
+  return put(`/api/v1/agents/${id}/chat-visibility`, { visible }) as unknown as Promise<{ data: CustomAgent }>;
 }
 
 // 恢复内置智能体默认配置。模型、数据源和 MCP 范围由后端按策略保留/跳过。

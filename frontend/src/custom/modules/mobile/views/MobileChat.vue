@@ -31,7 +31,6 @@ import type {
 } from "@/custom/modules/knowledgeFolders/types";
 import { BUILTIN_GENERAL_AGENT_ID, BUILTIN_KNOWLEDGE_QA_ID, type CustomAgent } from "@/api/agent";
 import { listSkills, type SkillInfo } from "@/api/skill";
-import type { ModelConfig } from "@/api/model";
 import { useChatStreamHandler } from "@/composables/useChatStreamHandler";
 import { useAuthStore } from "@/stores/auth";
 import { useChatResourcesStore } from "@/stores/chatResources";
@@ -51,7 +50,6 @@ import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
   agentLabel,
   formatFileSize,
-  modelLabel,
   skillLabel,
   type MobileMentionItem,
   type MobileResourceChip,
@@ -61,7 +59,7 @@ import { sortPinnedFirstByRecency } from "../pinOrdering";
 import { mergeMobileChatKnowledgeBases } from "../knowledgeCatalog";
 
 type ChatMessage = Record<string, any>;
-type SheetTab = "agent" | "model" | "context" | "skill";
+type SheetTab = "agent" | "context" | "skill";
 type KnowledgeSheetTab = "kb" | "file";
 type SkillSelectionMode = "all" | "selected" | "none";
 
@@ -275,17 +273,6 @@ const knowledgeBases = computed<any[]>(() =>
 );
 const agents = computed(() => chatResources.agents);
 const chatModels = computed(() => chatResources.chatModels);
-const modelTypeShortKeyByBackendType: Record<string, "chat" | "embedding" | "rerank" | "vllm" | "asr"> = {
-  KnowledgeQA: "chat",
-  Embedding: "embedding",
-  Rerank: "rerank",
-  VLLM: "vllm",
-  ASR: "asr",
-};
-const mobileModelTypeLabel = (type?: ModelConfig["type"] | string) => {
-  const key = modelTypeShortKeyByBackendType[String(type || "")];
-  return key ? t(`modelSettings.typeShort.${key}`) : String(type || "");
-};
 
 const normalizeStringList = (values: unknown[] = []) => {
   const seen = new Set<string>();
@@ -311,7 +298,6 @@ const rawSelectedSkillNames = computed(() =>
   ]),
 );
 const selectedAgentId = computed(() => settingsStore.selectedAgentId || BUILTIN_KNOWLEDGE_QA_ID);
-const selectedModelId = computed(() => settingsStore.conversationModels.selectedChatModelId || "");
 
 const fallbackBuiltinAgentNames: Record<string, string> = {
   [BUILTIN_KNOWLEDGE_QA_ID]: "知识问答",
@@ -329,8 +315,13 @@ const selectedAgent = computed(() => {
   } as CustomAgent;
 });
 
+const selectedModelId = computed(() => {
+  const configured = String(selectedAgent.value?.config?.model_id || "").trim();
+  return configured || settingsStore.conversationModels.selectedChatModelId || "";
+});
+
 const mobileAgentRows = computed<CustomAgent[]>(() => {
-  const merged = agents.value;
+  const merged = agents.value.filter((agent) => !agent.is_builtin || agent.visible_in_chat === true);
 
   return sortPinnedFirstByRecency(
     merged,
@@ -462,10 +453,6 @@ const activeSkillRows = computed(() => {
     return sortedProfessionalSkills.value;
   }
   return sortedLightweightSkills.value;
-});
-
-const selectedModel = computed(() => {
-  return chatModels.value.find((model) => model.id === selectedModelId.value) || chatModels.value[0] || null;
 });
 
 const webSearchProviders = computed(() => chatResources.webSearchProviders || []);
@@ -1253,13 +1240,12 @@ const selectAgent = (agent: CustomAgent) => {
   if (agent.config?.web_search_enabled !== undefined) {
     settingsStore.toggleWebSearch(agent.config.web_search_enabled === true);
   }
-  if (!agent.is_builtin) {
-    if (agent.config?.model_id) {
-      settingsStore.updateConversationModels({
-        summaryModelId: agent.config.model_id,
-        selectedChatModelId: agent.config.model_id,
-      });
-    }
+  if (agent.config?.model_id) {
+    settingsStore.updateConversationModels({
+      summaryModelId: agent.config.model_id,
+      selectedChatModelId: agent.config.model_id,
+      rerankModelId: agent.is_builtin ? "" : settingsStore.conversationModels.rerankModelId,
+    });
   }
   closeSheet();
 };
@@ -1283,14 +1269,6 @@ const toggleWebSearch = () => {
     return;
   }
   settingsStore.toggleWebSearch(!settingsStore.isWebSearchEnabled);
-};
-
-const selectModel = (model: ModelConfig) => {
-  settingsStore.updateConversationModels({
-    summaryModelId: model.id || "",
-    selectedChatModelId: model.id || "",
-  });
-  closeSheet();
 };
 
 const selectKnowledgeTab = (tab: KnowledgeSheetTab) => {
@@ -1528,7 +1506,9 @@ const sendMessage = async () => {
     const requestSettings = settingsStore.captureConversationScopedState();
     const requestDraftAttachments = toDraftAttachments();
     const requestAgentId = selectedAgentId.value;
-    const requestModelId = selectedModel.value?.id || selectedModelId.value || "";
+    // Model binding comes from the selected agent's editor configuration.
+    // There is no conversation-level model picker on mobile.
+    const requestModelId = selectedModelId.value || "";
     const requestWebSearch = canUseWebSearch.value;
     const requestSkills = agentEnabled ? [...selectedSkillNames.value] : [];
     const requestKBs = [...selectedKbIds.value];
@@ -1845,7 +1825,7 @@ onBeforeUnmount(() => {
         <div v-if="messagesList.length === 0" class="mobile-welcome">
           <div class="mobile-welcome__mark">智</div>
           <h1>向智汇提问</h1>
-          <p>可选择智能体、联网、图片、附件、技能、知识库和模型。</p>
+          <p>可选择智能体、联网、图片、附件、技能和知识库。</p>
         </div>
         <MobileChatMessage
           v-for="(message, index) in messagesList"
@@ -1899,10 +1879,6 @@ onBeforeUnmount(() => {
           <MobileIcon name="lightbulb" />
           <span>技能</span>
           <em v-if="selectedSkillContextCount">{{ selectedSkillContextCount }}</em>
-        </button>
-        <button type="button" class="config-pill" @click="openSheet('model')">
-          <MobileIcon name="cpu" />
-          <span>{{ modelLabel(selectedModel) }}</span>
         </button>
       </div>
 
@@ -1989,7 +1965,6 @@ onBeforeUnmount(() => {
           <strong>
             {{
               activeSheet === 'agent' ? '选择智能体' :
-              activeSheet === 'model' ? '选择模型' :
               activeSheet === 'skill' ? '选择技能' : '选择知识库'
             }}
           </strong>
@@ -2069,18 +2044,6 @@ onBeforeUnmount(() => {
               <MobileIcon :name="isAgentPinned(agent) ? 'pin-filled' : 'pin'" />
             </button>
           </div>
-
-          <button
-            v-for="model in activeSheet === 'model' ? chatModels : []"
-            :key="model.id"
-            type="button"
-            class="sheet-row"
-            :class="{ selected: selectedModelId === model.id }"
-            @click="selectModel(model)"
-          >
-            <span>{{ model.display_name || model.name }}</span>
-            <small>{{ mobileModelTypeLabel(model.type) }}</small>
-          </button>
 
           <button
             v-for="kb in activeSheet === 'context' && activeKnowledgeTab === 'kb' ? knowledgeBases : []"
@@ -2210,7 +2173,6 @@ onBeforeUnmount(() => {
 
           <div
             v-if="
-              (activeSheet === 'model' && !chatModels.length) ||
               (activeSheet === 'context' && activeKnowledgeTab === 'kb' && !knowledgeBases.length) ||
               (activeSheet === 'context' && activeKnowledgeTab === 'file' && !activeFileKbId && !knowledgeBases.length) ||
               (activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading && !activeFileRows.length && !activeFileFolders.length) ||

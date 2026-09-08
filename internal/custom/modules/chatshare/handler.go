@@ -68,6 +68,145 @@ func (h *Handler) Create(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
 }
 
+func (h *Handler) CreateArtifactShare(c *gin.Context) {
+	ctx := c.Request.Context()
+	artifactID := strings.TrimSpace(c.Param("artifact_id"))
+	if artifactID == "" {
+		c.Error(apperrors.NewBadRequestError("artifact_id is required"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+
+	result, err := h.service.CreateArtifactShare(ctx, artifactID)
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to create artifact share")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+func (h *Handler) SetArtifactSharePassword(c *gin.Context) {
+	ctx := c.Request.Context()
+	artifactID := strings.TrimSpace(c.Param("artifact_id"))
+	if artifactID == "" {
+		c.Error(apperrors.NewBadRequestError("artifact_id is required"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+	var req ArtifactSharePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(apperrors.NewBadRequestError("share password is required"))
+		return
+	}
+	result, err := h.service.SetArtifactSharePassword(ctx, artifactID, req.Password)
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to set artifact share password")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+// ArtifactShare serves metadata for an anonymous artifact share. The token is
+// the only capability; conversation share endpoints continue to use Get and
+// remain authenticated.
+func (h *Handler) ArtifactShare(c *gin.Context) {
+	ctx := c.Request.Context()
+	token := strings.TrimSpace(c.Param("token"))
+	previewToken := strings.TrimSpace(c.Query("preview"))
+	accessToken := strings.TrimSpace(c.Query("access"))
+	if token == "" {
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+
+	result, err := h.service.GetArtifactShare(ctx, token, previewToken, accessToken)
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to load artifact share")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+func (h *Handler) ArtifactShareAccess(c *gin.Context) {
+	ctx := c.Request.Context()
+	token := strings.TrimSpace(c.Param("token"))
+	if token == "" {
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+	var req ArtifactSharePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(apperrors.NewUnauthorizedError("share password is incorrect"))
+		return
+	}
+	result, err := h.service.VerifyArtifactSharePassword(ctx, token, req.Password)
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to verify artifact share password")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+// ArtifactShareContent streams the HTML body for an anonymous share. It is
+// deliberately separate from Artifact, whose attachment response is used by
+// authenticated conversation sharing and must remain unchanged.
+func (h *Handler) ArtifactShareContent(c *gin.Context) {
+	ctx := c.Request.Context()
+	token := strings.TrimSpace(c.Param("token"))
+	previewToken := strings.TrimSpace(c.Query("preview"))
+	accessToken := strings.TrimSpace(c.Query("access"))
+	if token == "" {
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+
+	file, err := h.service.GetArtifactShareContent(ctx, token, previewToken, accessToken)
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to load artifact share content")
+		return
+	}
+	defer file.Reader.Close()
+
+	fileName := strings.TrimSpace(file.FileName)
+	if fileName == "" {
+		fileName = "artifact.html"
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": fileName}))
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Header("Content-Length", strconv.FormatInt(file.FileSize, 10))
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Referrer-Policy", "no-referrer")
+	// The HTML is rendered inside the isolated share view iframe. Inline
+	// scripts are allowed for generated charts, while network, forms, plugins
+	// and parent-window access remain disabled by default.
+	// Keep the artifact isolated even if somebody opens the content URL
+	// directly instead of through ArtifactShareView's sandboxed iframe.
+	c.Header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
+	c.Status(http.StatusOK)
+	if _, err := io.Copy(c.Writer, file.Reader); err != nil {
+		logger.Warnf(ctx, "[chatshare] failed to write artifact share content: %v", err)
+	}
+}
+
 func (h *Handler) Get(c *gin.Context) {
 	ctx := c.Request.Context()
 	token := strings.TrimSpace(c.Param("token"))
@@ -172,6 +311,32 @@ func (h *Handler) writeServiceError(c *gin.Context, err error, fallback string) 
 			c.Error(apperrors.NewBadRequestError(msg))
 			return
 		}
+		logger.Warnf(c.Request.Context(), "[chatshare] %s: %v", fallback, err)
+		c.Error(apperrors.NewInternalServerError(fallback))
+	}
+}
+
+func (h *Handler) writeArtifactShareError(c *gin.Context, err error, fallback string) {
+	switch {
+	case stderrors.Is(err, ErrWebLoginRequired):
+		c.Error(apperrors.NewUnauthorizedError("web login required"))
+	case stderrors.Is(err, ErrArtifactShareUnsupported):
+		c.Error(apperrors.NewBadRequestError("only HTML artifacts can be shared"))
+	case stderrors.Is(err, ErrArtifactSharePasswordRequired):
+		c.Error(apperrors.NewUnauthorizedError("share password is required"))
+	case stderrors.Is(err, ErrArtifactSharePasswordInvalid):
+		c.Error(apperrors.NewUnauthorizedError("share password is incorrect"))
+	case stderrors.Is(err, ErrArtifactSharePasswordTooShort):
+		c.Error(apperrors.NewBadRequestError("share password must be at least 6 characters"))
+	case stderrors.Is(err, ErrArtifactSharePasswordTooLong):
+		c.Error(apperrors.NewBadRequestError("share password is too long"))
+	case stderrors.Is(err, ErrArtifactShareNotPublished):
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+	case stderrors.Is(err, ErrArtifactShareNotFound),
+		stderrors.Is(err, ErrArtifactShareRevoked),
+		stderrors.Is(err, gorm.ErrRecordNotFound):
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+	default:
 		logger.Warnf(c.Request.Context(), "[chatshare] %s: %v", fallback, err)
 		c.Error(apperrors.NewInternalServerError(fallback))
 	}

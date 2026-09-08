@@ -140,6 +140,7 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 	db := openBuiltinAgentDefaultsTestDB(t)
 	svc := NewService(db, nil)
 
+	disabled := false
 	enabled := true
 	sourceTenantID := uint64(10000)
 	targetTenantID := uint64(10002)
@@ -204,13 +205,16 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 		IsBuiltin: true,
 		TenantID:  targetTenantID,
 		Config: types.CustomAgentConfig{
-			AgentMode:          types.AgentModeUnified,
-			AgentType:          types.AgentTypeGeneralAgent,
-			ModelID:            "old-model",
-			RerankModelID:      "old-rerank",
-			MCPSelectionMode:   "selected",
-			MCPServices:        []string{"mcp-1"},
-			MCPAuthWaitTimeout: 42,
+			AgentMode:           types.AgentModeUnified,
+			AgentType:           types.AgentTypeGeneralAgent,
+			ModelID:             "old-model",
+			RerankModelID:       "old-rerank",
+			Temperature:         0.25,
+			MaxCompletionTokens: 2048,
+			Thinking:            &disabled,
+			MCPSelectionMode:    "selected",
+			MCPServices:         []string{"mcp-1"},
+			MCPAuthWaitTimeout:  42,
 		},
 	}
 
@@ -227,11 +231,11 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 	if got.Config.RerankModelID != expectedRerankID {
 		t.Fatalf("rerank_model_id = %q, want %q", got.Config.RerankModelID, expectedRerankID)
 	}
-	if got.Config.Temperature != 0.5 || got.Config.MaxCompletionTokens != 4096 {
-		t.Fatalf("model call settings not synced: %#v", got.Config)
+	if got.Config.Temperature != 0.25 || got.Config.MaxCompletionTokens != 2048 {
+		t.Fatalf("non-model call settings should remain target-local: %#v", got.Config)
 	}
-	if got.Config.Thinking == nil || !*got.Config.Thinking {
-		t.Fatalf("thinking should sync to true: %#v", got.Config.Thinking)
+	if got.Config.Thinking == nil || *got.Config.Thinking {
+		t.Fatalf("thinking should remain target-local: %#v", got.Config.Thinking)
 	}
 	if got.Config.MCPSelectionMode != "selected" || len(got.Config.MCPServices) != 1 || got.Config.MCPServices[0] != "mcp-1" || got.Config.MCPAuthWaitTimeout != 42 {
 		t.Fatalf("MCP settings should remain target-local: %#v", got.Config)
@@ -370,7 +374,7 @@ func TestEnsureUserProvisionedCreatesMissingBuiltinAgentsWithTenantModelDefaults
 	}
 }
 
-func TestApplyReferenceModelConfigSyncsPromptFields(t *testing.T) {
+func TestApplyReferenceModelConfigPreservesNonModelFields(t *testing.T) {
 	svc := NewService(nil, nil)
 	current := types.CustomAgentConfig{
 		SystemPrompt:   "target system",
@@ -389,8 +393,8 @@ func TestApplyReferenceModelConfigSyncsPromptFields(t *testing.T) {
 		t.Fatalf("applyReferenceModelConfig returned error: %v", err)
 	}
 
-	if got.SystemPrompt != "reference system" || got.SystemPromptID != "reference_system_id" {
-		t.Fatalf("system prompt fields were not synced: %#v", got)
+	if got.SystemPrompt != "target system" || got.SystemPromptID != "target_system_id" {
+		t.Fatalf("system prompt fields should remain target-local: %#v", got)
 	}
 
 	if got.MCPSelectionMode != "selected" || len(got.MCPServices) != 1 || got.MCPServices[0] != "mcp-1" {

@@ -32,6 +32,16 @@
         </div>
         <div class="general-artifacts__actions">
           <t-button
+            v-if="canShare(file)"
+            size="small"
+            variant="outline"
+            :loading="sharingId === file.artifact_id"
+            :disabled="sharingId === file.artifact_id"
+            @click="share(file)"
+          >
+            分享
+          </t-button>
+          <t-button
             v-if="canPreview(file)"
             size="small"
             variant="outline"
@@ -109,6 +119,36 @@
     </t-dialog>
 
     <t-dialog
+      v-model:visible="passwordDialogVisible"
+      :header="passwordDialogMode === 'set' ? '设置分享密码' : '输入分享密码'"
+      width="440px"
+      attach="body"
+      :confirm-btn="{ content: '确认并复制', loading: passwordSubmitting }"
+      :cancel-btn="{ content: '取消', disabled: passwordSubmitting }"
+      :close-btn="!passwordSubmitting"
+      :close-on-overlay-click="false"
+      @confirm="confirmSharePassword"
+      @close="resetPasswordDialog"
+    >
+      <p class="share-password__description">
+        {{ passwordDialogMode === 'set'
+          ? '首次分享请设置访问密码，查看者无需登录但必须输入密码。'
+          : '请输入此前设置的分享密码，用于复制分享链接和密码。' }}
+      </p>
+      <t-form :data="passwordForm" layout="vertical" @submit.prevent>
+        <t-form-item label="分享密码">
+          <t-input
+            v-model="passwordForm.password"
+            type="password"
+            :autocomplete="passwordDialogMode === 'set' ? 'new-password' : 'current-password'"
+            placeholder="请输入分享密码"
+            :disabled="passwordSubmitting"
+          />
+        </t-form-item>
+      </t-form>
+    </t-dialog>
+
+    <t-dialog
       v-model:visible="previewDialogVisible"
       :header="previewTitle"
       width="80vw"
@@ -130,12 +170,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import DocumentPreview from '@/components/document-preview.vue';
 import { getDown } from '@/utils/request';
 import { downloadEmbedArtifact } from '@/api/embed';
 import { getKnowledgeBaseById, listKnowledgeBases, uploadKnowledgeFile } from '@/api/knowledge-base';
+import { copyTextToClipboard } from '@/utils/chatMessageShared';
 import { useUploadConfirmStore } from '@/stores/uploadConfirm';
 import {
   getDocumentPreviewMimeType,
@@ -143,6 +184,14 @@ import {
   normalizePreviewFileType,
 } from '@/utils/documentPreview';
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData } from '@/types/tool-results';
+import {
+  absoluteArtifactShareURL,
+  cacheArtifactSharePassword,
+  createArtifactShare,
+  getCachedArtifactSharePassword,
+  setArtifactSharePassword,
+  type ArtifactShareLink,
+} from '@/custom/modules/chatshare/api';
 import {
   ARTIFACT_PAGE_SIZE,
   artifactMetaText,
@@ -169,6 +218,7 @@ interface KnowledgeBaseOption {
 
 const uploadConfirmStore = useUploadConfirmStore();
 const downloadingId = ref('');
+const sharingId = ref('');
 const importingId = ref('');
 const importing = ref(false);
 const loadingKbs = ref(false);
@@ -180,7 +230,15 @@ const previewBlob = ref<Blob | null>(null);
 const selectedKbId = ref('');
 const knowledgeBases = ref<KnowledgeBaseOption[]>([]);
 const visibleCount = ref(ARTIFACT_PAGE_SIZE);
+type PasswordDialogMode = 'set' | 'copy';
+const passwordDialogVisible = ref(false);
+const passwordSubmitting = ref(false);
+const passwordDialogMode = ref<PasswordDialogMode>('set');
+const passwordFile = ref<GeneralAgentArtifactFile | null>(null);
+const passwordForm = reactive({ password: '' });
 
+const artifactShareCache = new Map<string, ArtifactShareLink>();
+const artifactShareRequests = new Map<string, Promise<ArtifactShareLink>>();
 
 const files = computed(() => props.data.artifacts || []);
 const visibleFiles = computed(() => visibleArtifacts(files.value, visibleCount.value));
@@ -262,7 +320,13 @@ function mimeForFile(file: GeneralAgentArtifactFile, blob: Blob): string {
 
 function canPreview(file: GeneralAgentArtifactFile): boolean {
   const type = artifactFileType(file);
+  if (type === 'html' || type === 'htm') return canShare(file);
   return canDownload(file) && isDocumentPreviewSupported(type);
+}
+
+function canShare(file: GeneralAgentArtifactFile): boolean {
+  const type = artifactFileType(file);
+  return !isEmbedMode.value && !shareMode.value && !!file.artifact_id && (type === 'html' || type === 'htm');
 }
 
 function canDownload(file: GeneralAgentArtifactFile): boolean {
@@ -272,8 +336,152 @@ function canDownload(file: GeneralAgentArtifactFile): boolean {
   return !!file.download_url;
 }
 
-function openPreview(file: GeneralAgentArtifactFile) {
+async function ensureArtifactShare(file: GeneralAgentArtifactFile): Promise<ArtifactShareLink> {
+  const artifactID = String(file.artifact_id || '').trim();
+  if (!artifactID) throw new Error('产物不存在');
+  const cached = artifactShareCache.get(artifactID);
+  if (cached) return cached;
+  const pending = artifactShareRequests.get(artifactID);
+  if (pending) return pending;
+
+  const request = (async () => {
+    const response: any = await createArtifactShare(artifactID);
+    if (!response?.success || !response?.data?.url) {
+      throw new Error(response?.message || '分享链接创建失败');
+    }
+    const link = response.data as ArtifactShareLink;
+    artifactShareCache.set(artifactID, link);
+    return link;
+  })();
+  artifactShareRequests.set(artifactID, request);
+  try {
+    return await request;
+  } finally {
+    artifactShareRequests.delete(artifactID);
+  }
+}
+
+async function share(file: GeneralAgentArtifactFile) {
+  if (!canShare(file)) return;
+  sharingId.value = file.artifact_id;
+  try {
+    const link = await ensureArtifactShare(file);
+    const cachedPassword = getCachedArtifactSharePassword(file.artifact_id);
+    if (!link.password_configured) {
+      openPasswordDialog(file, 'set');
+      return;
+    }
+    if (cachedPassword) {
+      await copyArtifactShareBundle(link, cachedPassword);
+      return;
+    }
+    openPasswordDialog(file, 'copy');
+  } catch (err: any) {
+    MessagePlugin.error(err?.message || '分享失败');
+  } finally {
+    sharingId.value = '';
+  }
+}
+
+async function copyArtifactShareBundle(link: ArtifactShareLink, password: string, notify = true) {
+  const shareURL = absoluteArtifactShareURL(link.url);
+  if (!shareURL || !password) throw new Error('分享链接或密码不可用');
+  await copyTextToClipboard(`分享链接：${shareURL}\n访问密码：${password}`);
+  if (notify) MessagePlugin.success('已复制分享链接');
+}
+
+function openPasswordDialog(file: GeneralAgentArtifactFile, mode: PasswordDialogMode) {
+  passwordFile.value = file;
+  passwordDialogMode.value = mode;
+  passwordForm.password = '';
+  passwordDialogVisible.value = true;
+}
+
+function validateSharePassword(password: string): string {
+  if (!password.trim() || [...password].length < 6) return '分享密码至少需要 6 个字符';
+  if (new TextEncoder().encode(password).length > 72) return '分享密码长度过长';
+  return '';
+}
+
+async function confirmSharePassword() {
+  const file = passwordFile.value;
+  const password = passwordForm.password;
+  if (!file || !password) {
+    MessagePlugin.warning('请输入分享密码');
+    return;
+  }
+  const validationError = validateSharePassword(password);
+  if (validationError) {
+    MessagePlugin.warning(validationError);
+    return;
+  }
+  passwordSubmitting.value = true;
+  try {
+    // The dialog confirmation is a fresh user gesture. Copy the first-time
+    // bundle before the password-setting request consumes that activation;
+    // the API call then publishes exactly the password that was copied.
+    let link = artifactShareCache.get(file.artifact_id);
+    if (!link) throw new Error('分享链接不可用，请重试');
+    if (passwordDialogMode.value === 'set') {
+      await copyArtifactShareBundle(link, password, false);
+      const response: any = await setArtifactSharePassword(file.artifact_id, password);
+      if (!response?.success || !response?.data?.url) {
+        throw new Error(response?.message || '分享密码设置失败');
+      }
+      link = response.data as ArtifactShareLink;
+      artifactShareCache.set(file.artifact_id, link);
+    } else {
+      // The creator already owns this link. Copy the password immediately in
+      // the confirmation gesture; recipient pages perform the actual server
+      // verification before they receive an access capability.
+      await copyArtifactShareBundle(link, password, false);
+    }
+    cacheArtifactSharePassword(file.artifact_id, password);
+    passwordDialogVisible.value = false;
+    MessagePlugin.success('已复制分享链接');
+  } catch (err: any) {
+    MessagePlugin.error(err?.message || '分享失败');
+  } finally {
+    passwordSubmitting.value = false;
+  }
+}
+
+function resetPasswordDialog() {
+  if (passwordSubmitting.value) return;
+  passwordDialogVisible.value = false;
+  passwordFile.value = null;
+  passwordForm.password = '';
+}
+
+async function openPreview(file: GeneralAgentArtifactFile) {
   if (!canPreview(file)) return;
+  if (artifactFileType(file) === 'html' || artifactFileType(file) === 'htm') {
+    // Open synchronously to avoid browsers blocking the tab after the async
+    // get-or-create request completes.
+    // Open from the click event so browsers allow the new tab even though the
+    // share URL is created asynchronously. `noopener` in window.open features
+    // makes some browsers return null; detach the opener after opening instead.
+    const previewWindow = window.open('about:blank', '_blank');
+    if (!previewWindow) {
+      MessagePlugin.error('无法打开预览窗口，请允许浏览器打开新标签页');
+      return;
+    }
+    try {
+      previewWindow.opener = null;
+    } catch {
+      // The about:blank window is still usable if a browser disallows this
+      // assignment; the rendered document is sandboxed by the share page.
+    }
+    try {
+      const link = await ensureArtifactShare(file);
+      const previewURL = link.preview_url || link.url;
+      previewWindow.location.replace(previewURL);
+    } catch (err: any) {
+      previewWindow.close();
+      MessagePlugin.error(err?.message || '预览失败');
+    }
+    return;
+  }
   previewFile.value = file;
   previewBlob.value = null;
   previewDialogVisible.value = true;

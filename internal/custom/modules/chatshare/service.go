@@ -2,22 +2,27 @@ package chatshare
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -26,14 +31,31 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 var (
-	ErrWebLoginRequired        = errors.New("web login required")
-	ErrInvalidMessageSelection = errors.New("invalid message selection")
+	ErrWebLoginRequired              = errors.New("web login required")
+	ErrInvalidMessageSelection       = errors.New("invalid message selection")
+	ErrArtifactShareNotFound         = errors.New("artifact share not found")
+	ErrArtifactShareUnsupported      = errors.New("artifact sharing supports HTML artifacts only")
+	ErrArtifactShareRevoked          = errors.New("artifact share revoked")
+	ErrArtifactShareTokenUnavailable = errors.New("artifact share token unavailable")
+	ErrArtifactShareNotPublished     = errors.New("artifact share not published")
+	ErrArtifactSharePasswordRequired = errors.New("artifact share password required")
+	ErrArtifactSharePasswordInvalid  = errors.New("artifact share password invalid")
+	ErrArtifactSharePasswordTooShort = errors.New("artifact share password too short")
+	ErrArtifactSharePasswordTooLong  = errors.New("artifact share password too long")
 )
 
 const maxShareMessageSelection = 1000
+
+const (
+	artifactSharePreviewTTL       = 30 * time.Minute
+	artifactShareAccessTTL        = 30 * time.Minute
+	artifactSharePasswordMinRunes = 6
+	artifactSharePasswordMaxBytes = 72 // bcrypt's input limit
+)
 
 var providerResourcePattern = regexp.MustCompile("(?i)(?:local|minio|cos|tos|s3|oss|ks3|obs)://[^\\s<>\"'`]+")
 
@@ -56,6 +78,7 @@ func (s *Service) SetArtifactStore(store *artifactstore.Store) {
 type artifactRow struct {
 	ID           string         `gorm:"column:id"`
 	TenantID     uint64         `gorm:"column:tenant_id"`
+	UserID       string         `gorm:"column:user_id"`
 	SessionID    string         `gorm:"column:session_id"`
 	MessageID    string         `gorm:"column:message_id"`
 	FilePath     string         `gorm:"column:file_path"`
@@ -117,7 +140,7 @@ func (s *Service) Migrate(ctx context.Context) error {
 	config := *db.Config
 	config.DisableForeignKeyConstraintWhenMigrating = true
 	db.Config = &config
-	return db.WithContext(ctx).AutoMigrate(&Link{}, &MessageSnapshot{}, &ResourceSnapshot{})
+	return db.WithContext(ctx).AutoMigrate(&Link{}, &MessageSnapshot{}, &ResourceSnapshot{}, &ArtifactShareLink{})
 }
 
 func (s *Service) GetCandidates(ctx context.Context, sessionID string) (*CandidatesDTO, error) {
@@ -295,6 +318,472 @@ func (s *Service) CreateShare(ctx context.Context, sessionID string, messageIDs 
 		Title:     link.Title,
 		CreatedAt: link.CreatedAt,
 	}, nil
+}
+
+// CreateArtifactShare lazily creates an anonymous capability link for one
+// ready HTML artifact. The artifact is looked up from the authenticated
+// owner's tenant/session scope; the client never supplies a storage path.
+// The unique tenant/artifact index makes this operation idempotent across
+// browser tabs and API replicas. The returned preview URL is a short-lived
+// creator capability; the public URL remains unpublished until a password is
+// set through SetArtifactSharePassword.
+func (s *Service) CreateArtifactShare(ctx context.Context, artifactID string) (*ArtifactShareLinkDTO, error) {
+	tenantID, userID, err := s.artifactOwnerContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.findOwnedHTMLArtifact(ctx, artifactID, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	link, err := s.getOrCreateArtifactShare(ctx, artifact, userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.artifactShareLinkDTO(link)
+}
+
+// SetArtifactSharePassword publishes an artifact share. It is intentionally
+// owner-scoped and idempotent: once a password exists it is never replaced by
+// a later request, because the server must not be able to recover or expose
+// the creator's plaintext password.
+func (s *Service) SetArtifactSharePassword(ctx context.Context, artifactID, password string) (*ArtifactShareLinkDTO, error) {
+	tenantID, userID, err := s.artifactOwnerContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.findOwnedHTMLArtifact(ctx, artifactID, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	link, err := s.getOrCreateArtifactShare(ctx, artifact, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(link.PasswordHash) == "" {
+		if err := validateArtifactSharePassword(password); err != nil {
+			return nil, err
+		}
+		hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, fmt.Errorf("failed to hash artifact share password: %w", err)
+		}
+		result := s.db.WithContext(ctx).Model(&ArtifactShareLink{}).
+			Where("id = ? AND (password_hash IS NULL OR password_hash = '')", link.ID).
+			Update("password_hash", string(hashed))
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected > 0 {
+			link.PasswordHash = string(hashed)
+		} else if err := s.db.WithContext(ctx).First(link, "id = ?", link.ID).Error; err != nil {
+			return nil, err
+		}
+	}
+	return s.artifactShareLinkDTO(link)
+}
+
+func (s *Service) artifactOwnerContext(ctx context.Context) (uint64, string, error) {
+	if err := requireWebUser(ctx); err != nil {
+		return 0, "", err
+	}
+	if s == nil || s.db == nil {
+		return 0, "", fmt.Errorf("chat share service is unavailable")
+	}
+	tenantID, ok := types.TenantIDFromContext(ctx)
+	userID := types.SessionOwnerIDFromContext(ctx)
+	if !ok || tenantID == 0 || strings.TrimSpace(userID) == "" {
+		return 0, "", ErrWebLoginRequired
+	}
+	return tenantID, strings.TrimSpace(userID), nil
+}
+
+func (s *Service) findOwnedHTMLArtifact(ctx context.Context, artifactID string, tenantID uint64, userID string) (artifactRow, error) {
+	artifactID = strings.TrimSpace(artifactID)
+	if artifactID == "" {
+		return artifactRow{}, fmt.Errorf("artifact_id is required")
+	}
+	var artifact artifactRow
+	if err := s.db.WithContext(ctx).
+		Where(
+			"id = ? AND tenant_id = ? AND user_id = ? AND storage_state = ? AND deleted_at IS NULL",
+			artifactID,
+			tenantID,
+			userID,
+			"ready",
+		).
+		First(&artifact).Error; err != nil {
+		return artifactRow{}, ErrArtifactShareNotFound
+	}
+	if !isHTMLArtifact(artifact) {
+		return artifactRow{}, ErrArtifactShareUnsupported
+	}
+	return artifact, nil
+}
+
+func (s *Service) getOrCreateArtifactShare(
+	ctx context.Context,
+	artifact artifactRow,
+	createdByUserID string,
+) (*ArtifactShareLink, error) {
+	lookup := func(db *gorm.DB) (*ArtifactShareLink, error) {
+		var link ArtifactShareLink
+		err := db.WithContext(ctx).
+			Where("tenant_id = ? AND artifact_id = ?", artifact.TenantID, artifact.ID).
+			First(&link).Error
+		if err != nil {
+			return nil, err
+		}
+		return &link, nil
+	}
+
+	link, err := lookup(s.db)
+	if err == nil {
+		return link, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	token, tokenHashValue, err := generateToken()
+	if err != nil {
+		return nil, err
+	}
+	tokenCiphertext, err := encryptArtifactShareToken(token)
+	if err != nil {
+		return nil, err
+	}
+	link = &ArtifactShareLink{
+		TokenHash:       tokenHashValue,
+		TokenCiphertext: tokenCiphertext,
+		TenantID:        artifact.TenantID,
+		SessionID:       artifact.SessionID,
+		MessageID:       artifact.MessageID,
+		ArtifactID:      artifact.ID,
+		Filename:        artifact.FileName,
+		FileType:        artifact.FileType,
+		FileSize:        artifact.FileSize,
+		SHA256:          artifact.SHA256,
+		ContentType:     artifact.ContentType,
+		CreatedByUserID: strings.TrimSpace(createdByUserID),
+		Status:          ShareStatusActive,
+	}
+	if err := s.db.WithContext(ctx).Create(link).Error; err != nil {
+		// A concurrent request may have won the unique artifact key. Re-read
+		// the durable link and return it instead of minting another URL.
+		if existing, lookupErr := lookup(s.db); lookupErr == nil {
+			return existing, nil
+		}
+		return nil, err
+	}
+	return link, nil
+}
+
+// GetArtifactShare is intentionally anonymous. The high-entropy token is the
+// capability, while a published link additionally requires a password or a
+// short-lived access/preview capability. Normal conversation-share endpoints
+// remain authenticated and unchanged.
+func (s *Service) GetArtifactShare(ctx context.Context, token, previewToken, accessToken string) (*ArtifactShareViewDTO, error) {
+	link, err := s.findActiveArtifactShare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.loadArtifactForShare(ctx, link)
+	if err != nil {
+		return nil, err
+	}
+	authorized, err := s.authorizeArtifactShare(link, previewToken, accessToken)
+	if errors.Is(err, ErrArtifactSharePasswordRequired) {
+		return s.artifactShareViewDTO(link, artifact, token, true), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if authorized {
+		s.recordArtifactShareView(ctx, link.ID)
+	}
+	return s.artifactShareViewDTO(link, artifact, token, false), nil
+}
+
+// GetArtifactShareContent streams only the artifact pinned by the share
+// record. It has no authentication requirement by design; token validation,
+// active status, tenant scope and artifact version checks still apply.
+func (s *Service) GetArtifactShareContent(ctx context.Context, token, previewToken, accessToken string) (*SharedArtifactFile, error) {
+	link, err := s.findActiveArtifactShare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.authorizeArtifactShare(link, previewToken, accessToken); err != nil {
+		return nil, err
+	}
+	artifact, err := s.loadArtifactForShare(ctx, link)
+	if err != nil {
+		return nil, err
+	}
+	if s.artifactStore == nil {
+		return nil, fmt.Errorf("private artifact object storage is unavailable")
+	}
+	reader, err := s.artifactStore.Open(ctx, artifact.FilePath)
+	if err != nil {
+		return nil, ErrArtifactShareNotFound
+	}
+	return &SharedArtifactFile{
+		Reader:      reader,
+		FileName:    artifact.FileName,
+		ContentType: "text/html; charset=utf-8",
+		FileSize:    artifact.FileSize,
+	}, nil
+}
+
+// VerifyArtifactSharePassword exchanges the creator-provided password for a
+// short-lived bearer capability. It does not require a WeKnora account and it
+// never returns the stored password hash or plaintext.
+func (s *Service) VerifyArtifactSharePassword(ctx context.Context, token, password string) (*ArtifactShareAccessDTO, error) {
+	link, err := s.findActiveArtifactShare(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.loadArtifactForShare(ctx, link); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(link.PasswordHash) == "" {
+		return nil, ErrArtifactShareNotPublished
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(link.PasswordHash), []byte(password)); err != nil {
+		return nil, ErrArtifactSharePasswordInvalid
+	}
+	accessToken, expiresAt, err := issueArtifactShareCapability(link, artifactShareCapabilityAccess, artifactShareAccessTTL)
+	if err != nil {
+		return nil, err
+	}
+	s.recordArtifactShareView(ctx, link.ID)
+	return &ArtifactShareAccessDTO{AccessToken: accessToken, ExpiresAt: expiresAt}, nil
+}
+
+func (s *Service) artifactShareViewDTO(link *ArtifactShareLink, artifact *artifactRow, token string, requiresPassword bool) *ArtifactShareViewDTO {
+	return &ArtifactShareViewDTO{
+		ID:               link.ID,
+		ArtifactID:       artifact.ID,
+		Filename:         artifact.FileName,
+		FileType:         artifact.FileType,
+		FileSize:         artifact.FileSize,
+		ContentType:      "text/html; charset=utf-8",
+		ContentURL:       s.artifactShareContentURL(token),
+		RequiresPassword: requiresPassword,
+		CreatedAt:        link.CreatedAt,
+	}
+}
+
+func (s *Service) authorizeArtifactShare(link *ArtifactShareLink, previewToken, accessToken string) (bool, error) {
+	if verifyArtifactShareCapability(previewToken, artifactShareCapabilityPreview, link) {
+		return true, nil
+	}
+	if strings.TrimSpace(link.PasswordHash) == "" {
+		return false, ErrArtifactShareNotPublished
+	}
+	if verifyArtifactShareCapability(accessToken, artifactShareCapabilityAccess, link) {
+		return true, nil
+	}
+	return false, ErrArtifactSharePasswordRequired
+}
+
+func (s *Service) recordArtifactShareView(ctx context.Context, shareID string) {
+	now := time.Now()
+	if err := s.db.WithContext(ctx).Model(&ArtifactShareLink{}).
+		Where("id = ?", shareID).
+		Updates(map[string]any{
+			"view_count":     gorm.Expr("view_count + 1"),
+			"last_viewed_at": now,
+		}).Error; err != nil {
+		logger.Warnf(ctx, "[chatshare] failed to update artifact share view count: share_id=%s err=%v", shareID, err)
+	}
+}
+
+func (s *Service) findActiveArtifactShare(ctx context.Context, token string) (*ArtifactShareLink, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("chat share service is unavailable")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, ErrArtifactShareNotFound
+	}
+	var link ArtifactShareLink
+	if err := s.db.WithContext(ctx).
+		Where("token_hash = ? AND status = ? AND revoked_at IS NULL", tokenHash(token), ShareStatusActive).
+		First(&link).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrArtifactShareNotFound
+		}
+		return nil, err
+	}
+	return &link, nil
+}
+
+func (s *Service) loadArtifactForShare(ctx context.Context, link *ArtifactShareLink) (*artifactRow, error) {
+	if link == nil || strings.TrimSpace(link.ArtifactID) == "" {
+		return nil, ErrArtifactShareNotFound
+	}
+	var artifact artifactRow
+	if err := s.db.WithContext(ctx).
+		Where(
+			"id = ? AND tenant_id = ? AND session_id = ? AND storage_state = ? AND deleted_at IS NULL",
+			link.ArtifactID,
+			link.TenantID,
+			link.SessionID,
+			"ready",
+		).
+		First(&artifact).Error; err != nil {
+		return nil, ErrArtifactShareNotFound
+	}
+	if !isHTMLArtifact(artifact) ||
+		artifact.FileSize != link.FileSize ||
+		strings.TrimSpace(artifact.SHA256) != strings.TrimSpace(link.SHA256) {
+		return nil, ErrArtifactShareNotFound
+	}
+	return &artifact, nil
+}
+
+func (s *Service) artifactShareLinkDTO(link *ArtifactShareLink) (*ArtifactShareLinkDTO, error) {
+	if link == nil || link.Status != ShareStatusActive || link.RevokedAt != nil {
+		return nil, ErrArtifactShareRevoked
+	}
+	token, err := secutils.DecryptStoredSecret(link.TokenCiphertext)
+	if err != nil || strings.TrimSpace(token) == "" {
+		return nil, ErrArtifactShareTokenUnavailable
+	}
+	previewToken, _, err := issueArtifactShareCapability(link, artifactShareCapabilityPreview, artifactSharePreviewTTL)
+	if err != nil {
+		return nil, err
+	}
+	return &ArtifactShareLinkDTO{
+		ID:                 link.ID,
+		ArtifactID:         link.ArtifactID,
+		Filename:           link.Filename,
+		URL:                s.artifactShareURL(token),
+		PreviewURL:         s.artifactSharePreviewURL(token, previewToken),
+		PasswordConfigured: strings.TrimSpace(link.PasswordHash) != "",
+		CreatedAt:          link.CreatedAt,
+	}, nil
+}
+
+const (
+	artifactShareCapabilityPreview = "preview"
+	artifactShareCapabilityAccess  = "access"
+)
+
+type artifactShareCapabilityClaims struct {
+	Kind       string `json:"kind"`
+	ShareID    string `json:"share_id"`
+	ArtifactID string `json:"artifact_id"`
+	OwnerID    string `json:"owner_id,omitempty"`
+	TokenHash  string `json:"token_hash,omitempty"`
+	ExpiresAt  int64  `json:"expires_at"`
+	Nonce      string `json:"nonce"`
+}
+
+func issueArtifactShareCapability(link *ArtifactShareLink, kind string, ttl time.Duration) (string, time.Time, error) {
+	if link == nil || strings.TrimSpace(link.ID) == "" || strings.TrimSpace(kind) == "" {
+		return "", time.Time{}, ErrArtifactShareTokenUnavailable
+	}
+	key := secutils.GetAESKey()
+	if key == nil {
+		return "", time.Time{}, ErrArtifactShareTokenUnavailable
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", time.Time{}, err
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	claims := artifactShareCapabilityClaims{
+		Kind:       kind,
+		ShareID:    link.ID,
+		ArtifactID: link.ArtifactID,
+		ExpiresAt:  expiresAt.Unix(),
+		Nonce:      base64.RawURLEncoding.EncodeToString(nonce),
+	}
+	if kind == artifactShareCapabilityPreview {
+		claims.OwnerID = link.CreatedByUserID
+	} else if kind == artifactShareCapabilityAccess {
+		claims.TokenHash = link.TokenHash
+	} else {
+		return "", time.Time{}, ErrArtifactShareTokenUnavailable
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	signedPayload := kind + "." + encodedPayload
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(signedPayload))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return signedPayload + "." + signature, expiresAt, nil
+}
+
+func verifyArtifactShareCapability(value, kind string, link *ArtifactShareLink) bool {
+	if link == nil || strings.TrimSpace(value) == "" || strings.TrimSpace(kind) == "" {
+		return false
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 || parts[0] != kind {
+		return false
+	}
+	key := secutils.GetAESKey()
+	if key == nil {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims artifactShareCapabilityClaims
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Kind != kind {
+		return false
+	}
+	if claims.ExpiresAt <= time.Now().UTC().Unix() ||
+		claims.ShareID != link.ID || claims.ArtifactID != link.ArtifactID {
+		return false
+	}
+	if kind == artifactShareCapabilityPreview && claims.OwnerID != link.CreatedByUserID {
+		return false
+	}
+	if kind == artifactShareCapabilityAccess && claims.TokenHash != link.TokenHash {
+		return false
+	}
+	signedPayload := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(signedPayload))
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	return err == nil && hmac.Equal(mac.Sum(nil), signature)
+}
+
+func validateArtifactSharePassword(password string) error {
+	if strings.TrimSpace(password) == "" || utf8.RuneCountInString(password) < artifactSharePasswordMinRunes {
+		return ErrArtifactSharePasswordTooShort
+	}
+	if len([]byte(password)) > artifactSharePasswordMaxBytes {
+		return ErrArtifactSharePasswordTooLong
+	}
+	return nil
+}
+
+func encryptArtifactShareToken(token string) (string, error) {
+	key := secutils.GetAESKey()
+	if key == nil {
+		return "", ErrArtifactShareTokenUnavailable
+	}
+	return secutils.EncryptAESGCM(token, key)
+}
+
+func isHTMLArtifact(artifact artifactRow) bool {
+	fileType := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(artifact.FileType)), ".")
+	if fileType == "html" || fileType == "htm" {
+		return true
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(artifact.ContentType, ";", 2)[0]))
+	return contentType == "text/html" || contentType == "application/xhtml+xml"
 }
 
 func (s *Service) loadSessionMessages(ctx context.Context, sessionID string) (*types.Session, []types.Message, error) {
@@ -925,6 +1414,29 @@ func (s *Service) shareURL(token string) string {
 
 func (s *Service) shareArtifactURL(token string, artifactID string) string {
 	return "/api/v1/custom/chat-share/" + token + "/artifacts/" + artifactID + "/download"
+}
+
+func (s *Service) artifactShareURL(token string) string {
+	path := "/share/artifact/" + url.PathEscape(strings.TrimSpace(token))
+	if s == nil || strings.TrimSpace(s.frontendBaseURL) == "" {
+		return path
+	}
+	return strings.TrimRight(s.frontendBaseURL, "/") + path
+}
+
+func (s *Service) artifactSharePreviewURL(token, previewToken string) string {
+	path := "/share/artifact/" + url.PathEscape(strings.TrimSpace(token))
+	query := url.Values{}
+	query.Set("preview", strings.TrimSpace(previewToken))
+	path += "?" + query.Encode()
+	if s == nil || strings.TrimSpace(s.frontendBaseURL) == "" {
+		return path
+	}
+	return strings.TrimRight(s.frontendBaseURL, "/") + path
+}
+
+func (s *Service) artifactShareContentURL(token string) string {
+	return "/api/v1/custom/artifact-share/" + url.PathEscape(strings.TrimSpace(token)) + "/content"
 }
 
 func contentTypeForPath(filePath string) string {

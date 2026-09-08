@@ -117,7 +117,7 @@ func TestResolveChatModelIDRejectsNonChatSummaryModelOverride(t *testing.T) {
 	assert.Equal(t, "agent-chat", modelID)
 }
 
-func TestResolveChatModelIDUsesValidSummaryModelOverride(t *testing.T) {
+func TestResolveChatModelIDIgnoresSummaryModelOverrideForAgent(t *testing.T) {
 	svc := &sessionService{
 		modelService: &stubModelService{
 			modelsByID: map[string]*types.Model{
@@ -146,7 +146,7 @@ func TestResolveChatModelIDUsesValidSummaryModelOverride(t *testing.T) {
 	modelID, err := svc.resolveChatModelID(context.Background(), req, nil, nil)
 
 	require.NoError(t, err)
-	assert.Equal(t, "override-chat", modelID)
+	assert.Equal(t, "agent-chat", modelID)
 }
 
 type stubModelService struct {

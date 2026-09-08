@@ -183,6 +183,9 @@
                 @click.stop="toggleFavoriteAgent(agent.id, $event)">
                 <t-icon :name="isAgentFavorited(agent.id) ? 'star-filled' : 'star'" size="14px" />
               </button>
+              <t-switch v-if="agent.isMine && agent.is_builtin" class="agent-visibility-switch"
+                :value="agent.visible_in_chat === true" :disabled="!authStore.hasRole('admin')"
+                @click.stop @change="handleToggleAgentVisibility(agent, Boolean($event))" />
               <div class="card-header">
                 <div class="card-header-left">
                   <div v-if="agent.is_builtin" class="builtin-avatar"
@@ -210,7 +213,7 @@
                       <div v-if="authStore.hasRole('contributor')" class="popup-menu-item" @click="handleCopy(agent)">
                         <t-icon class="menu-icon" name="file-copy" /><span>{{ $t('common.copy') }}</span>
                       </div>
-                      <div v-if="authStore.hasRole('admin')" class="popup-menu-item"
+                      <div v-if="authStore.hasRole('admin') && !agent.is_builtin" class="popup-menu-item"
                         @click="handleToggleDisabled(agent)">
                         <t-icon class="menu-icon" name="poweroff" />
                         <span>{{ agent.disabled_by_me ? $t('agent.enable') : $t('agent.disable') }}</span>
@@ -384,6 +387,9 @@
                 <t-icon :name="isAgentFavorited(agent.id) ? 'star-filled' : 'star'" size="14px" />
               </button>
               <!-- 卡片头部 -->
+              <t-switch v-if="agent.is_builtin" class="agent-visibility-switch"
+                :value="agent.visible_in_chat === true" :disabled="!authStore.hasRole('admin')"
+                @click.stop @change="handleToggleAgentVisibility(agent, Boolean($event))" />
               <div class="card-header">
                 <div class="card-header-left">
                   <!-- 内置智能体使用简洁图标 -->
@@ -414,7 +420,7 @@
                         <t-icon class="menu-icon" name="file-copy" />
                         <span>{{ $t('common.copy') }}</span>
                       </div>
-                      <div v-if="authStore.hasRole('admin')" class="popup-menu-item"
+                      <div v-if="authStore.hasRole('admin') && !agent.is_builtin" class="popup-menu-item"
                         @click="handleToggleDisabled(agent)">
                         <t-icon class="menu-icon" name="poweroff" />
                         <span>{{ agent.disabled_by_me ? $t('agent.enable') : $t('agent.disable') }}</span>
@@ -819,7 +825,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin, Icon as TIcon } from 'tdesign-vue-next'
-import { deleteAgent, copyAgent, type CustomAgent } from '@/api/agent'
+import { deleteAgent, copyAgent, setAgentChatVisibility, BUILTIN_WIKI_FIXER_ID, type CustomAgent } from '@/api/agent'
 import { useChatResourcesStore } from '@/stores/chatResources'
 import { formatStringDate } from '@/utils/index'
 import { useI18n } from 'vue-i18n'
@@ -1113,11 +1119,16 @@ const showAgentListContextualGuide = computed(
 
 const applyAgentListData = (res: { data: CustomAgent[]; disabled_own_agent_ids: string[] }) => {
   const disabledOwnIds = res.disabled_own_agent_ids || []
-  agents.value = (res.data || []).map((agent: CustomAgent) => ({
-    ...agent,
-    showMore: false,
-    disabled_by_me: disabledOwnIds.includes(agent.id)
-  }))
+  // Wiki Fixer is an internal workflow agent used by Wiki inspection/revision.
+  // Keep it in the API response and chat-resource cache so internal flows can
+  // resolve it by ID, but do not expose it as a user-manageable built-in card.
+  agents.value = (res.data || [])
+    .filter((agent: CustomAgent) => agent.id !== BUILTIN_WIKI_FIXER_ID)
+    .map((agent: CustomAgent) => ({
+      ...agent,
+      showMore: false,
+      disabled_by_me: disabledOwnIds.includes(agent.id),
+    }))
   checkAndOpenEditModal()
 }
 
@@ -1503,6 +1514,28 @@ const handleToggleDisabled = (agent: AgentWithUI) => {
   }).catch((e: any) => {
     MessagePlugin.error(e?.message || t('agent.messages.saveFailed'))
   })
+}
+
+/** Tenant-admin-only visibility switch for built-in agents. */
+const handleToggleAgentVisibility = async (agent: AgentWithUI, visible: boolean) => {
+  if (!agent.is_builtin || !authStore.hasRole('admin')) return
+  const canonical = agents.value.find(item => item.id === agent.id)
+  const previous = canonical?.visible_in_chat
+  if (canonical) canonical.visible_in_chat = visible
+  agent.visible_in_chat = visible
+  try {
+    const res = await setAgentChatVisibility(agent.id, visible)
+    const effective = res?.data?.visible_in_chat
+    if (canonical && typeof effective === 'boolean') canonical.visible_in_chat = effective
+    agent.visible_in_chat = typeof effective === 'boolean' ? effective : visible
+    MessagePlugin.success(visible ? t('agent.messages.enabled') : t('agent.messages.disabled'))
+    chatResources.invalidate('agents')
+    await chatResources.ensureAgents(true)
+  } catch (error: any) {
+    if (canonical) canonical.visible_in_chat = previous
+    agent.visible_in_chat = previous
+    MessagePlugin.error(error?.message || t('agent.messages.saveFailed'))
+  }
 }
 
 /** 切换共享智能体“停用”状态（仅影响当前用户对话下拉显示） */
@@ -2018,6 +2051,15 @@ defineExpose({
       opacity: 1;
       color: var(--td-warning-color, #e37318);
     }
+  }
+
+  .agent-visibility-switch {
+    position: absolute;
+    top: 4px;
+    right: 28px;
+    z-index: 4;
+    transform: scale(0.78);
+    transform-origin: top right;
   }
 
   &:hover .agent-favorite-star {

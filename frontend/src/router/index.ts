@@ -101,6 +101,15 @@ const router = createRouter({
       meta: { requiresInit: true, requiresAuth: true }
     },
     {
+      path: "/share/artifact/:token",
+      name: "artifactShare",
+      component: () => import("../custom/modules/chatshare/views/ArtifactShareView.vue"),
+      // Artifact share links are bearer capabilities. The API still validates
+      // the token and artifact state; this page itself must be reachable
+      // without initializing or authenticating the normal chat shell.
+      meta: { requiresInit: false, requiresAuth: false }
+    },
+    {
       path: "/knowledgeBase",
       name: "home",
       component: () => import("../views/knowledge/KnowledgeBase.vue"),

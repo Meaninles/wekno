@@ -58,6 +58,13 @@ type UpdateAgentRequest struct {
 	Config      types.CustomAgentConfig `json:"config"`
 }
 
+// SetBuiltinAgentChatVisibilityRequest controls whether a tenant-wide built-in
+// agent appears in the conversation picker. False is a valid value, so this
+// field intentionally has no `required` binding tag.
+type SetBuiltinAgentChatVisibilityRequest struct {
+	Visible bool `json:"visible"`
+}
+
 // CreateAgent godoc
 // @Summary      创建智能体
 // @Description  创建新的自定义智能体
@@ -243,6 +250,48 @@ func (h *CustomAgentHandler) ListAgents(c *gin.Context) {
 	})
 }
 
+// SetChatVisibility updates the tenant-wide conversation-picker visibility of
+// one built-in agent. The route is admin-gated; the custom policy service also
+// checks the role so direct service calls cannot bypass authorization.
+func (h *CustomAgentHandler) SetChatVisibility(c *gin.Context) {
+	ctx := c.Request.Context()
+	id := secutils.SanitizeForLog(c.Param("id"))
+	if id == "" {
+		c.Error(errors.NewBadRequestError("Agent ID cannot be empty"))
+		return
+	}
+	tenantID, ok := types.TenantIDFromContext(ctx)
+	if !ok || tenantID == 0 {
+		c.Error(errors.NewUnauthorizedError("Missing tenant context"))
+		return
+	}
+	var req SetBuiltinAgentChatVisibilityRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(errors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
+		return
+	}
+	if err := service.UpdateBuiltinAgentVisibility(ctx, id, tenantID, req.Visible); err != nil {
+		if stderrors.Is(err, service.ErrBuiltinAgentPolicyUnavailable) {
+			c.Error(errors.NewServiceUnavailableError("Built-in agent policy is not ready"))
+			return
+		}
+		if stderrors.Is(err, service.ErrBuiltinAgentModelPolicyInvalid) {
+			c.Error(errors.NewBadRequestError(err.Error()))
+			return
+		}
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{"agent_id": id, "tenant_id": tenantID})
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	agent, err := h.service.GetAgentByID(ctx, id)
+	if err != nil {
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{"agent_id": id, "tenant_id": tenantID})
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": agent})
+}
+
 // enrichAgentCreatorNames 批量把 agent.CreatedBy 解析成展示名。失败吞掉，
 // 不影响列表本身可用。与 enrichKBCreatorNames 行为对齐。
 func enrichAgentCreatorNames(ctx context.Context, userSvc interfaces.UserService, agents []*types.CustomAgent) {
@@ -343,7 +392,8 @@ func (h *CustomAgentHandler) UpdateAgent(c *gin.Context) {
 		case service.ErrAgentDocumentTemplateInvalid:
 			c.Error(errors.NewBadRequestError(err.Error()))
 		default:
-			if stderrors.Is(err, service.ErrAgentDocumentTemplateInvalid) ||
+			if stderrors.Is(err, service.ErrBuiltinAgentModelPolicyInvalid) ||
+				stderrors.Is(err, service.ErrAgentDocumentTemplateInvalid) ||
 				stderrors.Is(err, service.ErrAgentCustomConfigInvalid) {
 				c.Error(errors.NewBadRequestError(err.Error()))
 				return

@@ -945,7 +945,7 @@ func renderSystemPrompt(ctx context.Context, prompt string, webSearchEnabled boo
 	for key, value := range replacements {
 		prompt = strings.ReplaceAll(prompt, "{{"+key+"}}", value)
 	}
-	return sourcerefs.EnsureGenerationContract(prompt)
+	return sourcerefs.EnsureStructuredContract(prompt)
 }
 
 // Presentation is a profile choice; retrieval and generation budgets remain

@@ -44,7 +44,7 @@ async def test_only_submitted_answer_reaches_stream_and_delivery_without_extra_g
     ])
     result=await execute(payload,control,model)
     assert result.answer==answer and len(model.requests)==2
-    assert ''.join(e['content'] for e in control.emitted if e['type']=='answer_delta')==answer
+    assert not any(e['type']=='answer_delta' for e in control.emitted)
     assert not any(ANSWER_TOOL in json.dumps(e) for e in control.emitted)
     assert all(options['tool_choice'] is None for options in model.options)
     assert [call[0] for call in control.calls]==['lookup']
@@ -95,3 +95,43 @@ async def test_resume_keeps_iteration_budget_and_reply_identity():
     assert model.options[-1]['tool_choice'].mode==ANSWER_TOOL
     assert recovery.snapshots[-1][1]['agent']['reply_context']['reply_id']==checkpoint['agent']['reply_context']['reply_id']
     assert recovery.snapshots[-1][1]['agent']['reply_context']['cur_iter']==15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('citations', [None, {}, 'bad', [{'text': 42}],
+    [{'text': '正文。', 'source_ids': ['S1', 17, 'S999']}],
+    [{'text': '正文。', 'source_ids': ['S1']}, {'text': '正文。', 'source_ids': ['S2']}],
+])
+async def test_citation_candidates_reach_backend_without_model_repair(citations):
+    payload = request()
+    control = MemoryControl(payload)
+    raw = {'answer': '正文。', 'citations': citations}
+    model = ScriptedModel([[ToolCallBlock(id='final', name=ANSWER_TOOL,
+        input=json.dumps(raw, ensure_ascii=False))]])
+    result = await execute(payload, control, model)
+    assert result.answer == raw['answer']
+    assert control.committed['citations'] == citations
+    assert len(model.requests) == 1
+    assert not any(e['type'] == 'answer_delta' for e in control.emitted)
+    schema = next(t['function']['parameters'] for t in model.options[0]['tools']
+                  if t['function']['name'] == ANSWER_TOOL)
+    assert schema['properties']['citations']['type'] == 'array'
+    assert schema['properties']['citations']['items']['required'] == ['text', 'source_ids']
+
+
+@pytest.mark.asyncio
+async def test_complete_current_run_catalog_refreshes_without_extra_decision():
+    payload = request(tools=[{'name': 'lookup', 'parameters': {'type': 'object', 'properties': {}}}])
+    control = MemoryControl(payload)
+    original = control.budget
+    catalog = [{'id': f'S{i}', 'title': 'Source', 'chunk_id': f'chunk-{i}'} for i in range(1, 301)]
+    async def budget(role=''):
+        return {**await original(role), 'run_id': payload.run_id,
+                'current_run_sources': catalog if control.calls else []}
+    control.budget = budget
+    model = ScriptedModel([[ToolCallBlock(id='read', name='lookup', input='{}')], [submit('done')]])
+    await execute(payload, control, model)
+    assert len(model.requests) == 2
+    assert 'S300' not in str(model.requests[0])
+    assert 'S300' in str(model.requests[1]) and 'chunk-300' in str(model.requests[1])
+    assert str(model.requests[1]).count('[CURRENT_RUN_SOURCES]') == 1

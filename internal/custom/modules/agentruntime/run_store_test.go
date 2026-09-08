@@ -24,11 +24,8 @@ func TestPostgresCitationResolutionNeverRequestsRegeneration(t *testing.T) {
 		violations, err := service.validateResult(context.Background(), db, row, result)
 		require.NoError(t, err)
 		require.Empty(t, violations)
-		if answer == `answer <src id="S1" />` {
-			require.Len(t, result.References, 1)
-		} else {
-			require.Empty(t, result.References)
-		}
+		require.Equal(t, answer, result.Answer, "validation must not modify the candidate before commit")
+		require.Empty(t, result.References)
 	}
 }
 

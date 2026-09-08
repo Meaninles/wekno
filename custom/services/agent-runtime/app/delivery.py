@@ -40,10 +40,10 @@ class Delivery(MiddlewareBase):
             if item.finished_reason == ReplyFinishedReason.EXCEED_MAX_ITERS and structured is None:
                 raise BudgetExhausted("Iteration budget exhausted without a final answer")
             try:
-                answer = Answer.model_validate(structured).answer
+                answer = Answer.model_validate(structured)
             except ValueError as exc:
                 raise DeliveryError("Invalid final answer structure or empty response") from exc
-            result = RunResult(run_id=self.control.payload.run_id, answer=answer,
+            result = RunResult(run_id=self.control.payload.run_id, answer=answer.answer, citations=answer.citations,
                                timings={"runtime_ms": (time.monotonic() - self.started) * 1000})
             await self.lifecycle.save(agent, "before_commit")
             self.result = result

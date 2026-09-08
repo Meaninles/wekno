@@ -223,7 +223,7 @@ async def test_plain_answer_is_committed_once_by_same_harness():
     result = await execute(payload, control, model)
     assert result.answer == control.committed["answer"] == "Hello"
     assert len(model.requests) == 1
-    assert any(e["type"] == "answer_delta" and e["content"] == "Hello" for e in control.emitted)
+    assert not any(e["type"] == "answer_delta" for e in control.emitted)
 
 
 @pytest.mark.asyncio

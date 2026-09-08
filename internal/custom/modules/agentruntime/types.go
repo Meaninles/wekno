@@ -243,6 +243,7 @@ type StreamEvent struct {
 }
 
 type ChatResult struct {
+	Citations             json.RawMessage       `json:"citations"`
 	Status                string                `json:"status"`
 	FailureCode           string                `json:"failure_code,omitempty"`
 	References            []*types.SearchResult `json:"references"`

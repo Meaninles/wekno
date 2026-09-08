@@ -65,15 +65,14 @@ def final():
 
 
 @pytest.mark.asyncio
-async def test_partial_final_answer_is_replaced_by_new_revision_after_disconnect():
+async def test_partial_final_answer_stays_private_after_disconnect():
     partial=Body([packet({'tool_calls':[{'index':0,'id':'interrupted-answer','type':'function','function':{
         'name':'GenerateStructuredOutput','arguments':'{"answer":"partial candidate'}}]})], httpx.ReadError('disconnected'))
     payload,control,requests,_,transport=fixture([partial,final()])
     async with model_for(payload,control,transport=transport) as model:
         result=await execute(payload,control,model)
     deltas=[e for e in control.emitted if e['type']=='answer_delta']
-    assert deltas[0]['content']=='partial candidate' and deltas[-1]['content']=='Verified'
-    assert deltas[-1]['revision']>deltas[0]['revision']
+    assert not deltas
     assert result.answer=='Verified' and len(requests)==2 and not control.calls
 
 
@@ -99,8 +98,8 @@ async def test_interrupted_decision_recovers_without_replaying_tools_or_partial_
                for _, snapshot in control.snapshots)
     assert "model_stream_retries" not in control.snapshots[-1][1]["agent"]["middle_context"]
     deltas = [e for e in control.emitted if e["type"] == "answer_delta"]
-    assert ''.join(e['content'] for e in deltas)=='Verified'
-    assert deltas[-1]["revision"] == 4
+    assert not deltas
+    assert control.snapshots[-1][1]["revision"] == 4
     assert [e["seq"] for e in control.emitted] == sorted({e["seq"] for e in control.emitted})
 
 

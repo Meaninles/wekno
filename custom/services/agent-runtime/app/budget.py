@@ -1,4 +1,6 @@
 """One budget for the SDK lifecycle, including its finalization decision."""
+import json
+
 from agentscope.message import Msg, TextBlock
 from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChoice
@@ -38,6 +40,7 @@ class IterationBudget(MiddlewareBase):
             "Repeat a check only after a relevant change or an unresolved failure. "
         )
         budget = await self.control.budget()
+        instruction += "\n[CURRENT_RUN_SOURCES]\n" + json.dumps({"run_id": budget.get("run_id", self.control.payload.run_id), "sources": budget.get("current_run_sources", [])}, ensure_ascii=False) + "\n[/CURRENT_RUN_SOURCES]\nThis is the complete current-run citation index, not evidence text. Use its id values only in citations[].source_ids.\n"
         tokens = budget["remaining_tokens"]
         requests = budget["remaining_requests"]
         seconds = budget["remaining_seconds"]

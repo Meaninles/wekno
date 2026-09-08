@@ -250,6 +250,7 @@ class RunResult(BaseModel):
     timings: dict[str, float] = Field(default_factory=dict)
     run_id: str
     answer: str
+    citations: Any = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
     artifact_notice: str = ""
     artifact_original_count: int = 0

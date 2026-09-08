@@ -88,7 +88,7 @@ async def test_tagged_reasoning_is_split_before_stream_checkpoint_and_delivery(a
     async with model_for(payload, control, transport=httpx.MockTransport(provider)) as model:
         result = await execute(payload, control, model)
     assert result.answer.strip() == answer
-    assert ''.join(e['content'] for e in control.emitted if e['type']=='answer_delta').strip() == answer
+    assert not any(e['type']=='answer_delta' for e in control.emitted)
     assert ''.join(e['content'] for e in control.emitted if e['type']=='thought_delta').strip() == answer
     last = control.snapshots[-1][1]['agent']['context'][-1]['content']
     assert ''.join(b['text'] for b in last if b['type']=='text').strip() == answer

@@ -116,6 +116,7 @@ async def finalize(payload, control, workspace):
     if failed:
         from .failures import error_message
         result.answer = error_message(result.failure_code)
+        result.citations = []
         if artifacts:
             result.answer += '已保存的文件可下载查看。'
     elif not result.answer.strip():

@@ -121,7 +121,8 @@ func (h *Handler) RunControl(c *gin.Context) {
 			if err = json.Unmarshal(row.Result, &prior); err != nil {
 				return err
 			}
-			if req.Result.Answer != prior.Answer {
+			replayed, _, _ := sourcerefs.RenderStructuredCitations(req.Result.Answer, req.Result.Citations, row.References)
+			if replayed != prior.Answer {
 				return errRunFenced
 			}
 			req.Result = prior
@@ -229,9 +230,9 @@ func (s *Service) validateResult(ctx context.Context, tx *gorm.DB, row *RunRecor
 	if strings.TrimSpace(result.Answer) == "" {
 		violations = append(violations, "Answer must not be empty.")
 	}
-	// Resolve display references without a citation review, retry or diagnostic.
-	clean, refs, _ := sourcerefs.FilterAnswerCitations(result.Answer, row.References)
-	result.Answer, result.References = clean, refs
+	// Validation keeps the candidate prose intact. Render once at durable commit,
+	// after all finalization edits, so validate -> commit cannot duplicate tags.
+	result.References = nil
 	result.Usage = map[string]any{"model_requests": row.ModelRequests, "input_tokens": row.InputTokens, "output_tokens": row.OutputTokens, "unknown_usage_requests": row.UnknownUsageRequests, "reserved_tokens": row.ReservedTokens}
 	var published []Artifact
 	if err := tx.Where("run_id = ? AND tenant_id = ? AND storage_state = ?", row.ID, row.TenantID, artifactStorageStateReady).Order("created_at").Find(&published).Error; err != nil {
@@ -262,6 +263,9 @@ func commitResult(tx *gorm.DB, row *RunRecord, result *ChatResult) error {
 }
 
 func storeResult(tx *gorm.DB, row *RunRecord, result *ChatResult, status string) error {
+	answer, refsUsed, citations := sourcerefs.RenderStructuredCitations(result.Answer, result.Citations, row.References)
+	result.Answer, result.References = answer, refsUsed
+	result.Citations, _ = json.Marshal(citations)
 	result.Status = status
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -466,9 +470,8 @@ func (s *Service) replayRun(ctx context.Context, initial *RunRecord, bus *event.
 			case "thought_delta":
 				bus.Emit(ctx, event.Event{ID: initial.MessageID, Type: event.EventAgentThought, SessionID: initial.SessionID, Data: event.AgentThoughtData{Content: item.Content, Iteration: int(item.Revision)}})
 			case "answer_delta":
-				replace := item.Revision != revision
-				revision = item.Revision
-				bus.Emit(ctx, event.Event{ID: initial.MessageID, Type: event.EventAgentFinalAnswer, SessionID: initial.SessionID, Data: event.AgentFinalAnswerData{Content: item.Content, Replace: replace, Revision: revision}})
+				// Candidate text is private until structured citation filtering at commit.
+				continue
 			case "bus":
 				e, err := decodeBusEvent(item.Data)
 				if err != nil {

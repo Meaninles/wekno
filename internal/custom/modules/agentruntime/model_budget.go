@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
+
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -35,13 +37,15 @@ var errModelBudget = errors.New("run model request budget exhausted")
 var errFinalizationRequired = errors.New("final answer budget is reserved")
 
 type BudgetState struct {
-	MaxTokens         int64   `json:"max_tokens"`
-	RemainingTokens   int64   `json:"remaining_tokens"`
-	MaxRequests       int64   `json:"max_requests"`
-	RemainingRequests int64   `json:"remaining_requests"`
-	FinalReserve      int64   `json:"final_reserve"`
-	InputFactor       float64 `json:"input_factor"`
-	RemainingSeconds  int64   `json:"remaining_seconds"`
+	RunID             string              `json:"run_id"`
+	CurrentRunSources []map[string]string `json:"current_run_sources"`
+	MaxTokens         int64               `json:"max_tokens"`
+	RemainingTokens   int64               `json:"remaining_tokens"`
+	MaxRequests       int64               `json:"max_requests"`
+	RemainingRequests int64               `json:"remaining_requests"`
+	FinalReserve      int64               `json:"final_reserve"`
+	InputFactor       float64             `json:"input_factor"`
+	RemainingSeconds  int64               `json:"remaining_seconds"`
 }
 
 // One authoritative ledger for primary and auxiliary calls, including recovery.
@@ -58,7 +62,7 @@ func modelBudget(tx *gorm.DB, row *RunRecord, role string) (BudgetState, error) 
 		limit = budgetSetting("AGENT_RUNTIME_ARTIFACT_MAX_TOTAL_TOKENS", 6000000)
 		requests = budgetSetting("AGENT_RUNTIME_ARTIFACT_MAX_MODEL_REQUESTS", 200)
 	}
-	b := BudgetState{MaxTokens: limit, MaxRequests: requests, InputFactor: 1.25, FinalReserve: 32768}
+	b := BudgetState{RunID: row.ID, CurrentRunSources: sourcerefs.StructuredCatalog(row.References), MaxTokens: limit, MaxRequests: requests, InputFactor: 1.25, FinalReserve: 32768}
 	b.RemainingTokens = max(0, limit-row.InputTokens-row.OutputTokens-row.ReservedTokens)
 	b.RemainingRequests = max(0, b.MaxRequests-int64(row.ModelRequests))
 	b.RemainingSeconds = max(0, int64(time.Until(row.Deadline).Seconds()))

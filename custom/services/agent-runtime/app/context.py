@@ -22,7 +22,7 @@ def system_prompt(payload: RunRequest) -> str:
         "\n\n[ANSWER_DELIVERY]\n"
         "每次决策只选择一种操作：尚有必要工作时调用业务工具；已可回答或需要说明能力边界时，"
         "立即调用 GenerateStructuredOutput 提交完整答复并结束本轮。answer 字段是用户收到的全部正文，"
-        "保留所需引用与必要限制。其他文本属于内部过程。\n[/ANSWER_DELIVERY]")
+        "保留必要限制。引用单独填写 citations，每项包含从 answer 原样复制的 text 和本轮 source_ids；answer 不嵌入引用标签。其他文本属于内部过程。\n[/ANSWER_DELIVERY]")
     if payload.enable_artifacts and payload.runtime_config.agent_type != "knowledge-qa":
         prompt += ("\n\n[FILE_SOURCE_DATA]\n"
                    "Large business-tool results are delivered as complete JSON files in /workspace/source-data/ "

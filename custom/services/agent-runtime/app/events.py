@@ -39,12 +39,9 @@ class Events:
                 self.answer_streams[item.tool_call_id] = AnswerStream(limit * 16)
         final = self.answer_streams.get(getattr(item, "tool_call_id", ""))
         if final is not None and isinstance(item, ToolCallDeltaEvent):
-            delta = final.feed(item.delta)
-            if not delta:
-                return
-            event = RunEvent(type="answer_delta", content=delta,
-                             message_id=item.reply_id, revision=self.revision,
-                             id=item.id, data={"candidate": True})
+            final.feed(item.delta)
+            # The complete candidate is filtered by the backend before publishing.
+            return
         elif final is not None or isinstance(item, TextBlockDeltaEvent):
             return
         elif isinstance(item, ThinkingBlockDeltaEvent):

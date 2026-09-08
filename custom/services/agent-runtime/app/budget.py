@@ -5,6 +5,7 @@ from agentscope.tool import ToolChoice
 from .control import control_cause
 from .models import finalizing_call
 from .context_projection import transient_messages
+from .answer import ANSWER_TOOL
 
 
 class BudgetExhausted(RuntimeError):
@@ -17,7 +18,7 @@ class IterationBudget(MiddlewareBase):
         self.control = control
 
     async def on_acting(self, agent, input_kwargs, next_handler):
-        if agent.state.cur_iter >= self.limit - 1 or agent.state.middle_context.get("budget_finalizing"):
+        if input_kwargs["tool_call"].name != ANSWER_TOOL and (agent.state.cur_iter >= self.limit - 1 or agent.state.middle_context.get("budget_finalizing")):
             raise BudgetExhausted("Iteration budget reserved for final answer; further tool calls are not allowed")
         async for item in next_handler(**input_kwargs):
             yield item
@@ -54,8 +55,8 @@ class IterationBudget(MiddlewareBase):
             instruction += "Begin finalization now. Avoid new investigations; finish essential work and save deliverables before the final decision. "
         if final:
             agent.state.middle_context["budget_finalizing"] = True
-            instruction += "FINAL DECISION: return the final answer now, without tools. Do not claim unfinished work is complete."
-            input_kwargs = {**input_kwargs, "tool_choice": ToolChoice(mode="none"), "tools": []}
+            instruction += f"FINAL DECISION: submit the final answer now through {ANSWER_TOOL}. State unfinished work honestly."
+            input_kwargs = {**input_kwargs, "tool_choice": ToolChoice(mode=ANSWER_TOOL, tools=[ANSWER_TOOL])}
         call_kwargs = {
             **input_kwargs,
             "messages": transient_messages(input_kwargs["messages"], Msg(name="runtime_budget", role="system", content=[TextBlock(text=instruction)])),
@@ -73,10 +74,10 @@ class IterationBudget(MiddlewareBase):
                     # SDK decision can use its protected allowance without tools.
                     finalizing_call.set(True)
                     agent.state.middle_context["budget_finalizing"] = True
-                    call_kwargs.update(tool_choice=ToolChoice(mode="none"), tools=[])
+                    call_kwargs.update(tool_choice=ToolChoice(mode=ANSWER_TOOL, tools=[ANSWER_TOOL]))
                     budget_index = next(i for i, msg in enumerate(call_kwargs["messages"]) if msg.name == "runtime_budget")
                     call_kwargs["messages"][budget_index] = Msg(name="runtime_budget", role="system", content=[TextBlock(
-                        text=instruction + " FINAL DECISION: answer now with available results, without tools. State unfinished work honestly.")])
+                        text=instruction + f" FINAL DECISION: submit available results through {ANSWER_TOOL} now. State unfinished work honestly.")])
                     try:
                         return await next_handler(**call_kwargs)
                     except Exception as final_exc:

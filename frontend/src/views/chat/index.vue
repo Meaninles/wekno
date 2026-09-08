@@ -651,6 +651,11 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     userHasScrolledUp.value = false;
     scrollToBottom(true);
 
+    // Once uploads are ready, the submitted text belongs to this request, not
+    // the editable draft. Never clear a newer draft when the answer finishes.
+    if (!props.embeddedMode) {
+        saveSessionDraftState(requestSessionId, requestSettings, attachmentFiles, imageFiles, "");
+    }
     await startStream({
         session_id: requestSessionId,
         knowledge_base_ids: kbIds,
@@ -670,15 +675,6 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         method: 'POST',
         url: endpoint,
     });
-    if (!props.embeddedMode) {
-        saveSessionDraftState(
-            requestSessionId,
-            requestSettings,
-            attachmentFiles,
-            imageFiles,
-            "",
-        );
-    }
     markCurrentSessionRead();
 }
 
@@ -749,6 +745,7 @@ watch(error, (newError) => {
             inputFieldRef.value?.setUploadedAttachments?.(pendingQueueDraft.attachments || []);
             inputFieldRef.value?.setUploadedImages?.(pendingQueueDraft.images || []);
             inputFieldRef.value?.restoreQuery?.(pendingQueueDraft.query);
+            saveCurrentConversationDraft();
             pendingQueueDraft = null;
         }
         isReplying.value = false;

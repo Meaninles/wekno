@@ -10,13 +10,16 @@ func TestAllProfilesRetainIdentityWithFixedBudgets(t *testing.T) {
 		BuiltinKnowledgeQAID:  AgentTypeKnowledgeQA,
 		BuiltinGeneralAgentID: AgentTypeGeneralAgent, BuiltinDataAnalystID: AgentTypeDataAnalysis,
 		BuiltinTableAnalystID: AgentTypeTableAnalysis, BuiltinDocumentProcessingID: AgentTypeDocumentProcessingAgent,
-		BuiltinWikiResearcherID: AgentTypeWikiQA, BuiltinWikiFixerID: AgentTypeCustom,
+		BuiltinWikiFixerID: AgentTypeCustom,
 	}
 	if GetBuiltinAgent("builtin-quick-answer", 1) != nil {
 		t.Fatal("retired profile remains callable")
 	}
 	if GetBuiltinAgent("builtin-simple-chat", 1) != nil {
 		t.Fatal("retired simple chat remains callable")
+	}
+	if GetBuiltinAgent("builtin-wiki-researcher", 1) != nil || IsBuiltinAgentID("builtin-wiki-researcher") {
+		t.Fatal("removed Wiki Questioner remains registered")
 	}
 	for id, typ := range wantTypes {
 		a := GetBuiltinAgent(id, 1)

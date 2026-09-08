@@ -399,8 +399,6 @@ export function pollWeChatQRCodeStatus(qrcode: string) {
 }
 
 
-export const BUILTIN_WIKI_RESEARCHER_ID = 'builtin-wiki-researcher';
-
 export const BUILTIN_DEEP_RESEARCHER_ID = 'builtin-deep-researcher';
 
 export const BUILTIN_DATA_ANALYST_ID = 'builtin-data-analyst';

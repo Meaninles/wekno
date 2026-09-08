@@ -28,19 +28,28 @@ class Parameters(BaseModel):
 
 
 class ScriptedModel(ChatModelBase):
-    def __init__(self, responses):
+    def __init__(self, responses, *, structured=True):
         super().__init__(OpenAICredential(api_key="fixture"), "fixture", Parameters(),
                          max_retries=0, context_size=128000)
         self.responses = iter(responses)
         self.requests = []
+        self.structured = structured
+        self.options = []
         self.formatter = OpenAIChatFormatter()
 
     async def _call_api(self, model_name, messages, **kwargs):
         self.requests.append(copy.deepcopy(messages))
+        self.options.append(kwargs)
         content = next(self.responses)
         if isinstance(content, asyncio.Event):
             await content.wait()
             content = [TextBlock(text="late answer")]
+        # Existing scenario fixtures specify their final answer as text. Put
+        # that fixture on the current protocol, not the retired text channel.
+        if self.structured and content and all(isinstance(b, TextBlock) for b in content):
+            from app.answer import ANSWER_TOOL
+            content = [ToolCallBlock(id=f"answer-{len(self.requests)}", name=ANSWER_TOOL,
+                                    input=json.dumps({"answer":"\n".join(b.text for b in content)}, ensure_ascii=False))]
         return ChatResponse(content=content, is_last=True, usage=ChatUsage(input_tokens=25, output_tokens=10, time=.01))
 
 

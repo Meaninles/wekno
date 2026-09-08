@@ -218,6 +218,7 @@ class RuntimeWorkspace(WorkspaceBase):
         self.pending_files = {}
         self.prepare_lock = asyncio.Lock()
         self.output_revision = 0
+        self.output_directory_ready = False
 
     async def initialize(self):
         # Provision lazily for plain QA: no container startup on its critical
@@ -270,7 +271,7 @@ class RuntimeWorkspace(WorkspaceBase):
             self.payload.system_prompt += "\nWorkspace capability: read supplied input files as source material."
         self.payload.system_prompt += "\nGround factual claims in the sources actually inspected. A search with no relevant result establishes only that this search found no evidence; it does not establish that a rule or document does not exist. Distinguish explicit provisions from your interpretation. For findings from original files, reuse an existing matching citation handle. If none is available, use list_knowledge_chunks with the file's knowledge_id to obtain the relevant citable excerpt; do not invent source handles or cite a fragment that does not support the finding. Internal conversation metadata is not part of the user-facing answer."
         if self.payload.enable_artifacts:
-            self.payload.system_prompt += "\nSave finished deliverables in /workspace/outputs. Keep scripts, previews and temporary files elsewhere."
+            self.payload.system_prompt += "\nThe runtime creates /workspace/outputs before workspace tools run. Save finished deliverables there directly. Keep scripts, previews and temporary files elsewhere."
             self.payload.system_prompt += ("\nWorkspace capabilities are already provisioned: Python with openpyxl, xlsxwriter, pandas, python-docx, python-pptx, PyMuPDF, Pillow and matplotlib; Node with pptxgenjs; LibreOffice, pandoc and PDF utilities with CJK fonts. Do not probe or install these dependencies. Combine creation and meaningful validation in one script when their inputs are known. For spreadsheets, verify formulas and recalculate with LibreOffice before publishing if computed values are needed. Use /workspace/outputs for deliverables.")
 
     async def input_bytes(self, spec):
@@ -291,6 +292,11 @@ class RuntimeWorkspace(WorkspaceBase):
         if tool is None:
             return
         async with self.prepare_lock:
+            if self.payload.enable_artifacts and not self.output_directory_ready:
+                result = await self.get_backend().exec_shell('mkdir -p /workspace/outputs', timeout=15)
+                if result.exit_code:
+                    raise OSError('Output directory could not be prepared')
+                self.output_directory_ready = True
             if not tool.is_read_only:
                 from .artifact_delivery import capture_baseline
                 await capture_baseline(self.payload, self.control, self)

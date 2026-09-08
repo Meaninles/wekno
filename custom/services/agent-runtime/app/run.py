@@ -22,6 +22,7 @@ from .vision import Vision
 from .budget import IterationBudget
 from .artifact_delivery import OutputPresentation
 from .context_projection import ContextProjection
+from .answer import Answer, AnswerProtocol
 
 
 async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
@@ -49,12 +50,12 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
     agent = Agent(
         name="weknora", system_prompt=system_prompt(payload), model=model,
         toolkit=toolkit, state=state, offloader=offloader,
-        middlewares=[ContextProjection(data_backend), OutputPresentation(payload, offloader), Vision(control), IterationBudget(payload.runtime_config.max_iterations, control), lifecycle, delivery],
+        middlewares=[ContextProjection(data_backend), OutputPresentation(payload, offloader), Vision(control), AnswerProtocol(), IterationBudget(payload.runtime_config.max_iterations, control), lifecycle, delivery],
         model_config=ModelConfig(max_retries=0, fallback_model=None),
         context_config=ContextConfig(tool_result_limit=4096),
-        # SDK grants one final text decision after max_iters. Count that call
-        # inside our public budget instead of silently exceeding it.
+        # SDK's one structured-output grace decision is inside our public limit.
         react_config=ReActConfig(max_iters=payload.runtime_config.max_iterations - 1,
+                                structured_output_grace_iters=1,
                                 interruption_raise_cancelled_error=True),
     )
     inputs = None if payload.checkpoint else messages(payload)
@@ -71,7 +72,7 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
     pump.add_done_callback(pump_finished)
     try:
         async with asyncio.timeout(remaining):
-            stream = agent.reply_stream(inputs=inputs, yield_final_msg=True)
+            stream = agent.reply_stream(inputs=inputs, structured_schema=Answer, yield_final_msg=True)
             try:
                 async for item in stream:
                     # Completion is the committed Go result, never an SDK

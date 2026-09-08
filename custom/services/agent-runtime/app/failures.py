@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .budget import BudgetExhausted
 from .control import control_cause
+from .models import ProviderStreamInterrupted
 import httpx
 import openai
 import anthropic
@@ -14,6 +15,11 @@ _path = Path(__file__).with_name("public_error_catalog.json")
 if not _path.exists():
     _path = Path(__file__).resolve().parents[4] / "internal/custom/modules/usererrors/catalog.json"
 _catalog = json.loads(_path.read_text(encoding="utf-8"))
+
+
+def error_message(code: str) -> str:
+    messages = {item["code"]: item["message"] for item in _catalog}
+    return messages.get(code, messages["unknown"])
 
 
 def error_code(error: BaseException) -> str:
@@ -34,7 +40,8 @@ def error_code(error: BaseException) -> str:
             return "task_limit"
         if isinstance(exc, (TimeoutError, httpx.TimeoutException, openai.APITimeoutError, anthropic.APITimeoutError)):
             return "timeout"
-        if isinstance(exc, (httpx.NetworkError, openai.APIConnectionError, anthropic.APIConnectionError)):
+        if isinstance(exc, (httpx.NetworkError, httpx.RemoteProtocolError, ProviderStreamInterrupted,
+                            openai.APIConnectionError, anthropic.APIConnectionError)):
             return "connection"
         for child in getattr(exc, "exceptions", ()):
             code = classify(child)

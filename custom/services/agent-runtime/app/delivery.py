@@ -1,23 +1,18 @@
 """A single deterministic delivery contract inside the SDK reply lifecycle."""
 from __future__ import annotations
 
-import json
 import time
 import asyncio
 
 from agentscope.event import ReplyEndEvent
-from agentscope.message import TextBlock
 from agentscope.middleware import MiddlewareBase
 from agentscope.types import ReplyFinishedReason
 
 from .contracts import RunResult
 from .control import Control
-from .state import Lifecycle, final_decision
+from .state import Lifecycle
 from .budget import BudgetExhausted
-
-
-class DeliveryError(RuntimeError):
-    pass
+from .answer import Answer, DeliveryError
 
 
 class Delivery(MiddlewareBase):
@@ -41,14 +36,13 @@ class Delivery(MiddlewareBase):
             if item.finished_reason not in (ReplyFinishedReason.COMPLETED, ReplyFinishedReason.EXCEED_MAX_ITERS):
                 # Never convert exceed-limit/error/interrupt into a success.
                 raise DeliveryError(f"Run did not complete: {item.finished_reason}")
-            candidate = next((msg for msg in reversed(agent.state.context) if msg.role == "assistant"), None)
-            candidate = final_decision(candidate)
-            if item.finished_reason == ReplyFinishedReason.EXCEED_MAX_ITERS and candidate is None:
-                raise BudgetExhausted("Iteration budget exhausted without a final answer")
             structured = agent.state.reply_context.structured_output
-            answer = (json.dumps(structured, ensure_ascii=False) if structured is not None else
-                      "\n".join(block.text for block in candidate.content if isinstance(block, TextBlock))
-                      if candidate is not None else "")
+            if item.finished_reason == ReplyFinishedReason.EXCEED_MAX_ITERS and structured is None:
+                raise BudgetExhausted("Iteration budget exhausted without a final answer")
+            try:
+                answer = Answer.model_validate(structured).answer
+            except ValueError as exc:
+                raise DeliveryError("Invalid final answer structure or empty response") from exc
             result = RunResult(run_id=self.control.payload.run_id, answer=answer,
                                timings={"runtime_ms": (time.monotonic() - self.started) * 1000})
             await self.lifecycle.save(agent, "before_commit")

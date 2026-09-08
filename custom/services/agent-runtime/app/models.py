@@ -90,6 +90,10 @@ class ProviderIncomplete(RuntimeError):
     pass
 
 
+class ProviderStreamInterrupted(ProviderIncomplete):
+    """Transport ended without a complete model decision; safe to retry before acting."""
+
+
 class StreamOutcome:
     """Observe wire termination and usage without rewriting provider messages."""
     def __init__(self, response):
@@ -127,7 +131,7 @@ class StreamOutcome:
 
     def finish(self):
         if self.check and not self.completed:
-            raise ProviderIncomplete("Provider stream closed without a terminal result")
+            raise ProviderStreamInterrupted("Provider stream closed without a terminal result")
 
 
 class LeasedStream(httpx.AsyncByteStream):

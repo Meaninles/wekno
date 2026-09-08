@@ -1,6 +1,7 @@
 """Code-only settlement of this run's changed outputs, independent of the LLM."""
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import shlex
@@ -113,7 +114,10 @@ async def finalize(payload, control, workspace):
         result.status = 'incomplete'
         result.failure_code = pending.get('error_code') or 'execution_failed'
     if failed:
-        result.answer = '本次任务尚未全部完成。' + ('已保存的文件可下载查看。' if artifacts else '暂未生成可交付的文件，请稍后重试。')
+        from .failures import error_message
+        result.answer = error_message(result.failure_code)
+        if artifacts:
+            result.answer += '已保存的文件可下载查看。'
     elif not result.answer.strip():
         result.answer = '已生成以下文件。' if artifacts else ''
     if rejected:
@@ -134,8 +138,8 @@ async def start_finalization(payload, control, result=None, error=None):
     payload.deadline_unix = time.time() + 600
 
 
-from agentscope.message import Msg, TextBlock
 from agentscope.middleware import MiddlewareBase
+from .answer import ANSWER_TOOL
 
 class OutputPresentation(MiddlewareBase):
     def __init__(self, payload, workspace):
@@ -154,10 +158,15 @@ class OutputPresentation(MiddlewareBase):
                        if self.payload.output_baseline.get(path) != digest]
             if changed:
                 text = ("本轮已有新建或修改的交付文件。系统会在本轮结束后检查文件可用性，"
-                        "并将通过检查的文件自动展示为回答末尾的产物卡片。最终正文简洁说明结果即可，"
-                        "文件访问由末尾卡片提供。尚未完成的工作请如实说明。当前待检查文件：" +
+                        "并将通过检查的文件自动展示为回答末尾的产物卡片。最终正文只说明文件内容、使用方式与实际未完成事项。"
+                        "不要描述内部处理步骤、工作路径、校验方法及结果；不要生成文件链接，用户通过产物卡片访问文件。当前待检查文件：" +
                         json.dumps(sorted(changed), ensure_ascii=False))
-                from .context_projection import transient_messages
-                input_kwargs = {**input_kwargs, "messages": transient_messages(input_kwargs["messages"],
-                    Msg(name="output_presentation", role="system", content=[TextBlock(text=text)]))}
+                # Attach presentation to the field it constrains. This changes
+                # only the current provider schema, never dialogue or SDK state.
+                tools = copy.deepcopy(input_kwargs["tools"])
+                for tool in tools:
+                    if tool["function"]["name"] == ANSWER_TOOL:
+                        field = tool["function"]["parameters"]["properties"]["answer"]
+                        field["description"] = field.get("description", "") + "\n" + text
+                input_kwargs = {**input_kwargs, "tools": tools}
         return await next_handler(**input_kwargs)

@@ -41,7 +41,8 @@ async def test_rejected_admission_uses_reserved_call_without_generating_a_retry(
         if len(calls)==1:
             try: raise ControlError('finalization_required','reserved')
             except ControlError as inner: raise RuntimeError('wrapped SDK error') from inner
-        assert kwargs['tools']==[] and kwargs['tool_choice'].mode=='none'
+        assert kwargs['tool_choice'].mode=='GenerateStructuredOutput'
+        assert kwargs['tool_choice'].tools==['GenerateStructuredOutput']
         generations.append('final')
         return 'final'
     assert await budget.on_model_call(agent,{'messages':[]},next_handler)=='final'

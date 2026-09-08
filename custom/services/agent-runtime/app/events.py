@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import asyncio
 
-from agentscope.event import ModelCallStartEvent, TextBlockDeltaEvent, ThinkingBlockDeltaEvent
+from agentscope.event import ModelCallStartEvent, TextBlockDeltaEvent, ThinkingBlockDeltaEvent, ToolCallStartEvent, ToolCallDeltaEvent
 from agentscope.message import Msg
 
 from .contracts import RunEvent
 from .control import Control
+from .answer import ANSWER_TOOL, AnswerStream, DeliveryError
 
 
 class Events:
@@ -19,22 +20,39 @@ class Events:
         self.revision = int((control.payload.checkpoint or {}).get("revision", 0))
         self.lock = asyncio.Lock()
         self.first_text = True
+        self.answer_streams = {}
+        self.decision_tools = []
 
     async def sdk(self, item) -> None:
         if isinstance(item, Msg):
             return
         if isinstance(item, ModelCallStartEvent):
             self.revision += 1
-        if isinstance(item, TextBlockDeltaEvent):
-            event = RunEvent(type="answer_delta", content=item.delta,
+            self.answer_streams.clear()
+            self.decision_tools.clear()
+        if isinstance(item, ToolCallStartEvent):
+            self.decision_tools.append(item.tool_call_name)
+            if ANSWER_TOOL in self.decision_tools and len(self.decision_tools) != 1:
+                raise DeliveryError("Final answer must be submitted separately from business actions")
+            if item.tool_call_name == ANSWER_TOOL:
+                limit = self.control.payload.runtime_config.max_completion_tokens or 8192
+                self.answer_streams[item.tool_call_id] = AnswerStream(limit * 16)
+        final = self.answer_streams.get(getattr(item, "tool_call_id", ""))
+        if final is not None and isinstance(item, ToolCallDeltaEvent):
+            delta = final.feed(item.delta)
+            if not delta:
+                return
+            event = RunEvent(type="answer_delta", content=delta,
                              message_id=item.reply_id, revision=self.revision,
                              id=item.id, data={"candidate": True})
+        elif final is not None or isinstance(item, TextBlockDeltaEvent):
+            return
         elif isinstance(item, ThinkingBlockDeltaEvent):
             event = RunEvent(type="thought_delta", content=item.delta, revision=self.revision, id=item.id)
         else:
             event = RunEvent(type="sdk", id=item.id, revision=self.revision,
                              data={"event_type":item.type})
-        first = isinstance(item, TextBlockDeltaEvent) and self.first_text
+        first = event.type == "answer_delta" and self.first_text
         if first:
             self.first_text = False
         await self.push(event, flush=first)

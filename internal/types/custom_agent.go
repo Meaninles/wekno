@@ -16,7 +16,6 @@ const (
 	BuiltinKnowledgeGraphExpertID    = "builtin-knowledge-graph-expert"
 	BuiltinDocumentProcessingID      = "builtin-document-processing"
 	BuiltinGeneralAgentID            = "builtin-general-agent"
-	BuiltinWikiResearcherID          = "builtin-wiki-researcher"
 	BuiltinWikiFixerID               = "builtin-wiki-fixer"
 	AgentTypeWikiQA                  = "wiki-qa"
 	AgentTypeHybridRAGWiki           = "hybrid-rag-wiki"
@@ -362,7 +361,6 @@ var BuiltinAgentRegistry = map[string]func(uint64) *CustomAgent{}
 
 var builtinAgentIDsOrdered = []string{
 	BuiltinKnowledgeQAID,
-	BuiltinWikiResearcherID,
 	BuiltinDeepResearcherID,
 	BuiltinDataAnalystID,
 	BuiltinTableAnalystID,

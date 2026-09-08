@@ -14,6 +14,11 @@ func applyAgentRuntimeMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := retireSimpleChat(ctx, db); err != nil {
 		return err
 	}
+	// Remove only the Wiki Questioner profile. Keep Wiki data, tools, other
+	// agents and historical conversation bindings unchanged.
+	if err := db.WithContext(ctx).Exec(`DELETE FROM custom_agents WHERE id = 'builtin-wiki-researcher' AND is_builtin = true`).Error; err != nil {
+		return err
+	}
 	if err := enableAgentMultimodalDefaults(ctx, db); err != nil {
 		return err
 	}

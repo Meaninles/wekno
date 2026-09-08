@@ -60,7 +60,10 @@ async def test_closing_decoded_stream_closes_provider_iterator(monkeypatch):
     assert closed == [True]
 
 
-def provider_stream(deltas):
+def provider_stream(deltas, answer=None):
+    if answer is not None:
+        deltas = [*deltas, {'tool_calls':[{'index':0,'id':'final','type':'function','function':{
+            'name':'GenerateStructuredOutput','arguments':json.dumps({'answer':answer})}}]}]
     packets = [{'id':'fixture-1','object':'chat.completion.chunk','created':1,'model':'fixture',
                 'choices':[{'index':0,'delta':delta,'finish_reason':None}]} for delta in deltas]
     packets.append({'id':'fixture-1','object':'chat.completion.chunk','created':1,'model':'fixture',
@@ -78,7 +81,7 @@ async def test_tagged_reasoning_is_split_before_stream_checkpoint_and_delivery(a
     calls = []
     def provider(req):
         calls.append(req)
-        return provider_stream([{'content':char} for char in wire])
+        return provider_stream([{'content':char} for char in wire], answer=answer)
     payload = request(runtime_config={'agent_type':agent_type})
     payload.llm.reasoning_format = 'think-tags'
     control = MemoryControl(payload)
@@ -101,7 +104,7 @@ async def test_native_reasoning_fields_are_preserved(wire_format):
     control = MemoryControl(payload)
     async with model_for(payload, control, transport=httpx.MockTransport(lambda _: provider_stream([
         {'reasoning_content':'Inspect evidence','content':'Final answer'},
-    ]))) as model:
+    ], answer='Final answer'))) as model:
         result = await execute(payload, control, model)
     assert result.answer == 'Final answer'
     assert ''.join(e['content'] for e in control.emitted if e['type']=='thought_delta') == 'Inspect evidence'
@@ -112,7 +115,7 @@ async def test_native_protocol_keeps_literal_tags_in_content():
     payload = request()
     control = MemoryControl(payload)
     text = '<think>literal markup</think>'
-    async with model_for(payload, control, transport=httpx.MockTransport(lambda _: provider_stream([{'content':text}]))) as model:
+    async with model_for(payload, control, transport=httpx.MockTransport(lambda _: provider_stream([{'content':text}], answer=text))) as model:
         result = await execute(payload, control, model)
     assert result.answer == text
 

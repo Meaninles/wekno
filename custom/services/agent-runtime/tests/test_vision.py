@@ -13,7 +13,7 @@ from test_run import MemoryControl, ScriptedModel, request
 
 @pytest.mark.asyncio
 async def test_vision_observations_reuse_content_identity_across_restored_blocks(monkeypatch):
-    model=ScriptedModel([[TextBlock(text="The total is 52.")]])
+    model=ScriptedModel([[TextBlock(text="The total is 52.")]], structured=False)
     @asynccontextmanager
     async def provider(*args, **kwargs):
         assert kwargs["model_role"] == "vision"
@@ -31,7 +31,7 @@ async def test_vision_observations_reuse_content_identity_across_restored_blocks
 
 @pytest.mark.asyncio
 async def test_tool_inspection_does_not_replay_the_original_generation_task(monkeypatch):
-    model=ScriptedModel([[TextBlock(text='One label overlaps the chart.')]])
+    model=ScriptedModel([[TextBlock(text='One label overlaps the chart.')]], structured=False)
     @asynccontextmanager
     async def provider(payload,*args,**kwargs):
         assert payload.runtime_config.max_completion_tokens == 1024
@@ -73,7 +73,7 @@ async def test_primary_vision_model_never_triggers_auxiliary_vision():
 
 @pytest.mark.asyncio
 async def test_tool_image_is_replaced_with_cached_observation(monkeypatch):
-    model=ScriptedModel([[TextBlock(text="Budget 186400")]])
+    model=ScriptedModel([[TextBlock(text="Budget 186400")]], structured=False)
     @asynccontextmanager
     async def provider(*args, **kwargs):
         yield model

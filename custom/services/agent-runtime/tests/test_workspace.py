@@ -46,8 +46,11 @@ async def test_inputs_load_only_for_requested_paths_and_never_replace_recovered_
         if path not in files: raise OSError("absent")
         return files[path]
     async def write(path,data): files[path]=data
+    async def shell(command, **kwargs):
+        assert command == 'mkdir -p /workspace/outputs'
+        return SimpleNamespace(exit_code=0)
     async def download(spec): downloads.append(spec.id);return spec.id.encode()
-    workspace._backend=SimpleNamespace(read_file=read,write_file=write)
+    workspace._backend=SimpleNamespace(read_file=read,write_file=write,exec_shell=shell)
     workspace.input_bytes=download
     await workspace.initialize()
     assert not downloads and len(files)==1
@@ -66,14 +69,18 @@ async def test_output_baseline_precedes_first_mutation_and_read_does_not_start_i
     payload=request(enable_artifacts=True)
     workspace=RuntimeWorkspace(payload,MemoryControl(payload))
     await workspace.initialize()
+    async def shell(command, **kwargs):
+        calls.append("directory")
+        return SimpleNamespace(exit_code=0)
+    workspace._backend=SimpleNamespace(exec_shell=shell)
     async def capture(p,c,w):
         if p.output_baseline is None:
             calls.append("baseline")
             p.output_baseline={"/workspace/outputs/old.txt":"old-hash"}
     monkeypatch.setattr("app.artifact_delivery.capture_baseline",capture)
     await workspace.prepare_tool("Read",{"file_path":"/workspace/a"})
-    assert not calls and payload.output_baseline is None
+    assert calls == ["directory"] and payload.output_baseline is None
     await workspace.prepare_tool("Bash",{"command":"write output"})
     workspace.tool_finished("Bash")
     await workspace.prepare_tool("Write",{"file_path":"/workspace/outputs/b.txt"})
-    assert calls==["baseline"] and workspace.output_revision==1
+    assert calls==["directory", "baseline"] and workspace.output_revision==1

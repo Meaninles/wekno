@@ -2045,8 +2045,8 @@ const createSession = async (val: string) => {
   if (props.embeddedMode) {
     const textarea = getTextareaEl();
     if (textarea) textarea.blur();
-    emit('send-msg', val, selectedModelId.value || '', [], [], []);
     clearvalue();
+    emit('send-msg', val, selectedModelId.value || '', [], [], []);
     return;
   }
 
@@ -2137,10 +2137,10 @@ const createSession = async (val: string) => {
   // detached DOM element (which causes getComputedStyle to throw).
   const textarea = getTextareaEl();
   if (textarea) textarea.blur();
-  emit('send-msg', val, modelIdForSend, mentionedItems, imageFiles, attachmentFiles);
-
-  // Keep transient resources selected so follow-up turns in the same session reuse them.
+  // Consume the submitted text before the parent can save a draft or navigate.
+  // Keep selected resources available for follow-up turns.
   clearvalue();
+  emit('send-msg', val, modelIdForSend, mentionedItems, imageFiles, attachmentFiles);
 }
 
 const handleSend = () => {
@@ -2358,9 +2358,6 @@ const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) =>
 }
 
 const clearvalue = () => {
-  // Guard: only clear when the textarea DOM element is still mounted,
-  // otherwise TDesign's autosize will call getComputedStyle on a non-Element.
-  if (!getTextareaEl()) return;
   query.value = "";
 }
 

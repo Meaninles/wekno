@@ -20,11 +20,9 @@ def system_prompt(payload: RunRequest) -> str:
     scope = KNOWLEDGE_QA_SCOPE if payload.runtime_config.agent_type == "knowledge-qa" else ""
     prompt = payload.system_prompt + (
         "\n\n[ANSWER_DELIVERY]\n"
-        "Only the final decision without tool calls is submitted as the answer. "
-        "Text accompanied by tool calls is provisional progress, not a delivered answer. "
-        "Finish necessary source reads before composing the answer. The final decision must "
-        "answer the current request completely and carry its supporting citations; do not "
-        "send only a supplement that depends on earlier provisional text.\n[/ANSWER_DELIVERY]")
+        "每次决策只选择一种操作：尚有必要工作时调用业务工具；已可回答或需要说明能力边界时，"
+        "立即调用 GenerateStructuredOutput 提交完整答复并结束本轮。answer 字段是用户收到的全部正文，"
+        "保留所需引用与必要限制。其他文本属于内部过程。\n[/ANSWER_DELIVERY]")
     if payload.enable_artifacts and payload.runtime_config.agent_type != "knowledge-qa":
         prompt += ("\n\n[FILE_SOURCE_DATA]\n"
                    "Large business-tool results are delivered as complete JSON files in /workspace/source-data/ "

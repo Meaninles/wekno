@@ -104,6 +104,18 @@ async def test_execution_failure_preserves_valid_outputs_and_marks_incomplete():
     assert result.status=='incomplete' and len(result.artifacts)==1
     assert 'private details' not in result.answer
 
+
+@pytest.mark.asyncio
+async def test_exhausted_stream_recovery_uses_shared_friendly_error_without_republishing_old_files():
+    from app.failures import error_message
+    p,c,b,w=setup({'/workspace/outputs/old.txt':b'old'})
+    await capture_baseline(p,c,w)
+    await start_finalization(p,c,error=httpx.RemoteProtocolError('private provider details'))
+    result=await finalize(p,c,w)
+    assert result.status=='incomplete' and result.failure_code=='connection'
+    assert result.answer==error_message('connection')
+    assert not result.artifacts and not c.uploads
+
 @pytest.mark.asyncio
 async def test_knowledge_qa_and_unchanged_files_are_never_published():
     p,c,b,w=setup({'/workspace/outputs/a.txt':b'old'});await capture_baseline(p,c,w)
@@ -147,29 +159,35 @@ def test_inventory_excludes_inputs_hidden_files_and_directories(tmp_path):
 @pytest.mark.asyncio
 async def test_presentation_hint_tracks_actual_changes_without_polluting_context():
     from app.artifact_delivery import OutputPresentation
+    from app.answer import Answer, ANSWER_TOOL
     p,c,b,w=setup({'/workspace/outputs/old.txt':b'old'})
     await capture_baseline(p,c,w)
     middleware=OutputPresentation(p,w)
     received=[]
     async def model(**kwargs):
-        received.append(kwargs['messages']); return 'answer'
+        received.append(kwargs); return 'answer'
     original=[__import__('agentscope.message',fromlist=['Msg']).Msg(name='user',role='user',content=[TextBlock(text='hello')])]
+    tools=[{'type':'function','function':{'name':ANSWER_TOOL,'parameters':Answer.model_json_schema()}}]
     async def check():
-        assert await middleware.on_model_call(None,{'messages':original},model)=='answer'
+        assert await middleware.on_model_call(None,{'messages':original,'tools':tools},model)=='answer'
+        assert received[-1]['messages'] is original
+        assert '产物卡片' not in str(tools)
     await check()
-    assert received[-1] is original
+    assert received[-1]['tools'] is tools
     b.files['/workspace/outputs/old.txt']=b'changed'
     await check()
-    assert received[-1][0].name=='output_presentation' and len(original)==1
+    hint=received[-1]['tools'][0]['function']['parameters']['properties']['answer']['description']
+    assert '不要描述内部处理步骤、工作路径、校验方法及结果' in hint
+    assert '产物卡片' in hint
     b.files['/workspace/outputs/old.txt']=b'old'
     await check()
-    assert received[-1] is original
+    assert received[-1]['tools'] is tools
     b.files['/workspace/outputs/new.txt']=b'new'
     await check()
-    assert received[-1][0].name=='output_presentation'
+    assert 'new.txt' in str(received[-1]['tools'])
     del b.files['/workspace/outputs/new.txt']
     await check()
-    assert received[-1] is original
+    assert received[-1]['tools'] is tools
     assert not c.attempts and len(received)==5
 
 
@@ -185,21 +203,23 @@ async def test_plain_completion_without_workspace_mutations_does_not_provision_o
 @pytest.mark.asyncio
 async def test_output_notice_reuses_scan_until_a_mutation_and_finalizer_always_reads_fresh():
     from app.artifact_delivery import OutputPresentation
+    from app.answer import Answer, ANSWER_TOOL
     from app.contracts import RunResult
     from agentscope.message import Msg
     p,c,b,w=setup();await capture_baseline(p,c,w)
     w.output_revision=0
     middleware=OutputPresentation(p,w)
     messages=[Msg(name="system",role="system",content=[TextBlock(text="stable")])]
-    async def receive(**kwargs): return kwargs["messages"]
-    await middleware.on_model_call(None,{"messages":messages},receive)
+    tools=[{'type':'function','function':{'name':ANSWER_TOOL,'parameters':Answer.model_json_schema()}}]
+    async def receive(**kwargs): return kwargs
+    await middleware.on_model_call(None,{"messages":messages,"tools":tools},receive)
     scans=len(b.commands)
-    await middleware.on_model_call(None,{"messages":messages},receive)
+    await middleware.on_model_call(None,{"messages":messages,"tools":tools},receive)
     assert len(b.commands)==scans
     b.files["/workspace/outputs/created.txt"]=b"new"
     w.output_revision+=1
-    projected=await middleware.on_model_call(None,{"messages":messages},receive)
-    assert projected[0]==messages[0] and projected[1].name=="output_presentation"
+    projected=await middleware.on_model_call(None,{"messages":messages,"tools":tools},receive)
+    assert projected['messages'] is messages and 'created.txt' in str(projected['tools'])
     b.files["/workspace/outputs/late.txt"]=b"late writer"
     await start_finalization(p,c,result=RunResult(run_id=p.run_id,answer="完成"))
     result=await finalize(p,c,w)

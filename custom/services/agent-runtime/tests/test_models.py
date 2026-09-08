@@ -16,9 +16,10 @@ async def test_native_openai_client_streams_through_injected_http_transport():
         calls.append(json.loads(req.content))
         chunks = [
             {"id":"completion-1", "object":"chat.completion.chunk", "created":1,"model":"fixture",
-             "choices":[{"index":0,"delta":{"role":"assistant","content":"Verified"},"finish_reason":None}]},
+             "choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"final","type":"function","function":{
+                 "name":"GenerateStructuredOutput","arguments":json.dumps({"answer":"Verified"})}}]},"finish_reason":None}]},
             {"id":"completion-1", "object":"chat.completion.chunk", "created":1,"model":"fixture",
-             "choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+             "choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
              "usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}},
         ]
         return httpx.Response(200,headers={"content-type":"text/event-stream"},
@@ -30,6 +31,9 @@ async def test_native_openai_client_streams_through_injected_http_transport():
     assert result.answer == "Verified"
     assert len(calls) == 1
     assert calls[0]["messages"][-1]["role"] == "user"
+    final_tool = next(t["function"] for t in calls[0]["tools"] if t["function"]["name"] == "GenerateStructuredOutput")
+    assert "Call immediately" in final_tool["description"]
+    assert final_tool["parameters"]["required"] == ["answer"]
 
 
 @pytest.mark.asyncio
@@ -39,21 +43,20 @@ async def test_other_native_provider_streams_complete_in_same_harness(protocol):
     if protocol == "anthropic":
         packets = [
             {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"fixture","content":[],"stop_reason":None,"stop_sequence":None,"usage":{"input_tokens":10,"output_tokens":0}}},
-            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},
-            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Verified"}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"final","name":"GenerateStructuredOutput","input":{}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json.dumps({"answer":"Verified"})}},
             {"type":"content_block_stop","index":0},
-            {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":None},"usage":{"output_tokens":2}},
+            {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":None},"usage":{"output_tokens":2}},
             {"type":"message_stop"},
         ]
     else:
-        message={"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Verified","annotations":[]}]}
+        message={"id":"fc_1","type":"function_call","call_id":"final","name":"GenerateStructuredOutput","status":"completed","arguments":json.dumps({"answer":"Verified"})}
         response={"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"fixture","output":[message],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}
         packets=[
             {"type":"response.created","sequence_number":0,"response":{**response,"status":"in_progress","output":[]}},
-            {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{**message,"status":"in_progress","content":[]}},
-            {"type":"response.content_part.added","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}},
-            {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Verified"},
-            {"type":"response.output_text.done","sequence_number":4,"item_id":"msg_1","output_index":0,"content_index":0,"text":"Verified"},
+            {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{**message,"status":"in_progress","arguments":""}},
+            {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_1","output_index":0,"delta":message['arguments']},
+            {"type":"response.function_call_arguments.done","sequence_number":4,"item_id":"fc_1","output_index":0,"arguments":message['arguments']},
             {"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":message},
             {"type":"response.completed","sequence_number":6,"response":response},
         ]

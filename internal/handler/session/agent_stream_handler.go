@@ -754,6 +754,9 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 			}
 		}
 		h.assistantMessage.RetrievalStats = derivedStats
+		if citationStatus, ok := data.Extra["citation_status"].(string); ok {
+			h.assistantMessage.RetrievalStats.CitationStatus = citationStatus
+		}
 
 		availableRefs := h.knowledgeRefs
 		if data.KnowledgeRefsAuthoritative {

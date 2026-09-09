@@ -22,7 +22,7 @@ def system_prompt(payload: RunRequest) -> str:
         "\n\n[ANSWER_DELIVERY]\n"
         "每次决策只选择一种操作：尚有必要工作时调用业务工具；已可回答或需要说明能力边界时，"
         "立即调用 GenerateStructuredOutput 提交完整答复并结束本轮。answer 字段是用户收到的全部正文，"
-        "保留必要限制。引用单独填写 citations，每项包含从 answer 原样复制的 text 和本轮 source_ids；answer 不嵌入引用标签。其他文本属于内部过程。\n[/ANSWER_DELIVERY]")
+        "保留必要限制。只生成完整正文，不填写引用列表或嵌入引用标签；独立的引用阶段随后处理来源定位。其他文本属于内部过程。\n[/ANSWER_DELIVERY]")
     if payload.enable_artifacts and payload.runtime_config.agent_type != "knowledge-qa":
         prompt += ("\n\n[FILE_SOURCE_DATA]\n"
                    "Large business-tool results are delivered as complete JSON files in /workspace/source-data/ "
@@ -55,6 +55,11 @@ def system_prompt(payload: RunRequest) -> str:
         "Runtime navigation metadata, not conversation text or an answer format. "
         "Use source_id only as tool input. Never reproduce this catalog, its JSON, or its internal IDs in an answer. "
         "Catalog entries locate earlier original evidence; they are not evidence themselves. "
+        "Earlier assistant answers are not verified evidence either. Before reusing source-based factual claims from an earlier answer, "
+        "including a repeated question or follow-up, call read_conversation with section=evidence and the corresponding assistant source_id "
+        "(or a relevant query) to restore authorized original evidence in this run. Reuse evidence already restored in this run; do not read it twice. "
+        "A fresh search returning no results does not validate an earlier answer. If source evidence cannot be restored, state that limitation "
+        "instead of presenting earlier prose as a sourced fact. Pure text transformations and general conversation do not require retrieval. "
         "An outcome=failed turn has no answer to summarize or treat as a factual conclusion. "
         + failure_guidance + "Use current validated source handles for citations.\n" +
         json.dumps(records, ensure_ascii=False) + "\n[/INTERNAL_CONVERSATION_NAVIGATION]") + scope

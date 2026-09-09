@@ -297,12 +297,13 @@ type Message struct {
 // inspected; structured analysis counts database/table sources separately so
 // clients do not mislabel them as documents.
 type RetrievalStats struct {
-	Attempted   bool `json:"attempted"`
-	Documents   int  `json:"documents"`
-	Wiki        int  `json:"wiki"`
-	Web         int  `json:"web"`
-	DataSources int  `json:"data_sources"`
-	Total       int  `json:"total"`
+	CitationStatus string `json:"citation_status,omitempty"`
+	Attempted      bool   `json:"attempted"`
+	Documents      int    `json:"documents"`
+	Wiki           int    `json:"wiki"`
+	Web            int    `json:"web"`
+	DataSources    int    `json:"data_sources"`
+	Total          int    `json:"total"`
 	// Unit tells every client which noun to use even when Total is zero.
 	// The JSONB schema stays extensible and does not couple presentation to a
 	// particular built-in agent ID.

@@ -3,6 +3,7 @@ package sourcerefs
 import (
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -12,6 +13,21 @@ import (
 type StructuredCitation struct {
 	Text      string   `json:"text"`
 	SourceIDs []string `json:"source_ids"`
+	End       int      `json:"end,omitempty"`
+}
+
+// Only validated evidence from this run, never credentials or source metadata.
+func StructuredEvidence(refs []*types.SearchResult) []map[string]string {
+	items := []map[string]string{}
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		if !usableStructuredSource(ref) || seen[CitationID(ref)] {
+			continue
+		}
+		seen[CitationID(ref)] = true
+		items = append(items, map[string]string{"id": CitationID(ref), "title": sourceTitle(ref), "text": ref.EvidenceContent})
+	}
+	return items
 }
 
 // StructuredCatalog is the complete usable registry for this run. Evidence stays
@@ -60,20 +76,29 @@ func RenderStructuredCitations(answer string, raw json.RawMessage, refs []*types
 		var item struct {
 			Text string            `json:"text"`
 			IDs  []json.RawMessage `json:"source_ids"`
+			End  int               `json:"end"`
 		}
 		if json.Unmarshal(entry, &item) != nil || strings.TrimSpace(item.Text) == "" || !strings.Contains(answer, item.Text) {
 			continue
 		}
+		end := strings.Index(answer, item.Text) + len(item.Text)
+		if item.End != 0 {
+			if item.End < len(item.Text) || item.End > len(answer) || answer[item.End-len(item.Text):item.End] != item.Text {
+				continue
+			}
+			end = item.End
+		}
+		key := strconv.Itoa(end)
 		for _, value := range item.IDs {
 			var id string
 			if json.Unmarshal(value, &id) != nil || byID[id] == nil {
 				continue
 			}
-			index, exists := byText[item.Text]
+			index, exists := byText[key]
 			if !exists {
 				index = len(filtered)
-				byText[item.Text] = index
-				filtered = append(filtered, StructuredCitation{Text: item.Text, SourceIDs: []string{}})
+				byText[key] = index
+				filtered = append(filtered, StructuredCitation{Text: item.Text, SourceIDs: []string{}, End: item.End})
 			}
 			duplicate := false
 			for _, previous := range filtered[index].SourceIDs {
@@ -93,7 +118,11 @@ func RenderStructuredCitations(answer string, raw json.RawMessage, refs []*types
 	}
 	positions := make([]insertion, 0, len(filtered))
 	for _, item := range filtered {
-		positions = append(positions, insertion{strings.Index(answer, item.Text) + len(item.Text), item})
+		end := item.End
+		if end == 0 {
+			end = strings.Index(answer, item.Text) + len(item.Text)
+		}
+		positions = append(positions, insertion{end, item})
 	}
 	sort.SliceStable(positions, func(i, j int) bool { return positions[i].end < positions[j].end })
 	used := make([]*types.SearchResult, 0)
@@ -118,11 +147,9 @@ func RenderStructuredCitations(answer string, raw json.RawMessage, refs []*types
 }
 
 const StructuredOutputContract = `[STRUCTURED_ANSWER_CITATIONS]
-最终只调用 GenerateStructuredOutput，按以下 JSON 模板提交，不要另加 Markdown 代码围栏：
-{"answer":"企业发展部收到立项申请后组织初审。初审未通过的，应说明理由。","citations":[{"text":"企业发展部收到立项申请后组织初审。","source_ids":["S1"]},{"text":"初审未通过的，应说明理由。","source_ids":["S2","S3"]}]}
-构建步骤：先在 answer 中写完整、连贯、符合用户要求的 Markdown 正文；然后从 answer 原样复制需要引用的连续文字到 citations[].text，保留标点、空格、换行及 Markdown 格式。text 是回答正文锚点，不是来源原文。source_ids 填支持该段的本轮来源 id。
-本轮后端完整可用来源列表位于每次决策的 runtime_budget 系统消息 [CURRENT_RUN_SOURCES] JSON 内，其 run_id 标识本轮。只能使用此列表的 id；chunk_id、知识条目 UUID、历史轮次 ID 均不是 source_ids。列表只有来源索引，证据原文请看相应业务工具结果或读取提供的来源文件。不得仅凭标题推断内容。工具结果中的 cite_exactly 或 citation_handle 只用于识别 S 编号，不要复制标签到 answer。
-正文不要嵌入引用标签或自行编排引用数字。对资料支持的结论填写 citations；无依据的文字不配引用。无需用完全部来源，无引用时 citations 为 []。同一 text 只写一项并合并 source_ids；text 在正文出现多次时，引用只插在第一次出现的位置之后。优先选择完整句子或段落，避免代码块、行内代码和链接地址内部。后端只按精确锚点和本轮来源数据过滤，再插入引用；前端对实际使用的来源连续编号。不要复制历史无引用回答的格式。此 JSON 在本次最终回答调用中一次生成，不增加检查或修复模型调用。
+最终调用 GenerateStructuredOutput，仅提交 {"answer":"完整连贯的 Markdown 正文"}。
+依据实际读取的证据回答，保留适用条件与必要限制，不凭来源标题推断内容。正文不嵌入引用标签、来源编号或引用列表。
+系统随后用独立模型调用为固定正文补充引用；该阶段不改写正文，也不代替本阶段检索和核实证据。[CURRENT_RUN_SOURCES] 和工具返回的来源标识仅用于辨别证据，不复制到正文。
 [/STRUCTURED_ANSWER_CITATIONS]`
 
 func EnsureStructuredContract(prompt string) string {

@@ -20,6 +20,7 @@ import (
 )
 
 type controlRequest struct {
+	IncludeEvidence      bool            `json:"include_evidence"`
 	OutputBaseline       json.RawMessage `json:"output_baseline"`
 	Finalization         bool            `json:"finalization"`
 	ModelRole            string          `json:"model_role"`
@@ -66,6 +67,9 @@ func (h *Handler) RunControl(c *gin.Context) {
 				return err
 			}
 			budget, err = modelBudget(tx, row, req.ModelRole)
+			if err == nil && req.IncludeEvidence {
+				budget.CitationEvidence = sourcerefs.StructuredEvidence(row.References)
+			}
 			return err
 		})
 		if err != nil {
@@ -264,6 +268,14 @@ func commitResult(tx *gorm.DB, row *RunRecord, result *ChatResult) error {
 
 func storeResult(tx *gorm.DB, row *RunRecord, result *ChatResult, status string) error {
 	answer, refsUsed, citations := sourcerefs.RenderStructuredCitations(result.Answer, result.Citations, row.References)
+	if result.CitationStatus == "complete" {
+		var submitted []sourcerefs.StructuredCitation
+		if json.Unmarshal(result.Citations, &submitted) != nil || len(submitted) != len(citations) {
+			// Fail closed on an internal mapping mismatch, never silently lose citations.
+			result.CitationStatus, result.FailureCode, status = "failed", "citation_generation_failed", "incomplete"
+			answer, refsUsed, citations = result.Answer, nil, nil
+		}
+	}
 	result.Answer, result.References = answer, refsUsed
 	result.Citations, _ = json.Marshal(citations)
 	result.Status = status
@@ -284,6 +296,7 @@ func storeResult(tx *gorm.DB, row *RunRecord, result *ChatResult, status string)
 		return err
 	}
 	stats := sourcerefs.RetrievalStatsForAgentSteps(sourcerefs.RetrievalStatsFromReferences(row.References, sourcerefs.AgentStepsAttemptedRetrieval(steps)), steps)
+	stats.CitationStatus = result.CitationStatus
 	update := tx.Model(&types.Message{}).Where("id = ? AND session_id = ? AND role = 'assistant'", row.MessageID, row.SessionID).Updates(map[string]any{
 		"error_code": "", "content": result.Answer, "knowledge_references": string(refs), "agent_steps": string(stepsJSON), "is_completed": true, "agent_duration_ms": time.Since(row.CreatedAt).Milliseconds(), "updated_at": time.Now(),
 		"retrieval_stats": stats, "agent_tool_count": sourcerefs.AgentToolCallCount(steps),
@@ -488,7 +501,7 @@ func (s *Service) replayRun(ctx context.Context, initial *RunRecord, bus *event.
 					return err
 				}
 				bus.Emit(ctx, event.Event{ID: initial.MessageID, Type: event.EventAgentFinalAnswer, SessionID: initial.SessionID, Data: event.AgentFinalAnswerData{Content: result.Answer, Replace: true, Revision: revision + 1, Done: true}})
-				bus.Emit(ctx, event.Event{Type: event.EventAgentComplete, SessionID: initial.SessionID, Data: event.AgentCompleteData{SessionID: initial.SessionID, MessageID: initial.MessageID, FinalAnswer: result.Answer, KnowledgeRefs: result.References, KnowledgeRefsAuthoritative: true, AgentSteps: steps, TotalSteps: len(steps), TotalDurationMs: time.Since(initial.CreatedAt).Milliseconds(), Extra: map[string]interface{}{"status": result.Status, "failure_code": result.FailureCode, "artifacts": result.Artifacts, "artifact_notice": result.ArtifactNotice}}})
+				bus.Emit(ctx, event.Event{Type: event.EventAgentComplete, SessionID: initial.SessionID, Data: event.AgentCompleteData{SessionID: initial.SessionID, MessageID: initial.MessageID, FinalAnswer: result.Answer, KnowledgeRefs: result.References, KnowledgeRefsAuthoritative: true, AgentSteps: steps, TotalSteps: len(steps), TotalDurationMs: time.Since(initial.CreatedAt).Milliseconds(), Extra: map[string]interface{}{"status": result.Status, "failure_code": result.FailureCode, "citation_status": result.CitationStatus, "artifacts": result.Artifacts, "artifact_notice": result.ArtifactNotice}}})
 				return nil
 			}
 		}

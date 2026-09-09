@@ -243,6 +243,7 @@ class Artifact(BaseModel):
 
 
 class RunResult(BaseModel):
+    citation_status: str = ""
     status: Literal["completed", "incomplete"] = "completed"
     failure_code: str = ""
     references: list[dict[str, Any]] = Field(default_factory=list)

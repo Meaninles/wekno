@@ -102,21 +102,20 @@ async def test_resume_keeps_iteration_budget_and_reply_identity():
     [{'text': '正文。', 'source_ids': ['S1', 17, 'S999']}],
     [{'text': '正文。', 'source_ids': ['S1']}, {'text': '正文。', 'source_ids': ['S2']}],
 ])
-async def test_citation_candidates_reach_backend_without_model_repair(citations):
+async def test_first_pass_rejects_citation_fields_without_model_repair(citations):
     payload = request()
     control = MemoryControl(payload)
     raw = {'answer': '正文。', 'citations': citations}
     model = ScriptedModel([[ToolCallBlock(id='final', name=ANSWER_TOOL,
         input=json.dumps(raw, ensure_ascii=False))]])
-    result = await execute(payload, control, model)
-    assert result.answer == raw['answer']
-    assert control.committed['citations'] == citations
+    with pytest.raises(DeliveryError):
+        await execute(payload, control, model)
+    assert control.committed is None
     assert len(model.requests) == 1
     assert not any(e['type'] == 'answer_delta' for e in control.emitted)
     schema = next(t['function']['parameters'] for t in model.options[0]['tools']
                   if t['function']['name'] == ANSWER_TOOL)
-    assert schema['properties']['citations']['type'] == 'array'
-    assert schema['properties']['citations']['items']['required'] == ['text', 'source_ids']
+    assert set(schema['properties']) == {'answer'}
 
 
 @pytest.mark.asyncio
@@ -129,9 +128,14 @@ async def test_complete_current_run_catalog_refreshes_without_extra_decision():
         return {**await original(role), 'run_id': payload.run_id,
                 'current_run_sources': catalog if control.calls else []}
     control.budget = budget
-    model = ScriptedModel([[ToolCallBlock(id='read', name='lookup', input='{}')], [submit('done')]])
+    async def evidence(path, **kwargs):
+        assert path == 'runs/budget' and kwargs == {'include_evidence': True}
+        return {'citation_evidence': [{'id': 'S1', 'title': 'Source', 'text': 'done'}]}
+    control.post = evidence
+    model = ScriptedModel([[ToolCallBlock(id='read', name='lookup', input='{}')], [submit('done')],
+        [ToolCallBlock(id='citations', name='SubmitCitations', input='{"citations": []}')]])
     await execute(payload, control, model)
-    assert len(model.requests) == 2
+    assert len(model.requests) == 3
     assert 'S300' not in str(model.requests[0])
     assert 'S300' in str(model.requests[1]) and 'chunk-300' in str(model.requests[1])
     assert str(model.requests[1]).count('[CURRENT_RUN_SOURCES]') == 1

@@ -7,7 +7,7 @@
     </button>
     <div v-else class="source-reference-trigger is-empty" role="status">
       <t-icon class="source-reference-trigger__icon" name="file-search" />
-      <span class="source-reference-trigger__text">{{ t('chat.noCitedReferences') }}</span>
+      <span class="source-reference-trigger__text">{{ session?.retrieval_stats?.citation_status === 'failed' ? '引用补充失败，正文已保留' : t('chat.noCitedReferences') }}</span>
     </div>
 
     <Teleport to="body">
@@ -109,6 +109,7 @@ import {
 import { isSimpleCompletedConversation } from '@/custom/modules/sourcerefs/retrievalSummary'
 
 type SessionWithReferences = {
+  retrieval_stats?: { citation_status?: string }
   content?: string
   is_completed?: boolean
   agentEventStream?: Array<Record<string, unknown>>

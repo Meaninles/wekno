@@ -16,9 +16,10 @@ from .answer import Answer, DeliveryError
 
 
 class Delivery(MiddlewareBase):
-    def __init__(self, control: Control, lifecycle: Lifecycle):
+    def __init__(self, control: Control, lifecycle: Lifecycle, model):
         self.control = control
         self.lifecycle = lifecycle
+        self.model = model
         self.started = time.monotonic()
         self.result: RunResult | None = None
         self.events = None
@@ -43,7 +44,12 @@ class Delivery(MiddlewareBase):
                 answer = Answer.model_validate(structured)
             except ValueError as exc:
                 raise DeliveryError("Invalid final answer structure or empty response") from exc
-            result = RunResult(run_id=self.control.payload.run_id, answer=answer.answer, citations=answer.citations,
+            from .citations import supplement
+            citation_pass = await supplement(agent, self.control, self.model, self.lifecycle, answer.answer)
+            result = RunResult(run_id=self.control.payload.run_id, answer=answer.answer, citations=citation_pass["citations"],
+                               citation_status=citation_pass["status"],
+                               status="incomplete" if citation_pass["status"] == "failed" else "completed",
+                               failure_code="citation_generation_failed" if citation_pass["status"] == "failed" else "",
                                timings={"runtime_ms": (time.monotonic() - self.started) * 1000})
             await self.lifecycle.save(agent, "before_commit")
             self.result = result

@@ -11,6 +11,14 @@ import {
   usesDataSourceRetrievalUnit,
 } from "./retrievalSummary.ts";
 
+test("citation failures remain visible without changing the original body", () => {
+  const message = { content: "原样正文", is_completed: true,
+    retrieval_stats: { citation_status: "failed", simple_conversation: true } };
+  assert.equal(retrievalStatsFromMessage(message)?.citationFailed, true);
+  assert.equal(isSimpleCompletedConversation(message), false);
+  assert.equal(message.content, "原样正文");
+});
+
 test("retrieval stats are read from the backend authority without reference inference", () => {
   const stats = retrievalStatsFromMessage({
     retrieval_stats: {

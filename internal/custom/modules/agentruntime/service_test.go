@@ -123,7 +123,7 @@ func TestArtifactReturnPolicyAdmitsAtRegistrationWithoutCountTruncation(t *testi
 func TestRuntimePromptUsesSharedCitationProtocolOnce(t *testing.T) {
 	for _, body := range []string{"Use the available tools.", sourcerefs.EnsureGenerationContract("Custom instructions.")} {
 		prompt := renderSystemPrompt(context.Background(), body, false)
-		if strings.Count(prompt, "[STRUCTURED_ANSWER_CITATIONS]") != 1 || !strings.Contains(prompt, `"source_ids"`) || strings.Contains(prompt, "[WEKNORA_CITATION_OUTPUT]") {
+		if strings.Count(prompt, "[STRUCTURED_ANSWER_CITATIONS]") != 1 || !strings.Contains(prompt, `{"answer":`) || strings.Contains(prompt, `"source_ids"`) || strings.Contains(prompt, "[WEKNORA_CITATION_OUTPUT]") {
 			t.Fatalf("runtime did not receive the common source protocol exactly once: %s", prompt)
 		}
 	}

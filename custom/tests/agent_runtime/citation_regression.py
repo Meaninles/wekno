@@ -1,4 +1,4 @@
-"""One authorized live citation probe; does not add a review/repair model call."""
+"""Visible local regression for immutable answer plus evidence-only citation pass."""
 import argparse
 import json
 import re
@@ -21,7 +21,7 @@ def main():
               else DevClient().qa(args.name, args.query, agent=args.agent,
                   session=args.session, model=args.model, kb=[args.kb]))
     run_id = report['run']['id']
-    row = sql("SELECT row_to_json(t) FROM (SELECT \"references\", checkpoint->'agent'->'context' AS context, "
+    row = sql("SELECT row_to_json(t) FROM (SELECT \"references\", checkpoint->'agent'->'context' AS context, checkpoint->'agent'->'middle_context'->'citation_pass' AS citation_pass, "
               "payload->'runtime_config'->>'agent_type' AS agent_type FROM custom_agent_runs WHERE id='"+run_id+"')t;")[0]
     calls = [block for message in row['context'] for block in message.get('content', [])
              if block.get('type') == 'tool_call' and block.get('name') == 'GenerateStructuredOutput']
@@ -34,9 +34,11 @@ def main():
     final_refs = {ref.get('metadata', {}).get('citation_id') for ref in result.get('references') or []}
     check = {
         'one_final_submission': len(calls) == 1,
-        'model_generated_citations': bool(raw.get('citations')),
+        'body_only_first_pass': set(raw) == {'answer'},
+        'second_pass_complete': (row.get('citation_pass') or {}).get('status') == 'complete' and result.get('citation_status') == 'complete',
         'retained_citations': bool(citations),
         'all_anchors_exact': all(item['text'] in raw.get('answer', '') for item in citations),
+        'all_offsets_exact': all(raw.get('answer', '').encode()[item['end']-len(item['text'].encode()):item['end']].decode() == item['text'] for item in citations),
         'all_ids_current_and_data_present': all(identity in registry and registry[identity].get('evidence_content')
              for item in citations for identity in item['source_ids']),
         'only_cited_refs_persisted': final_refs == set(unique),

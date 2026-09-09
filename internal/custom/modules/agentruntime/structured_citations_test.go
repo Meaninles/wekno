@@ -47,6 +47,13 @@ func TestPostgresStructuredCitationCommitAndLostAcknowledgement(t *testing.T) {
 	require.NoError(t, json.Unmarshal(budget.Body.Bytes(), &b))
 	require.Equal(t, "run-1", b.RunID)
 	require.Len(t, b.CurrentRunSources, 2)
+	require.Empty(t, b.CitationEvidence)
+	evidence := call("budget", `{"run_id":"run-1","owner_epoch":2,"include_evidence":true}`)
+	require.Equal(t, 200, evidence.Code, evidence.Body.String())
+	require.NoError(t, json.Unmarshal(evidence.Body.Bytes(), &b))
+	require.Len(t, b.CitationEvidence, 2)
+	require.Equal(t, "source A", b.CitationEvidence[0]["text"])
+	require.Equal(t, 409, call("budget", `{"run_id":"run-1","owner_epoch":1,"include_evidence":true}`).Code)
 	committed := call("commit", body)
 	require.Equal(t, 200, committed.Code, committed.Body.String())
 	// The exact original request can be retried after a lost response.
@@ -64,4 +71,30 @@ func TestPostgresStructuredCitationCommitAndLostAcknowledgement(t *testing.T) {
 	require.NoError(t, db.Model(&RunOutbox{}).Count(&count).Error)
 	require.EqualValues(t, 1, count)
 	require.Equal(t, 409, call("commit", strings.Replace(body, "正文。正文。", "different", 1)).Code)
+}
+
+func TestPostgresCitationFailurePreservesBodyAndMessageStatus(t *testing.T) {
+	for _, mode := range []string{"failed", "invalid_offset"} {
+		t.Run(mode, func(t *testing.T) {
+			db := testsupport.Postgres(t, &RunRecord{}, &RunOutbox{}, &ToolReceipt{}, &Artifact{}, &ModelRequest{})
+			require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text,
+ content text, error_code varchar(40), knowledge_references jsonb, agent_steps jsonb, is_completed boolean,
+ agent_duration_ms bigint, retrieval_stats jsonb, agent_tool_count integer, updated_at timestamptz, deleted_at timestamptz)`).Error)
+			row := fixtureRun(t, db)
+			require.NoError(t, db.Exec(`INSERT INTO messages(id,session_id,role,is_completed) VALUES ('message-1','session-1','assistant',false)`).Error)
+			result := &ChatResult{RunID: row.ID, Answer: "**保留正文😀。**", Status: "incomplete", CitationStatus: "failed", FailureCode: "citation_generation_failed", Citations: json.RawMessage(`[]`)}
+			if mode == "invalid_offset" {
+				result.Status, result.CitationStatus = "completed", "complete"
+				result.Citations = json.RawMessage(`[{"text":"**保留正文😀。**","end":1,"source_ids":["S1"]}]`)
+			}
+			require.NoError(t, commitResult(db, row, result))
+			var message types.Message
+			require.NoError(t, db.First(&message, "id = ?", "message-1").Error)
+			require.Equal(t, "**保留正文😀。**", message.Content)
+			require.Equal(t, "failed", message.RetrievalStats.CitationStatus)
+			require.True(t, message.IsCompleted)
+			require.Equal(t, "incomplete", result.Status)
+			require.Empty(t, result.References)
+		})
+	}
 }

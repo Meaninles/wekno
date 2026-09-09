@@ -7,7 +7,8 @@ import { buildCitedSourceReferenceItems } from '../../../frontend/src/utils/sour
 
 const root = resolve('.local-data/agent-runtime-validation')
 const results = []
-for (const file of readdirSync(root).filter(name => /^citation-json-(qa|general)-.*\.json$/.test(name))) {
+const selected = process.argv.slice(2)
+for (const file of selected.length ? selected.map(name => name.endsWith('.json') ? name : name + '.json') : readdirSync(root).filter(name => /^citation-json-(qa|general)-.*\.json$/.test(name))) {
   const report = JSON.parse(readFileSync(resolve(root, file), 'utf8'))
   const result = report.run.result
   const items = buildCitedSourceReferenceItems(result.references, result.answer)
@@ -23,6 +24,7 @@ for (const file of readdirSync(root).filter(name => /^citation-json-(qa|general)
     assert.ok(markers.some(([, id, number]) => id === item.citationId && Number(number) === item.number), file)
   }
   assert.equal(markers.length, [...result.answer.matchAll(/<src id="S\d+" \/>/g)].length, file)
+  if (/^\|.*\|$/m.test(result.answer)) assert.match(html, /<table\b/, file)
   const actual = {name: report.name, run_id: report.run.id, markers: markers.length,
     sources: items.map(item => ({id: item.citationId, number: item.number, title: item.title})), passed: true}
   results.push(actual)

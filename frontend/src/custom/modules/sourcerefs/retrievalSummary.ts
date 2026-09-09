@@ -7,6 +7,7 @@ export type RetrievalStats = {
   total: number;
   unit: "documents" | "data_sources";
   simpleConversation: boolean;
+  citationFailed?: boolean;
 };
 
 const EVIDENCE_RETRIEVAL_TOOLS = [
@@ -41,6 +42,7 @@ export function retrievalStatsFromMessage(
     total: Number(raw.total) || 0,
     unit: raw.unit === "data_sources" ? "data_sources" : "documents",
     simpleConversation: raw.simple_conversation === true,
+    ...(raw.citation_status === "failed" ? { citationFailed: true } : {}),
   };
 }
 
@@ -102,6 +104,7 @@ export function isSimpleCompletedConversation(
   // non-retrieval tools. Keep its authoritative zero-state telemetry visible.
   if (message?.agent_mode === true) return false;
   const stats = retrievalStatsFromMessage(message);
+  if (stats?.citationFailed) return false;
   if (stats?.simpleConversation === true) {
     if (agentToolCountFromMessage(message) > 0) return false;
     return (

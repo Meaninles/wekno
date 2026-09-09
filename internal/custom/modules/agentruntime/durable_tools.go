@@ -208,7 +208,7 @@ func (s *Service) callTool(ctx context.Context, req ToolCallRequest) (*ToolCallR
 		current.References = sources.SnapshotReferences()
 		response = &ToolCallResponse{Success: result.Success, Output: result.Output, Error: result.Error, Data: result.Data, Images: result.Images, SourceReferences: citations}
 		if len(current.References) > 0 {
-			response.CitationOutputContract = "Use current source IDs in GenerateStructuredOutput.citations; copy exact answer text into text. Do not embed cite_exactly tags in answer. The authoritative complete current-run list is in [CURRENT_RUN_SOURCES]."
+			response.CitationOutputContract = "Use this evidence to answer accurately. Submit only the complete answer; a separate citation pass maps its unchanged text to current-run sources. Do not embed source tags in answer."
 		}
 		encoded, e := json.Marshal(response)
 		if e != nil {

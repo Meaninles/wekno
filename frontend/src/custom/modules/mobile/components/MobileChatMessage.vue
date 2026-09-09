@@ -1163,7 +1163,7 @@ const replyFailure = computed(() => messageFailure(props.message));
         </button>
         <div v-else-if="message.is_completed && !simpleConversation" class="mobile-reference-summary is-empty" role="status">
           <MobileIcon name="file" />
-          <span>未引用参考资料</span>
+          <span>{{ retrievalStats?.citationFailed ? '引用补充失败，正文已保留' : '未引用参考资料' }}</span>
         </div>
         <div v-if="completedAgentSummary" class="mobile-run-summary">{{ completedAgentSummary }}</div>
         <div v-if="shouldShowThinking" class="thinking-card">

@@ -30,7 +30,7 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
     """Run once through the SDK; recovery enters here with the same durable state."""
     lifecycle = Lifecycle(control)
     lifecycle.workspace = offloader if hasattr(offloader, "prepare_tool") else None
-    delivery = Delivery(control, lifecycle)
+    delivery = Delivery(control, lifecycle, model)
     events = Events(control)
     lifecycle.events = events
     delivery.events = events

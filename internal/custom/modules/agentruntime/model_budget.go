@@ -37,6 +37,7 @@ var errModelBudget = errors.New("run model request budget exhausted")
 var errFinalizationRequired = errors.New("final answer budget is reserved")
 
 type BudgetState struct {
+	CitationEvidence  []map[string]string `json:"citation_evidence,omitempty"`
 	RunID             string              `json:"run_id"`
 	CurrentRunSources []map[string]string `json:"current_run_sources"`
 	MaxTokens         int64               `json:"max_tokens"`

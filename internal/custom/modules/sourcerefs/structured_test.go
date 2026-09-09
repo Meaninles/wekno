@@ -8,6 +8,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStructuredExplicitOffsetsPreserveRepeatedUnicodeMarkdown(t *testing.T) {
+	text := "**中文😀。**"
+	body := text + "\n\n" + text
+	raw, err := json.Marshal([]StructuredCitation{{Text: text, End: len(text), SourceIDs: []string{"S1"}}, {Text: text, End: len(body), SourceIDs: []string{"S2"}}})
+	require.NoError(t, err)
+	answer, used, citations := RenderStructuredCitations(body, raw, structuredTestRefs())
+	require.Equal(t, text+`<src id="S1" />`+"\n\n"+text+`<src id="S2" />`, answer)
+	require.Equal(t, body, citationLikeTagRE.ReplaceAllString(answer, ""))
+	require.Len(t, used, 2)
+	require.Len(t, citations, 2)
+	invalid, err := json.Marshal([]StructuredCitation{{Text: text, End: 1, SourceIDs: []string{"S1"}}})
+	require.NoError(t, err)
+	answer, used, citations = RenderStructuredCitations(body, invalid, structuredTestRefs())
+	require.Equal(t, body, answer)
+	require.Empty(t, used)
+	require.Empty(t, citations)
+}
+
+func TestStructuredEvidenceOnlyIncludesUsableRegisteredEvidence(t *testing.T) {
+	refs := structuredTestRefs()
+	refs[1].EvidenceContent = ""
+	refs[0].Content = "not evidence"
+	evidence := StructuredEvidence(append(refs, refs[0], nil))
+	require.Len(t, evidence, 2)
+	require.Equal(t, "原文 A", evidence[0]["text"])
+	require.Len(t, evidence[0], 3)
+}
+
 func structuredTestRefs() []*types.SearchResult {
 	refs := []*types.SearchResult{
 		{ID: "chunk-a", KnowledgeBaseID: "kb", KnowledgeID: "doc", ChunkType: "text", Content: "原文 A", EvidenceContent: "原文 A"},
@@ -26,7 +54,7 @@ func TestStructuredCitationsMergeAndFirstOccurrence(t *testing.T) {
 		{"text":"正文B。","source_ids":["S3"]}
 	]`), refs)
 	require.Equal(t, `正文A。<src id="S1" /><src id="S2" />正文B。<src id="S3" />正文A。`, answer)
-	require.Equal(t, []StructuredCitation{{"正文A。", []string{"S1", "S2"}}, {"正文B。", []string{"S3"}}}, filtered)
+	require.Equal(t, []StructuredCitation{{"正文A。", []string{"S1", "S2"}, 0}, {"正文B。", []string{"S3"}, 0}}, filtered)
 	require.Equal(t, refs, used)
 }
 
@@ -44,7 +72,7 @@ func TestStructuredCitationsFilterOnlyMissingData(t *testing.T) {
 	// Semantic support is deliberately not evaluated, only exact anchoring/data.
 	require.Equal(t, `任意结论。<src id="S3" />`, answer)
 	require.Equal(t, []*types.SearchResult{refs[2]}, used)
-	require.Equal(t, []StructuredCitation{{"任意结论。", []string{"S3"}}}, filtered)
+	require.Equal(t, []StructuredCitation{{"任意结论。", []string{"S3"}, 0}}, filtered)
 	for _, raw := range []string{"", "null", `{}`, `"bad"`, "[]"} {
 		got, used, items := RenderStructuredCitations("保留正文。", json.RawMessage(raw), refs)
 		require.Equal(t, "保留正文。", got)

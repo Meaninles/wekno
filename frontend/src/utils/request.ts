@@ -190,7 +190,11 @@ instance.interceptors.response.use(
     if ((error.response.status === 401 || error.response.status === 403) && isPublicAuthRequest(originalRequest?.url)) {
       const { status, data } = error.response;
       const msg = await extractErrorMessage(data);
-      return Promise.reject({ status, message: msg || t('error.invalidCredentials') });
+      return Promise.reject({
+        status,
+        message: msg || t('error.invalidCredentials'),
+        ...(typeof data === 'object' ? data : {}),
+      });
     }
 
     // Embed 调试页/挂件：无 JWT 时直接拒绝，勿走 refresh → /login

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -112,13 +113,12 @@ func (h *Handler) SetArtifactSharePassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
 }
 
-// ArtifactShare serves metadata for an anonymous artifact share. The token is
-// the only capability; conversation share endpoints continue to use Get and
-// remain authenticated.
+// ArtifactShare serves metadata for the public password-protected share flow.
+// Preview requests use ArtifactSharePreview so they can go through the normal
+// authenticated route boundary and enforce creator ownership.
 func (h *Handler) ArtifactShare(c *gin.Context) {
 	ctx := c.Request.Context()
 	token := strings.TrimSpace(c.Param("token"))
-	previewToken := strings.TrimSpace(c.Query("preview"))
 	accessToken := strings.TrimSpace(c.Query("access"))
 	if token == "" {
 		c.Error(apperrors.NewNotFoundError("artifact share not found"))
@@ -128,10 +128,38 @@ func (h *Handler) ArtifactShare(c *gin.Context) {
 		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
 		return
 	}
+	if strings.TrimSpace(c.Query("preview")) != "" {
+		c.Error(apperrors.NewUnauthorizedError("artifact preview requires login"))
+		return
+	}
 
-	result, err := h.service.GetArtifactShare(ctx, token, previewToken, accessToken)
+	result, err := h.service.GetArtifactShare(ctx, token, "", accessToken, c.ClientIP())
 	if err != nil {
 		h.writeArtifactShareError(c, err, "failed to load artifact share")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+// ArtifactSharePreview serves the creator-only preview metadata. It is
+// registered after the global auth middleware and additionally checks that the
+// authenticated web user owns the preview capability.
+func (h *Handler) ArtifactSharePreview(c *gin.Context) {
+	ctx := c.Request.Context()
+	token := strings.TrimSpace(c.Param("token"))
+	previewToken := strings.TrimSpace(c.Query("preview"))
+	if token == "" || previewToken == "" {
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+
+	result, err := h.service.GetArtifactShare(ctx, token, previewToken, "", "")
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to load artifact preview")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
@@ -153,7 +181,7 @@ func (h *Handler) ArtifactShareAccess(c *gin.Context) {
 		c.Error(apperrors.NewUnauthorizedError("share password is incorrect"))
 		return
 	}
-	result, err := h.service.VerifyArtifactSharePassword(ctx, token, req.Password)
+	result, err := h.service.VerifyArtifactSharePassword(ctx, token, req.Password, c.ClientIP())
 	if err != nil {
 		h.writeArtifactShareError(c, err, "failed to verify artifact share password")
 		return
@@ -161,16 +189,19 @@ func (h *Handler) ArtifactShareAccess(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
 }
 
-// ArtifactShareContent streams the HTML body for an anonymous share. It is
-// deliberately separate from Artifact, whose attachment response is used by
-// authenticated conversation sharing and must remain unchanged.
+// ArtifactShareContent streams the HTML body for the public password share.
+// Creator preview content uses ArtifactSharePreviewContent so it can require
+// the authenticated creator without changing the public password flow.
 func (h *Handler) ArtifactShareContent(c *gin.Context) {
 	ctx := c.Request.Context()
 	token := strings.TrimSpace(c.Param("token"))
-	previewToken := strings.TrimSpace(c.Query("preview"))
 	accessToken := strings.TrimSpace(c.Query("access"))
 	if token == "" {
 		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+		return
+	}
+	if strings.TrimSpace(c.Query("preview")) != "" {
+		c.Error(apperrors.NewUnauthorizedError("artifact preview requires login"))
 		return
 	}
 	if h == nil || h.service == nil {
@@ -178,13 +209,20 @@ func (h *Handler) ArtifactShareContent(c *gin.Context) {
 		return
 	}
 
-	file, err := h.service.GetArtifactShareContent(ctx, token, previewToken, accessToken)
+	file, err := h.service.GetArtifactShareContent(ctx, token, "", accessToken)
 	if err != nil {
 		h.writeArtifactShareError(c, err, "failed to load artifact share content")
 		return
 	}
 	defer file.Reader.Close()
+	h.writeArtifactShareContent(c, file)
+}
 
+func (h *Handler) writeArtifactShareContent(c *gin.Context, file *SharedArtifactFile) {
+	if file == nil || file.Reader == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share content unavailable"))
+		return
+	}
 	fileName := strings.TrimSpace(file.FileName)
 	if fileName == "" {
 		fileName = "artifact.html"
@@ -203,8 +241,33 @@ func (h *Handler) ArtifactShareContent(c *gin.Context) {
 	c.Header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
 	c.Status(http.StatusOK)
 	if _, err := io.Copy(c.Writer, file.Reader); err != nil {
-		logger.Warnf(ctx, "[chatshare] failed to write artifact share content: %v", err)
+		logger.Warnf(c.Request.Context(), "[chatshare] failed to write artifact share content: %v", err)
 	}
+}
+
+// ArtifactSharePreviewContent streams creator-only preview content. The
+// service repeats the ownership check so the content endpoint cannot be used
+// to bypass the metadata endpoint.
+func (h *Handler) ArtifactSharePreviewContent(c *gin.Context) {
+	ctx := c.Request.Context()
+	token := strings.TrimSpace(c.Param("token"))
+	previewToken := strings.TrimSpace(c.Query("preview"))
+	if token == "" || previewToken == "" {
+		c.Error(apperrors.NewNotFoundError("artifact share not found"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("artifact share service unavailable"))
+		return
+	}
+
+	file, err := h.service.GetArtifactShareContent(ctx, token, previewToken, "")
+	if err != nil {
+		h.writeArtifactShareError(c, err, "failed to load artifact preview content")
+		return
+	}
+	defer file.Reader.Close()
+	h.writeArtifactShareContent(c, file)
 }
 
 func (h *Handler) Get(c *gin.Context) {
@@ -317,15 +380,45 @@ func (h *Handler) writeServiceError(c *gin.Context, err error, fallback string) 
 }
 
 func (h *Handler) writeArtifactShareError(c *gin.Context, err error, fallback string) {
+	var attemptErr *ArtifactSharePasswordAttemptError
+	if stderrors.As(err, &attemptErr) {
+		details := gin.H{}
+		if attemptErr.Status != nil {
+			details["remaining_attempts"] = attemptErr.Status.Remaining
+			details["max_attempts"] = attemptErr.Status.MaxFailures
+			if attemptErr.Status.LockedUntil != nil {
+				details["locked_until"] = attemptErr.Status.LockedUntil.UTC().Format(time.RFC3339)
+				retryAfter := int(time.Until(*attemptErr.Status.LockedUntil).Seconds())
+				if retryAfter < 1 {
+					retryAfter = 1
+				}
+				details["retry_after_seconds"] = retryAfter
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+		}
+		if stderrors.Is(err, ErrArtifactSharePasswordLocked) {
+			c.Error(apperrors.NewTooManyRequestsError("share password attempts are temporarily locked").WithDetails(details))
+			return
+		}
+		c.Error(apperrors.NewUnauthorizedError("share password is incorrect").WithDetails(details))
+		return
+	}
+
 	switch {
 	case stderrors.Is(err, ErrWebLoginRequired):
 		c.Error(apperrors.NewUnauthorizedError("web login required"))
+	case stderrors.Is(err, ErrArtifactSharePreviewForbidden):
+		c.Error(apperrors.NewForbiddenError("artifact preview is only available to its creator"))
+	case stderrors.Is(err, ErrArtifactSharePreviewInvalid):
+		c.Error(apperrors.NewNotFoundError("artifact preview not found or expired"))
 	case stderrors.Is(err, ErrArtifactShareUnsupported):
 		c.Error(apperrors.NewBadRequestError("only HTML artifacts can be shared"))
 	case stderrors.Is(err, ErrArtifactSharePasswordRequired):
 		c.Error(apperrors.NewUnauthorizedError("share password is required"))
 	case stderrors.Is(err, ErrArtifactSharePasswordInvalid):
 		c.Error(apperrors.NewUnauthorizedError("share password is incorrect"))
+	case stderrors.Is(err, ErrArtifactSharePasswordLocked):
+		c.Error(apperrors.NewTooManyRequestsError("share password attempts are temporarily locked"))
 	case stderrors.Is(err, ErrArtifactSharePasswordTooShort):
 		c.Error(apperrors.NewBadRequestError("share password must be at least 6 characters"))
 	case stderrors.Is(err, ErrArtifactSharePasswordTooLong):

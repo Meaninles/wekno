@@ -171,6 +171,27 @@ func (s *Service) DecryptPasswords(ctx context.Context, challengeID, captchaAnsw
 }
 
 func (s *Service) CheckLocked(ctx context.Context, username string) (*time.Time, error) {
+	status, err := s.GetAttemptStatus(ctx, username)
+	if err != nil || status == nil {
+		return nil, err
+	}
+	return status.LockedUntil, nil
+}
+
+// MaxFailures returns the configured failure limit. Custom password-protected
+// capabilities use the same value as the login security policy.
+func (s *Service) MaxFailures() int {
+	if s == nil {
+		return 0
+	}
+	return s.cfg.MaxFailures
+}
+
+// GetAttemptStatus returns the current retry budget for a namespaced key.
+// Missing records are treated as a fresh budget. The key is intentionally
+// opaque to this package so callers can scope attempts to an account, share,
+// IP address, or another protected credential independently.
+func (s *Service) GetAttemptStatus(ctx context.Context, username string) (*AttemptStatus, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
@@ -178,18 +199,16 @@ func (s *Service) CheckLocked(ctx context.Context, username string) (*time.Time,
 	if key == "" {
 		return nil, nil
 	}
+
 	var attempt LoginAttempt
 	err := s.db.WithContext(ctx).First(&attempt, "username_key = ?", key).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
+		return &AttemptStatus{Remaining: s.cfg.MaxFailures, MaxFailures: s.cfg.MaxFailures}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if attempt.LockedUntil != nil && attempt.LockedUntil.After(time.Now().UTC()) {
-		return attempt.LockedUntil, nil
-	}
-	return nil, nil
+	return s.attemptStatus(attempt, time.Now().UTC()), nil
 }
 
 func (s *Service) RecordSuccess(ctx context.Context, username string) {
@@ -206,6 +225,17 @@ func (s *Service) RecordSuccess(ctx context.Context, username string) {
 }
 
 func (s *Service) RecordFailure(ctx context.Context, username, ip string) (*time.Time, error) {
+	status, err := s.RecordAttemptFailure(ctx, username, ip)
+	if status == nil {
+		return nil, err
+	}
+	return status.LockedUntil, err
+}
+
+// RecordAttemptFailure records one failed password attempt and returns the
+// updated retry budget. It mirrors the login lockout transaction, including
+// row locking on databases that support it.
+func (s *Service) RecordAttemptFailure(ctx context.Context, username, ip string) (*AttemptStatus, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
@@ -214,7 +244,7 @@ func (s *Service) RecordFailure(ctx context.Context, username, ip string) (*time
 		return nil, nil
 	}
 	now := time.Now().UTC()
-	var lockedUntil *time.Time
+	var status *AttemptStatus
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		locking := func(db *gorm.DB) *gorm.DB {
 			switch tx.Dialector.Name() {
@@ -232,7 +262,7 @@ func (s *Service) RecordFailure(ctx context.Context, username, ip string) (*time
 			return err
 		}
 		if attempt.LockedUntil != nil && attempt.LockedUntil.After(now) {
-			lockedUntil = attempt.LockedUntil
+			status = s.attemptStatus(attempt, now)
 			return nil
 		}
 		if attempt.LastFailedAt == nil || now.Sub(*attempt.LastFailedAt) > s.cfg.FailureWindow {
@@ -244,13 +274,37 @@ func (s *Service) RecordFailure(ctx context.Context, username, ip string) (*time
 		if attempt.FailedCount >= s.cfg.MaxFailures {
 			until := now.Add(s.cfg.LockDuration)
 			attempt.LockedUntil = &until
-			lockedUntil = &until
 		} else {
 			attempt.LockedUntil = nil
 		}
-		return tx.Save(&attempt).Error
+		if err := tx.Save(&attempt).Error; err != nil {
+			return err
+		}
+		status = s.attemptStatus(attempt, now)
+		return nil
 	})
-	return lockedUntil, err
+	return status, err
+}
+
+func (s *Service) attemptStatus(attempt LoginAttempt, now time.Time) *AttemptStatus {
+	failedCount := attempt.FailedCount
+	if attempt.LastFailedAt == nil || now.Sub(*attempt.LastFailedAt) > s.cfg.FailureWindow {
+		failedCount = 0
+	}
+	remaining := s.cfg.MaxFailures - failedCount
+	if remaining < 0 {
+		remaining = 0
+	}
+	lockedUntil := attempt.LockedUntil
+	if lockedUntil != nil && !lockedUntil.After(now) {
+		lockedUntil = nil
+	}
+	return &AttemptStatus{
+		FailedCount: failedCount,
+		Remaining:   remaining,
+		MaxFailures: s.cfg.MaxFailures,
+		LockedUntil: lockedUntil,
+	}
 }
 
 func (s *Service) storeChallenge(ctx context.Context, record challengeRecord) error {

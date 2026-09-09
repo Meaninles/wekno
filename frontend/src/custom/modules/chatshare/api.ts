@@ -1,4 +1,4 @@
-import { get, post } from "@/utils/request";
+import { get, getDown, post } from "@/utils/request";
 import { getApiBaseUrl } from "@/utils/api-base";
 
 export type ChatShareLink = {
@@ -57,6 +57,9 @@ export type ArtifactShareView = {
   content_type: string;
   content_url: string;
   requires_password: boolean;
+  password_attempts_remaining?: number;
+  password_attempts_max?: number;
+  password_locked_until?: string;
   created_at: string;
 };
 
@@ -120,6 +123,20 @@ export async function getArtifactShare(
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return get<{ success: boolean; data: ArtifactShareView }>(
     `/api/v1/custom/artifact-share/${encodeURIComponent(token)}${suffix}`,
+  );
+}
+
+export async function getArtifactSharePreview(token: string, previewToken: string) {
+  const query = new URLSearchParams({ preview: previewToken });
+  return get<{ success: boolean; data: ArtifactShareView }>(
+    `/api/v1/custom/artifact-share/${encodeURIComponent(token)}/preview?${query.toString()}`,
+  );
+}
+
+export async function getArtifactSharePreviewContent(token: string, previewToken: string) {
+  const query = new URLSearchParams({ preview: previewToken });
+  return getDown(
+    `/api/v1/custom/artifact-share/${encodeURIComponent(token)}/preview/content?${query.toString()}`,
   );
 }
 

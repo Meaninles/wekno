@@ -28,6 +28,7 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/custom/modules/artifactstore"
+	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -44,8 +45,11 @@ var (
 	ErrArtifactShareNotPublished     = errors.New("artifact share not published")
 	ErrArtifactSharePasswordRequired = errors.New("artifact share password required")
 	ErrArtifactSharePasswordInvalid  = errors.New("artifact share password invalid")
+	ErrArtifactSharePasswordLocked   = errors.New("artifact share password temporarily locked")
 	ErrArtifactSharePasswordTooShort = errors.New("artifact share password too short")
 	ErrArtifactSharePasswordTooLong  = errors.New("artifact share password too long")
+	ErrArtifactSharePreviewInvalid   = errors.New("artifact share preview token invalid")
+	ErrArtifactSharePreviewForbidden = errors.New("artifact share preview forbidden")
 )
 
 const maxShareMessageSelection = 1000
@@ -64,6 +68,7 @@ type Service struct {
 	sessionService    interfaces.SessionService
 	tenantService     interfaces.TenantService
 	globalFileService interfaces.FileService
+	authSecurity      *authsecurity.Service
 	frontendBaseURL   string
 	localBaseDir      string
 	artifactStore     *artifactstore.Store
@@ -110,12 +115,36 @@ type SharedArtifactFile struct {
 	FileSize    int64
 }
 
+// ArtifactSharePasswordAttemptError preserves the shared auth-security retry
+// budget so the HTTP layer can tell the recipient how many attempts remain.
+// The wrapped cause remains one of the regular artifact-share password errors
+// for callers that use errors.Is.
+type ArtifactSharePasswordAttemptError struct {
+	Cause  error
+	Status *authsecurity.AttemptStatus
+}
+
+func (e *ArtifactSharePasswordAttemptError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "artifact share password attempt failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e *ArtifactSharePasswordAttemptError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 func NewService(
 	db *gorm.DB,
 	sessionService interfaces.SessionService,
 	tenantService interfaces.TenantService,
 	globalFileService interfaces.FileService,
 	frontendBaseURL string,
+	authSecurity *authsecurity.Service,
 ) *Service {
 	baseDir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))
 	if baseDir == "" {
@@ -127,6 +156,7 @@ func NewService(
 		sessionService:    sessionService,
 		tenantService:     tenantService,
 		globalFileService: globalFileService,
+		authSecurity:      authSecurity,
 		frontendBaseURL:   strings.TrimSpace(frontendBaseURL),
 		localBaseDir:      absDir,
 	}
@@ -480,22 +510,38 @@ func (s *Service) getOrCreateArtifactShare(
 	return link, nil
 }
 
-// GetArtifactShare is intentionally anonymous. The high-entropy token is the
-// capability, while a published link additionally requires a password or a
-// short-lived access/preview capability. Normal conversation-share endpoints
-// remain authenticated and unchanged.
-func (s *Service) GetArtifactShare(ctx context.Context, token, previewToken, accessToken string) (*ArtifactShareViewDTO, error) {
+// GetArtifactShare keeps the public password/access-token flow for normal
+// share URLs. A non-empty preview token switches to the authenticated,
+// creator-only preview flow. Normal conversation-share endpoints remain
+// authenticated and unchanged.
+func (s *Service) GetArtifactShare(ctx context.Context, token, previewToken, accessToken, clientIP string) (*ArtifactShareViewDTO, error) {
 	link, err := s.findActiveArtifactShare(ctx, token)
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(previewToken) != "" {
+		if err := s.authorizeArtifactSharePreview(ctx, link, previewToken); err != nil {
+			return nil, err
+		}
 	}
 	artifact, err := s.loadArtifactForShare(ctx, link)
 	if err != nil {
 		return nil, err
 	}
-	authorized, err := s.authorizeArtifactShare(link, previewToken, accessToken)
+	if strings.TrimSpace(previewToken) != "" {
+		s.recordArtifactShareView(ctx, link.ID)
+		view := s.artifactShareViewDTO(link, artifact, token, false)
+		view.ContentURL = s.artifactSharePreviewContentURL(token, previewToken)
+		return view, nil
+	}
+
+	authorized, err := s.authorizeArtifactShare(link, accessToken)
 	if errors.Is(err, ErrArtifactSharePasswordRequired) {
-		return s.artifactShareViewDTO(link, artifact, token, true), nil
+		view := s.artifactShareViewDTO(link, artifact, token, true)
+		if err := s.populatePasswordAttemptStatus(ctx, link, clientIP, view); err != nil {
+			return nil, err
+		}
+		return view, nil
 	}
 	if err != nil {
 		return nil, err
@@ -508,14 +554,18 @@ func (s *Service) GetArtifactShare(ctx context.Context, token, previewToken, acc
 }
 
 // GetArtifactShareContent streams only the artifact pinned by the share
-// record. It has no authentication requirement by design; token validation,
-// active status, tenant scope and artifact version checks still apply.
+// record. With a preview token it requires an authenticated creator; without
+// one it preserves the public password/access-token share flow.
 func (s *Service) GetArtifactShareContent(ctx context.Context, token, previewToken, accessToken string) (*SharedArtifactFile, error) {
 	link, err := s.findActiveArtifactShare(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.authorizeArtifactShare(link, previewToken, accessToken); err != nil {
+	if strings.TrimSpace(previewToken) != "" {
+		if err := s.authorizeArtifactSharePreview(ctx, link, previewToken); err != nil {
+			return nil, err
+		}
+	} else if _, err := s.authorizeArtifactShare(link, accessToken); err != nil {
 		return nil, err
 	}
 	artifact, err := s.loadArtifactForShare(ctx, link)
@@ -540,7 +590,7 @@ func (s *Service) GetArtifactShareContent(ctx context.Context, token, previewTok
 // VerifyArtifactSharePassword exchanges the creator-provided password for a
 // short-lived bearer capability. It does not require a WeKnora account and it
 // never returns the stored password hash or plaintext.
-func (s *Service) VerifyArtifactSharePassword(ctx context.Context, token, password string) (*ArtifactShareAccessDTO, error) {
+func (s *Service) VerifyArtifactSharePassword(ctx context.Context, token, password, clientIP string) (*ArtifactShareAccessDTO, error) {
 	link, err := s.findActiveArtifactShare(ctx, token)
 	if err != nil {
 		return nil, err
@@ -551,8 +601,28 @@ func (s *Service) VerifyArtifactSharePassword(ctx context.Context, token, passwo
 	if strings.TrimSpace(link.PasswordHash) == "" {
 		return nil, ErrArtifactShareNotPublished
 	}
+	if err := validateArtifactSharePassword(password); err != nil {
+		return nil, err
+	}
+	attemptKey := artifactSharePasswordAttemptKey(link.ID, clientIP)
+	if status, err := s.passwordAttemptStatus(ctx, attemptKey); err != nil {
+		return nil, fmt.Errorf("check artifact share password attempts: %w", err)
+	} else if status != nil && status.LockedUntil != nil {
+		return nil, &ArtifactSharePasswordAttemptError{Cause: ErrArtifactSharePasswordLocked, Status: status}
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(link.PasswordHash), []byte(password)); err != nil {
-		return nil, ErrArtifactSharePasswordInvalid
+		status, recordErr := s.recordPasswordAttemptFailure(ctx, attemptKey, clientIP)
+		if recordErr != nil {
+			return nil, fmt.Errorf("record artifact share password attempt: %w", recordErr)
+		}
+		cause := error(ErrArtifactSharePasswordInvalid)
+		if status != nil && status.LockedUntil != nil {
+			cause = ErrArtifactSharePasswordLocked
+		}
+		return nil, &ArtifactSharePasswordAttemptError{Cause: cause, Status: status}
+	}
+	if s.authSecurity != nil {
+		s.authSecurity.RecordSuccess(ctx, attemptKey)
 	}
 	accessToken, expiresAt, err := issueArtifactShareCapability(link, artifactShareCapabilityAccess, artifactShareAccessTTL)
 	if err != nil {
@@ -576,10 +646,7 @@ func (s *Service) artifactShareViewDTO(link *ArtifactShareLink, artifact *artifa
 	}
 }
 
-func (s *Service) authorizeArtifactShare(link *ArtifactShareLink, previewToken, accessToken string) (bool, error) {
-	if verifyArtifactShareCapability(previewToken, artifactShareCapabilityPreview, link) {
-		return true, nil
-	}
+func (s *Service) authorizeArtifactShare(link *ArtifactShareLink, accessToken string) (bool, error) {
 	if strings.TrimSpace(link.PasswordHash) == "" {
 		return false, ErrArtifactShareNotPublished
 	}
@@ -587,6 +654,66 @@ func (s *Service) authorizeArtifactShare(link *ArtifactShareLink, previewToken, 
 		return true, nil
 	}
 	return false, ErrArtifactSharePasswordRequired
+}
+
+func (s *Service) authorizeArtifactSharePreview(ctx context.Context, link *ArtifactShareLink, previewToken string) error {
+	if err := requireWebUser(ctx); err != nil {
+		return err
+	}
+	if !verifyArtifactShareCapability(previewToken, artifactShareCapabilityPreview, link) {
+		return ErrArtifactSharePreviewInvalid
+	}
+	principal, ok := types.PrincipalFromContext(ctx)
+	if !ok || principal.Type != types.PrincipalWebUser ||
+		strings.TrimSpace(principal.ID) != strings.TrimSpace(link.CreatedByUserID) {
+		return ErrArtifactSharePreviewForbidden
+	}
+	return nil
+}
+
+func (s *Service) populatePasswordAttemptStatus(
+	ctx context.Context,
+	link *ArtifactShareLink,
+	clientIP string,
+	view *ArtifactShareViewDTO,
+) error {
+	if view == nil || link == nil {
+		return nil
+	}
+	status, err := s.passwordAttemptStatus(ctx, artifactSharePasswordAttemptKey(link.ID, clientIP))
+	if err != nil {
+		return fmt.Errorf("read artifact share password attempts: %w", err)
+	}
+	if status == nil {
+		return nil
+	}
+	view.PasswordAttemptsRemaining = &status.Remaining
+	view.PasswordAttemptsMax = status.MaxFailures
+	view.PasswordLockedUntil = status.LockedUntil
+	return nil
+}
+
+func (s *Service) passwordAttemptStatus(ctx context.Context, key string) (*authsecurity.AttemptStatus, error) {
+	if s.authSecurity == nil {
+		return nil, nil
+	}
+	return s.authSecurity.GetAttemptStatus(ctx, key)
+}
+
+func (s *Service) recordPasswordAttemptFailure(ctx context.Context, key, clientIP string) (*authsecurity.AttemptStatus, error) {
+	if s.authSecurity == nil {
+		return nil, nil
+	}
+	return s.authSecurity.RecordAttemptFailure(ctx, key, clientIP)
+}
+
+func artifactSharePasswordAttemptKey(shareID, clientIP string) string {
+	shareID = strings.TrimSpace(shareID)
+	clientIP = strings.TrimSpace(clientIP)
+	if clientIP == "" {
+		clientIP = "unknown"
+	}
+	return "artifact-share:" + shareID + ":" + clientIP
 }
 
 func (s *Service) recordArtifactShareView(ctx context.Context, shareID string) {
@@ -1437,6 +1564,13 @@ func (s *Service) artifactSharePreviewURL(token, previewToken string) string {
 
 func (s *Service) artifactShareContentURL(token string) string {
 	return "/api/v1/custom/artifact-share/" + url.PathEscape(strings.TrimSpace(token)) + "/content"
+}
+
+func (s *Service) artifactSharePreviewContentURL(token, previewToken string) string {
+	path := "/api/v1/custom/artifact-share/" + url.PathEscape(strings.TrimSpace(token)) + "/preview/content"
+	query := url.Values{}
+	query.Set("preview", strings.TrimSpace(previewToken))
+	return path + "?" + query.Encode()
 }
 
 func contentTypeForPath(filePath string) string {

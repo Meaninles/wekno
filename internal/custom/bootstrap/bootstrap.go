@@ -172,7 +172,7 @@ func NewHandlers(
 	agentRuntimeService := agentruntime.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
 	sessionHandler.SetRuntimeStreamControl(agentruntime.NewHandler(agentRuntimeService).Resume, agentruntime.NewHandler(agentRuntimeService).Stop)
 	agentRuntimeService.SetAdmission(admissionManager)
-	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
+	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL, authSecurityService)
 	chatShareService.SetArtifactStore(agentRuntimeService.ArtifactStore())
 	kbManagerService := kbmanager.NewService(
 		db,
@@ -702,10 +702,9 @@ func RegisterPublicRoutes(r *gin.Engine, handlers *Handlers) {
 		r.GET("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
 		r.HEAD("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
 	}
-	// HTML artifact share pages are bearer-capability URLs. They must stay
-	// outside the global Web authentication middleware so recipients can open
-	// them without signing in; the token and artifact checks remain enforced by
-	// the handler. Conversation-share routes below remain authenticated.
+	// HTML artifact share URLs remain public for the password-protected share
+	// flow. Creator previews use separate authenticated routes registered below;
+	// keeping these routes public preserves anonymous recipients' password flow.
 	if handlers.ChatShare != nil {
 		r.GET("/api/v1/custom/artifact-share/:token", handlers.ChatShare.ArtifactShare)
 		r.POST("/api/v1/custom/artifact-share/:token/access", middleware.PublicAuthRateLimit(), handlers.ChatShare.ArtifactShareAccess)
@@ -895,6 +894,11 @@ func RegisterRoutes(
 		artifactShareRoutes := v1.Group("/custom/artifact-share")
 		artifactShareRoutes.POST("/artifacts/:artifact_id", handlers.ChatShare.CreateArtifactShare)
 		artifactShareRoutes.POST("/artifacts/:artifact_id/password", handlers.ChatShare.SetArtifactSharePassword)
+		if viewer != nil {
+			artifactPreviewRoutes := v1.Group("/custom/artifact-share", viewer)
+			artifactPreviewRoutes.GET("/:token/preview", handlers.ChatShare.ArtifactSharePreview)
+			artifactPreviewRoutes.GET("/:token/preview/content", handlers.ChatShare.ArtifactSharePreviewContent)
+		}
 	}
 
 	if handlers.SessionState != nil {

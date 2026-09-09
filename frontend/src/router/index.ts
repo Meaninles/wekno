@@ -104,9 +104,9 @@ const router = createRouter({
       path: "/share/artifact/:token",
       name: "artifactShare",
       component: () => import("../custom/modules/chatshare/views/ArtifactShareView.vue"),
-      // Artifact share links are bearer capabilities. The API still validates
-      // the token and artifact state; this page itself must be reachable
-      // without initializing or authenticating the normal chat shell.
+      // Normal artifact shares stay public because recipients authenticate
+      // with the creator-provided password. Preview links are distinguished by
+      // ?preview and are gated in the router guard below.
       meta: { requiresInit: false, requiresAuth: false }
     },
     {
@@ -358,6 +358,19 @@ router.beforeEach(async (to, from, next) => {
   }
 
   // 如果访问的是登录页面或初始化页面，直接放行
+  const isCreatorArtifactPreview =
+    to.name === 'artifactShare' && String(to.query.preview || '').trim() !== ''
+  if (isCreatorArtifactPreview && !authStore.isLoggedIn) {
+    const restored = await hydrateSessionFromToken(authStore)
+    if (restored) {
+      next(to.fullPath)
+      return
+    }
+    const authReturnTo = rememberAuthReturnPath(to.fullPath)
+    next(authReturnTo ? { path: '/login', query: { returnTo: authReturnTo } } : '/login')
+    return
+  }
+
   if (to.meta.requiresAuth === false || to.meta.requiresInit === false) {
     // 如果已登录用户访问登录页面，重定向到知识库列表页面
     if (to.path === '/login' && authStore.isLoggedIn) {

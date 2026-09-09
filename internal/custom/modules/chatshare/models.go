@@ -230,15 +230,18 @@ type ArtifactShareLinkDTO struct {
 }
 
 type ArtifactShareViewDTO struct {
-	ID               string    `json:"id"`
-	ArtifactID       string    `json:"artifact_id"`
-	Filename         string    `json:"filename"`
-	FileType         string    `json:"file_type"`
-	FileSize         int64     `json:"file_size"`
-	ContentType      string    `json:"content_type"`
-	ContentURL       string    `json:"content_url"`
-	RequiresPassword bool      `json:"requires_password"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID                        string     `json:"id"`
+	ArtifactID                string     `json:"artifact_id"`
+	Filename                  string     `json:"filename"`
+	FileType                  string     `json:"file_type"`
+	FileSize                  int64      `json:"file_size"`
+	ContentType               string     `json:"content_type"`
+	ContentURL                string     `json:"content_url"`
+	RequiresPassword          bool       `json:"requires_password"`
+	PasswordAttemptsRemaining *int       `json:"password_attempts_remaining,omitempty"`
+	PasswordAttemptsMax       int        `json:"password_attempts_max,omitempty"`
+	PasswordLockedUntil       *time.Time `json:"password_locked_until,omitempty"`
+	CreatedAt                 time.Time  `json:"created_at"`
 }
 
 type ArtifactShareAccessDTO struct {

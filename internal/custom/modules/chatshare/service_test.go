@@ -12,6 +12,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -53,12 +54,16 @@ func (s *chatShareSessionServiceStub) GetSession(_ context.Context, id string) (
 }
 
 func chatShareTestContext() context.Context {
+	return chatShareTestContextForUser("user-1")
+}
+
+func chatShareTestContextForUser(userID string) context.Context {
 	ctx := types.WithPrincipal(context.Background(), types.Principal{
 		Type: types.PrincipalWebUser,
-		ID:   "user-1",
+		ID:   userID,
 	})
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, uint64(7))
-	ctx = context.WithValue(ctx, types.UserIDContextKey, "user-1")
+	ctx = context.WithValue(ctx, types.UserIDContextKey, userID)
 	return ctx
 }
 
@@ -67,6 +72,8 @@ func newChatShareTestService(t *testing.T) (*Service, *gorm.DB, context.Context)
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&chatShareMessageRow{}, &artifactRow{}))
+	authSecurity := authsecurity.NewService(db, nil, authsecurity.Config{})
+	require.NoError(t, authSecurity.Migrate(context.Background()))
 	svc := NewService(
 		db,
 		&chatShareSessionServiceStub{session: &types.Session{
@@ -78,6 +85,7 @@ func newChatShareTestService(t *testing.T) (*Service, *gorm.DB, context.Context)
 		nil,
 		nil,
 		"https://example.test",
+		authSecurity,
 	)
 	require.NoError(t, svc.Migrate(context.Background()))
 	return svc, db, chatShareTestContext()
@@ -232,7 +240,7 @@ func TestCreateShareRejectsInvalidOrIncompleteSelection(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidMessageSelection)
 }
 
-func TestArtifactShareIsLazyIdempotentAndAnonymousOnRead(t *testing.T) {
+func TestArtifactShareIsLazyIdempotentAndCreatorPreview(t *testing.T) {
 	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
 	svc, db, ctx := newChatShareTestService(t)
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -274,7 +282,7 @@ func TestArtifactShareIsLazyIdempotentAndAnonymousOnRead(t *testing.T) {
 	require.NoError(t, err)
 	previewToken := previewURL.Query().Get("preview")
 	require.NotEmpty(t, previewToken)
-	view, err := svc.GetArtifactShare(context.Background(), token, previewToken, "")
+	view, err := svc.GetArtifactShare(ctx, token, previewToken, "", "198.51.100.10")
 	require.NoError(t, err)
 	require.Equal(t, "报告.html", view.Filename)
 	require.Contains(t, view.ContentURL, "/content")
@@ -283,6 +291,97 @@ func TestArtifactShareIsLazyIdempotentAndAnonymousOnRead(t *testing.T) {
 	var refreshed ArtifactShareLink
 	require.NoError(t, db.First(&refreshed, "id = ?", link.ID).Error)
 	require.Equal(t, int64(1), refreshed.ViewCount)
+}
+
+func TestArtifactSharePreviewRequiresCreatorWebLogin(t *testing.T) {
+	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
+	svc, db, ownerCtx := newChatShareTestService(t)
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	require.NoError(t, db.Create(&artifactRow{
+		ID:           "artifact-preview-auth",
+		TenantID:     7,
+		UserID:       "user-1",
+		SessionID:    "session-1",
+		MessageID:    "answer-preview-auth",
+		FilePath:     "minio://bucket/artifact-preview-auth.html",
+		StorageState: "ready",
+		FileName:     "预览权限.html",
+		FileType:     "html",
+		FileSize:     42,
+		SHA256:       digest,
+		ContentType:  "text/html",
+	}).Error)
+
+	link, err := svc.CreateArtifactShare(ownerCtx, "artifact-preview-auth")
+	require.NoError(t, err)
+	previewURL, err := url.Parse(link.PreviewURL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(previewURL.Path, "/share/artifact/")
+	previewToken := previewURL.Query().Get("preview")
+
+	_, err = svc.GetArtifactShare(context.Background(), token, previewToken, "", "198.51.100.20")
+	require.ErrorIs(t, err, ErrWebLoginRequired)
+
+	_, err = svc.GetArtifactShare(chatShareTestContextForUser("user-2"), token, previewToken, "", "198.51.100.20")
+	require.ErrorIs(t, err, ErrArtifactSharePreviewForbidden)
+
+	view, err := svc.GetArtifactShare(ownerCtx, token, previewToken, "", "198.51.100.20")
+	require.NoError(t, err)
+	require.False(t, view.RequiresPassword)
+}
+
+func TestArtifactSharePasswordAttemptBudgetReportsRemainingAndLocks(t *testing.T) {
+	t.Setenv("SYSTEM_AES_KEY", "0123456789abcdef0123456789abcdef")
+	svc, db, ctx := newChatShareTestService(t)
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	require.NoError(t, db.Create(&artifactRow{
+		ID:           "artifact-password-attempts",
+		TenantID:     7,
+		UserID:       "user-1",
+		SessionID:    "session-1",
+		MessageID:    "answer-password-attempts",
+		FilePath:     "minio://bucket/artifact-password-attempts.html",
+		StorageState: "ready",
+		FileName:     "密码重试.html",
+		FileType:     "html",
+		FileSize:     42,
+		SHA256:       digest,
+		ContentType:  "text/html",
+	}).Error)
+
+	link, err := svc.SetArtifactSharePassword(ctx, "artifact-password-attempts", "abc123")
+	require.NoError(t, err)
+	tokenURL, err := url.Parse(link.URL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(tokenURL.Path, "/share/artifact/")
+	clientIP := "198.51.100.21"
+
+	for attempt := 1; attempt < 5; attempt++ {
+		_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "wrong-password", clientIP)
+		require.ErrorIs(t, err, ErrArtifactSharePasswordInvalid)
+		var attemptErr *ArtifactSharePasswordAttemptError
+		require.ErrorAs(t, err, &attemptErr)
+		require.NotNil(t, attemptErr.Status)
+		require.Equal(t, 5-attempt, attemptErr.Status.Remaining)
+	}
+
+	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "wrong-password", clientIP)
+	require.ErrorIs(t, err, ErrArtifactSharePasswordLocked)
+
+	metadata, err := svc.GetArtifactShare(context.Background(), token, "", "", clientIP)
+	require.NoError(t, err)
+	require.True(t, metadata.RequiresPassword)
+	require.NotNil(t, metadata.PasswordAttemptsRemaining)
+	require.Equal(t, 0, *metadata.PasswordAttemptsRemaining)
+	require.Equal(t, 5, metadata.PasswordAttemptsMax)
+	require.NotNil(t, metadata.PasswordLockedUntil)
+
+	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "abc123", clientIP)
+	require.ErrorIs(t, err, ErrArtifactSharePasswordLocked)
+
+	access, err := svc.VerifyArtifactSharePassword(context.Background(), token, "abc123", "198.51.100.22")
+	require.NoError(t, err)
+	require.NotEmpty(t, access.AccessToken)
 }
 
 func TestArtifactShareRejectsNonHTMLAndRevokedLinks(t *testing.T) {
@@ -312,7 +411,7 @@ func TestArtifactShareRejectsNonHTMLAndRevokedLinks(t *testing.T) {
 		FileType:        "txt",
 		Status:          "revoked",
 	}).Error)
-	_, err = svc.GetArtifactShare(context.Background(), "revoked-token", "", "")
+	_, err = svc.GetArtifactShare(context.Background(), "revoked-token", "", "", "198.51.100.10")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrArtifactShareNotFound) || errors.Is(err, ErrArtifactShareRevoked))
 }
@@ -346,22 +445,22 @@ func TestArtifactSharePasswordPublishesAndIssuesAccessCapability(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, published.PasswordConfigured)
 
-	metadata, err := svc.GetArtifactShare(context.Background(), token, "", "")
+	metadata, err := svc.GetArtifactShare(context.Background(), token, "", "", "198.51.100.10")
 	require.NoError(t, err)
 	require.True(t, metadata.RequiresPassword)
-	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "wrong-password")
+	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "wrong-password", "198.51.100.10")
 	require.ErrorIs(t, err, ErrArtifactSharePasswordInvalid)
 
-	access, err := svc.VerifyArtifactSharePassword(context.Background(), token, "abc123")
+	access, err := svc.VerifyArtifactSharePassword(context.Background(), token, "abc123", "198.51.100.10")
 	require.NoError(t, err)
 	require.NotEmpty(t, access.AccessToken)
-	view, err := svc.GetArtifactShare(context.Background(), token, "", access.AccessToken)
+	view, err := svc.GetArtifactShare(context.Background(), token, "", access.AccessToken, "198.51.100.10")
 	require.NoError(t, err)
 	require.False(t, view.RequiresPassword)
 	second, err := svc.SetArtifactSharePassword(ctx, "artifact-password", "different-password")
 	require.NoError(t, err)
 	require.True(t, second.PasswordConfigured)
-	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "different-password")
+	_, err = svc.VerifyArtifactSharePassword(context.Background(), token, "different-password", "198.51.100.10")
 	require.ErrorIs(t, err, ErrArtifactSharePasswordInvalid)
 }
 

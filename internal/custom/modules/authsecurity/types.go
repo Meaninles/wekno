@@ -16,6 +16,17 @@ func (LoginAttempt) TableName() string {
 	return "custom_auth_login_attempts"
 }
 
+// AttemptStatus is the shared retry budget state used by login and other
+// password-protected public capabilities. The underlying attempt record is
+// keyed by a caller-provided namespace, so a capability can reuse the same
+// lockout semantics without affecting a user's account login record.
+type AttemptStatus struct {
+	FailedCount int
+	Remaining   int
+	MaxFailures int
+	LockedUntil *time.Time
+}
+
 type challengeRecord struct {
 	ID                string    `json:"id"`
 	PrivateKeyPEM     string    `json:"private_key_pem"`

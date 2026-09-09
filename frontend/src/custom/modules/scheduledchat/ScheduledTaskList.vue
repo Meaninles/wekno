@@ -210,6 +210,7 @@
 
             <div class="capability-buttons">
               <t-button
+                v-if="SHOW_SCHEDULED_WEB_SEARCH_TOGGLE"
                 variant="outline"
                 :class="{ 'capability-button--active': form.web_search_enabled }"
                 @click="form.web_search_enabled = !form.web_search_enabled"
@@ -364,6 +365,9 @@ interface SelectedKnowledgeFile {
   folderPath?: string
   folderDocumentCount?: number
 }
+
+// Keep the persisted field and payload for existing tasks and future re-enabling.
+const SHOW_SCHEDULED_WEB_SEARCH_TOGGLE = false
 
 const router = useRouter()
 const authStore = useAuthStore()

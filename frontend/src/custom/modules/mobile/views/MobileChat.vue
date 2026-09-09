@@ -64,6 +64,9 @@ type SheetTab = "agent" | "context" | "skill";
 type KnowledgeSheetTab = "kb" | "file";
 type SkillSelectionMode = "all" | "selected" | "none";
 
+// Keep the mobile web-search state and request path intact for a future UI rollout.
+const SHOW_MOBILE_WEB_SEARCH_TOGGLE = false;
+
 const route = useRoute();
 const router = useRouter();
 const { t } = useI18n();
@@ -1891,6 +1894,7 @@ onBeforeUnmount(() => {
           <em v-if="selectedKnowledgeContextCount">{{ selectedKnowledgeContextCount }}</em>
         </button>
         <button
+          v-if="SHOW_MOBILE_WEB_SEARCH_TOGGLE"
           type="button"
           class="config-pill"
           :class="{ active: canUseWebSearch, disabled: isWebSearchDisabledByAgent || !isWebSearchConfigured }"

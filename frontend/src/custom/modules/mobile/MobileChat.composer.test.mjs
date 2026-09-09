@@ -30,3 +30,12 @@ test('mobile composer keeps knowledge base as the second config shortcut', () =>
   assert.ok(knowledgePosition > agentPosition)
   assert.ok(webPosition > knowledgePosition)
 })
+
+test('mobile keeps web search implementation but hides its toggle', () => {
+  assert.match(source, /const SHOW_MOBILE_WEB_SEARCH_TOGGLE = false/)
+  const configRail = source.slice(
+    source.indexOf('<div class="config-rail"'),
+    source.indexOf('<div class="input-row"'),
+  )
+  assert.match(configRail, /v-if="SHOW_MOBILE_WEB_SEARCH_TOGGLE"[\s\S]*@click="toggleWebSearch"/)
+})

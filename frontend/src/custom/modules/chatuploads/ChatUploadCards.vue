@@ -135,8 +135,9 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
 </script>
 
 <template>
+  <!-- 文件选择器必须始终挂载；上传卡片为空时仍需要响应外部工具栏的首次点击。 -->
+  <input ref="inputRef" type="file" multiple hidden :accept="accept" @change="handleSelect" />
   <div v-if="files.length || rows.some((row) => row.state !== 'ready')" class="chat-upload-cards" aria-live="polite">
-    <input ref="inputRef" type="file" multiple hidden :accept="accept" @change="handleSelect" />
     <div v-for="(file, index) in files" :key="file.id" class="chat-upload-card">
       <div class="chat-upload-card__progress" :class="`is-${rowFor(index, file)?.state || 'queued'}`" aria-hidden="true">
         <span class="chat-upload-card__progress-ring" />

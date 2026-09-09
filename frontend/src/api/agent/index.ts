@@ -278,6 +278,8 @@ export interface AgentTypePresetConfig {
   enable_artifacts?: boolean;
   document_template?: DocumentTemplateConfig;
   knowledge_management?: KnowledgeManagementConfig;
+  lightweight_skills_selection_mode?: 'all' | 'selected' | 'none';
+  selected_lightweight_skills?: string[];
   professional_skills_selection_mode?: 'all' | 'selected' | 'none';
   selected_professional_skills?: string[];
   kb_selection_mode?: 'all' | 'selected' | 'none';

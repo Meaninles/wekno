@@ -120,6 +120,61 @@ func TestApplyReferenceModelDefaultsAddsReservedProfessionalSkillsToDataAnalysis
 	}
 }
 
+func TestApplyReferenceModelDefaultsKeepsKnowledgeQASkillsDisabled(t *testing.T) {
+	requireBuiltinAgentConfig(t)
+	svc := NewService(nil, nil)
+	agent := &types.CustomAgent{
+		ID:        types.BuiltinKnowledgeQAID,
+		IsBuiltin: true,
+		TenantID:  10002,
+		Config: types.CustomAgentConfig{
+			AgentMode:                       types.AgentModeUnified,
+			AgentType:                       types.AgentTypeKnowledgeQA,
+			LightweightSkillsSelectionMode:  "none",
+			ProfessionalSkillsSelectionMode: "none",
+		},
+	}
+
+	got, err := svc.ApplyReferenceModelDefaults(context.Background(), agent, 10002)
+	if err != nil {
+		t.Fatalf("ApplyReferenceModelDefaults returned error: %v", err)
+	}
+	if got.Config.LightweightSkillsSelectionMode != "none" {
+		t.Fatalf("lightweight mode = %q, want none", got.Config.LightweightSkillsSelectionMode)
+	}
+	if got.Config.ProfessionalSkillsSelectionMode != "none" {
+		t.Fatalf("professional mode = %q, want none", got.Config.ProfessionalSkillsSelectionMode)
+	}
+	if len(got.Config.SelectedProfessionalSkills) != 0 {
+		t.Fatalf("knowledge QA professional skills = %#v, want empty", got.Config.SelectedProfessionalSkills)
+	}
+}
+
+func TestApplyReferenceModelDefaultsFillsKnowledgeQASkillDefaults(t *testing.T) {
+	requireBuiltinAgentConfig(t)
+	svc := NewService(nil, nil)
+	agent := &types.CustomAgent{
+		ID:        types.BuiltinKnowledgeQAID,
+		IsBuiltin: true,
+		TenantID:  10002,
+		Config: types.CustomAgentConfig{
+			AgentMode: types.AgentModeUnified,
+			AgentType: types.AgentTypeKnowledgeQA,
+		},
+	}
+
+	got, err := svc.ApplyReferenceModelDefaults(context.Background(), agent, 10002)
+	if err != nil {
+		t.Fatalf("ApplyReferenceModelDefaults returned error: %v", err)
+	}
+	if got.Config.LightweightSkillsSelectionMode != "none" {
+		t.Fatalf("lightweight mode = %q, want none", got.Config.LightweightSkillsSelectionMode)
+	}
+	if got.Config.ProfessionalSkillsSelectionMode != "none" {
+		t.Fatalf("professional mode = %q, want none", got.Config.ProfessionalSkillsSelectionMode)
+	}
+}
+
 func TestMergeResetConfigClearsDataSourcesForNonDataAnalysisAgents(t *testing.T) {
 	defaultConfig := types.CustomAgentConfig{
 		AgentType:     types.AgentTypeKnowledgeQA,

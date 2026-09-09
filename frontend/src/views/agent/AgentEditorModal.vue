@@ -2769,9 +2769,23 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
       knowledge_base_overrides: {},
     };
   }
+  if (c.lightweight_skills_selection_mode) {
+    target.lightweight_skills_selection_mode = c.lightweight_skills_selection_mode;
+    skillsSelectionMode.value = c.lightweight_skills_selection_mode;
+    if (c.lightweight_skills_selection_mode === 'none') {
+      target.selected_lightweight_skills = [];
+      target.selected_skills = [];
+    }
+  }
+  if (Array.isArray(c.selected_lightweight_skills)) {
+    target.selected_lightweight_skills = [...c.selected_lightweight_skills];
+  }
   if (c.professional_skills_selection_mode) {
     target.professional_skills_selection_mode = c.professional_skills_selection_mode;
     professionalSkillsSelectionMode.value = c.professional_skills_selection_mode;
+    if (c.professional_skills_selection_mode === 'none') {
+      target.selected_professional_skills = [];
+    }
   }
   if (Array.isArray(c.selected_professional_skills)) {
     target.selected_professional_skills = [...c.selected_professional_skills];

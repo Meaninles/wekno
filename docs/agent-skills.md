@@ -95,27 +95,13 @@ description: 从 PDF 文件中提取文本和表格。用户要求分析或转�
 
 ## 预加载运行时技能
 
-预加载技能位于 `skills/preloaded/`，当前目录为：
-
-| 技能 | 用途 |
-| --- | --- |
-| `citation-generator` | 引用生成和来源标注。 |
-| `data-processor` | 数据处理、格式转换、结构化提取。 |
-| `doc-coauthoring` | 引导结构化文档协作创作。 |
-| `document-analyzer` | 分析文档结构、主题、质量和关键信息。 |
+预加载技能位于 `skills/preloaded/`。当前仓库不再内置默认预加载轻量技能；如需增加此类技能，直接在该目录下添加包含 `SKILL.md` 的技能目录。
 
 目录结构示例：
 
 ```text
 skills/preloaded/
-├── citation-generator/
-│   └── SKILL.md
-├── data-processor/
-│   ├── SKILL.md
-│   └── scripts/
-├── doc-coauthoring/
-│   └── SKILL.md
-└── document-analyzer/
+└── <skill-name>/
     └── SKILL.md
 ```
 

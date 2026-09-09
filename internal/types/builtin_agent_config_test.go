@@ -30,6 +30,12 @@ func TestBuiltinKnowledgeQAUsesStableFactualRAGDefaults(t *testing.T) {
 	if agent.Config.HistoryTurns != 10 {
 		t.Fatalf("history turns = %d, want 10", agent.Config.HistoryTurns)
 	}
+	if agent.Config.LightweightSkillsSelectionMode != "none" {
+		t.Fatalf("lightweight skills mode = %q, want none", agent.Config.LightweightSkillsSelectionMode)
+	}
+	if agent.Config.ProfessionalSkillsSelectionMode != "none" {
+		t.Fatalf("professional skills mode = %q, want none", agent.Config.ProfessionalSkillsSelectionMode)
+	}
 }
 
 func TestBuiltinDocumentProcessingDisablesWebSearchByDefault(t *testing.T) {

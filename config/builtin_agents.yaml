@@ -28,6 +28,10 @@ builtin_agents:
     temperature: 0.0
     max_completion_tokens: 16384
     max_iterations: 15
+    lightweight_skills_selection_mode: none
+    selected_lightweight_skills: []
+    professional_skills_selection_mode: none
+    selected_professional_skills: []
     kb_selection_mode: all
     retrieve_kb_only_when_mentioned: false
     allowed_tools:

@@ -73,6 +73,8 @@ type AgentTypePresetConfig struct {
 	EnableArtifacts                 bool                       `yaml:"enable_artifacts"       json:"enable_artifacts,omitempty"`
 	DocumentTemplate                *DocumentTemplateConfig    `yaml:"document_template" json:"document_template,omitempty"`
 	KnowledgeManagement             *KnowledgeManagementConfig `yaml:"knowledge_management" json:"knowledge_management,omitempty"`
+	LightweightSkillsSelectionMode  string                     `yaml:"lightweight_skills_selection_mode" json:"lightweight_skills_selection_mode,omitempty"`
+	SelectedLightweightSkills       []string                   `yaml:"selected_lightweight_skills" json:"selected_lightweight_skills,omitempty"`
 	ProfessionalSkillsSelectionMode string                     `yaml:"professional_skills_selection_mode" json:"professional_skills_selection_mode,omitempty"`
 	SelectedProfessionalSkills      []string                   `yaml:"selected_professional_skills" json:"selected_professional_skills,omitempty"`
 	// KBSelectionMode presets the KB picker mode: "all" | "selected" | "none".

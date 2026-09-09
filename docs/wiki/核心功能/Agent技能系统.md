@@ -33,14 +33,7 @@ source: agent-skills.md
 
 ## 预加载技能
 
-当前 `skills/preloaded/` 包含：
-
-| 技能 | 用途 |
-|------|------|
-| `citation-generator` | 引用生成和来源标注 |
-| `data-processor` | 数据处理、格式转换、结构化提取 |
-| `doc-coauthoring` | 结构化文档协作创作 |
-| `document-analyzer` | 文档结构、主题和质量分析 |
+当前仓库不再内置默认预加载轻量技能。需要增加预加载技能时，在 `skills/preloaded/` 下添加包含 `SKILL.md` 的技能目录即可。
 
 ## 配置字段
 

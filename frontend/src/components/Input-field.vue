@@ -255,7 +255,10 @@ const agentMCPSelectionMode = computed(() => {
 
 const agentSkillsSelectionMode = computed(() => {
   if (!hasAgentConfig.value) return null;
-  return currentAgentConfig.value?.skills_selection_mode || 'all';
+  const config = currentAgentConfig.value;
+  return config?.lightweight_skills_selection_mode ||
+    config?.skills_selection_mode ||
+    (config?.agent_type === 'knowledge-qa' ? 'none' : 'all');
 });
 
 // 共享智能体下的知识库列表（来自 listKnowledgeBases(agent_id)），用于已选知识库展示与 org 角标

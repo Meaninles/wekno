@@ -87,6 +87,15 @@ func applyReservedProfessionalSkillsToConfig(cfg *types.CustomAgentConfig) {
 	if cfg == nil || cfg.AgentMode != types.AgentModeUnified {
 		return
 	}
+	if cfg.AgentType == types.AgentTypeKnowledgeQA {
+		if cfg.LightweightSkillsSelectionMode == "" && cfg.SkillsSelectionMode == "" {
+			cfg.LightweightSkillsSelectionMode = "none"
+		}
+		if cfg.ProfessionalSkillsSelectionMode == "" {
+			cfg.ProfessionalSkillsSelectionMode = "none"
+		}
+		return
+	}
 	if cfg.ProfessionalSkillsSelectionMode == "" || cfg.ProfessionalSkillsSelectionMode == "none" {
 		cfg.ProfessionalSkillsSelectionMode = "selected"
 	}

@@ -271,11 +271,16 @@ instance.interceptors.response.use(
     
     // 处理 Nginx 413 Request Entity Too Large
     if (error.response.status === 413) {
+      const isChatUpload = originalRequest?.url?.includes("/chat-uploads/sessions/");
+      const size = uploadLimitForRequest(originalRequest?.url);
+      const hint = isChatUpload
+        ? '文件过大时，可先上传到知识库，等待解析成功后，在对话中选择知识库文件进行问答。'
+        : '';
       return Promise.reject({ 
         status: 413, 
-        message: i18n.global.t('error.fileSizeExceeded', {
-          size: uploadLimitForRequest(originalRequest?.url),
-        }),
+        message: `${i18n.global.t('error.fileSizeExceeded', { size })}${hint ? ` ${hint}` : ''}`,
+        code: isChatUpload ? 'CHAT_UPLOAD_FILE_TOO_LARGE' : undefined,
+        max_file_size_mib: isChatUpload ? size : undefined,
         success: false
       });
     }

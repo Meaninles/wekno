@@ -42,7 +42,7 @@ import { clearSessionDraftState, getSessionDraftState, saveSessionDraftState } f
 import { synchronizeSessionTitle } from "@/custom/modules/sessiontitle/client";
 import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
 import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
-import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
+import type { AttachmentFile } from "@/custom/modules/chatuploads/types";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
 import ChatQueueRejectionBanner from "@/custom/modules/chatqueue/ChatQueueRejectionBanner.vue";
 import type { ChatQueueRejection } from "@/custom/modules/chatqueue/types";
@@ -1518,7 +1518,13 @@ const sendMessage = async () => {
     const sessionId = await ensureSession();
     outgoingSessionId = sessionId;
     saveSessionDraftState(sessionId, requestSettings, requestDraftAttachments, composerSnapshot.images, composerSnapshot.query);
-    const uploadIds = await prepareUploads([...composerSnapshot.images, ...composerSnapshot.attachments.map(a => a.file)], { sessionId, agentId: requestAgentId });
+    const prepared = await prepareUploads([...composerSnapshot.images, ...composerSnapshot.attachments.map(a => a.file)], {
+      sessionId,
+      agentId: requestAgentId,
+      directInput: agentEnabled,
+    });
+    const uploadIds = prepared.uploadIds;
+    const inputFileIds = prepared.inputFileIds;
     if (sessionId !== currentSessionId.value) return;
     const userImages = composerSnapshot.images.map(file => ({ url: chatImagePlaceholder(), name: file.name }));
     clearRecoverPoll();
@@ -1581,6 +1587,7 @@ const sendMessage = async () => {
       professional_skill_names: effectiveProfessionalSkillNames,
       mentioned_items: mentionedItems,
       upload_ids: uploadIds,
+      input_file_ids: inputFileIds,
       query: requestQuery,
       method: "POST",
       url: endpoint,

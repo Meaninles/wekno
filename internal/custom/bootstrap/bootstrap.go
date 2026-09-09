@@ -155,7 +155,11 @@ func NewHandlers(
 	sessionHandler *sessionhandler.Handler,
 ) (*Handlers, error) {
 	ctx := context.Background()
-	chatUploadService := chatuploads.NewService(db, sessionService, knowledgeService, knowledgeBaseService, modelService)
+	originalInputStorage, err := agentruntime.NewOriginalInputFileService()
+	if err != nil {
+		return nil, fmt.Errorf("initialize Agent original input storage: %w", err)
+	}
+	chatUploadService := chatuploads.NewService(db, sessionService, knowledgeService, knowledgeBaseService, modelService, originalInputStorage)
 	sessionHandler.SetUploadResolver(chatUploadService)
 	configCenterService := configcenter.NewService(db)
 	adminService := customadmin.NewService(db, userService)

@@ -33,14 +33,19 @@ type Service struct {
 	knowledge         interfaces.KnowledgeService
 	kbs               interfaces.KnowledgeBaseService
 	models            interfaces.ModelService
+	originalInputs    interfaces.FileService
 	maintenanceMu     sync.Mutex
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 }
 
 func NewService(db *gorm.DB, sessions interfaces.SessionService, knowledge interfaces.KnowledgeService,
-	kbs interfaces.KnowledgeBaseService, models interfaces.ModelService) *Service {
-	return &Service{db: db, sessions: sessions, knowledge: knowledge, kbs: kbs, models: models}
+	kbs interfaces.KnowledgeBaseService, models interfaces.ModelService, originalInputs ...interfaces.FileService) *Service {
+	var originalStorage interfaces.FileService
+	if len(originalInputs) > 0 {
+		originalStorage = originalInputs[0]
+	}
+	return &Service{db: db, sessions: sessions, knowledge: knowledge, kbs: kbs, models: models, originalInputs: originalStorage}
 }
 
 func privateKBID(sessionID string) string {

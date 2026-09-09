@@ -1,11 +1,15 @@
 package agentruntime
 
 import (
+	"encoding/json"
+	"strings"
+
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
-	"strings"
 )
+
+const ToolTranscribeInputFile = "transcribe_input_file"
 
 func runtimeToolSpecs(registry interfaces.AgentToolRegistry) []RuntimeToolSpec {
 	if registry == nil {
@@ -35,6 +39,41 @@ func runtimeToolSpecs(registry interfaces.AgentToolRegistry) []RuntimeToolSpec {
 		})
 	}
 	return out
+}
+
+func runtimeToolSpecsWithInputs(registry interfaces.AgentToolRegistry, inputs []OriginalInputFileSpec, config *types.AgentConfig) []RuntimeToolSpec {
+	out := runtimeToolSpecs(registry)
+	if config == nil || strings.TrimSpace(config.ASRModelID) == "" || !hasAudioOriginalInput(inputs) {
+		return out
+	}
+	for _, item := range out {
+		if item.Name == ToolTranscribeInputFile {
+			return out
+		}
+	}
+	return append(out, audioTranscriptionToolSpec())
+}
+
+func hasAudioOriginalInput(inputs []OriginalInputFileSpec) bool {
+	for _, item := range inputs {
+		switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(item.FileType)), ".") {
+		case "mp3", "wav", "m4a", "flac", "ogg":
+			return true
+		}
+	}
+	return false
+}
+
+func audioTranscriptionToolSpec() RuntimeToolSpec {
+	return RuntimeToolSpec{
+		Name:              ToolTranscribeInputFile,
+		IsReadOnly:        true,
+		IsConcurrencySafe: false,
+		TimeoutSeconds:    900,
+		Description:       "Transcribe one uploaded audio input file with the Agent's configured ASR model. Use the exact input_file_id from the workspace input manifest. The primary chat model remains in control; this tool returns transcript and timestamped segments as evidence.",
+		Parameters:        json.RawMessage(`{"type":"object","additionalProperties":false,"required":["input_file_id"],"properties":{"input_file_id":{"type":"string","description":"Exact input_file_id from original_input_manifest.json"}}}`),
+		Source:            "native",
+	}
 }
 
 func classifyToolSource(name string) string {

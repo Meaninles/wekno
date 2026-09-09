@@ -9,6 +9,9 @@ import (
 
 func (s *Service) Migrate(ctx context.Context) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.AutoMigrate(&OriginalUpload{}); err != nil {
+			return fmt.Errorf("install chat original uploads: %w", err)
+		}
 		for _, f := range []struct{ name, ddl string }{
 			{"ChatSessionID", "chat_session_id VARCHAR(36) NOT NULL DEFAULT ''"},
 			{"ChatOwnerID", "chat_owner_id VARCHAR(512) NOT NULL DEFAULT ''"},

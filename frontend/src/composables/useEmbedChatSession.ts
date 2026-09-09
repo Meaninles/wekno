@@ -290,11 +290,15 @@ export function useEmbedChatSession(options: {
     const draftAttachments = attachmentFiles.map(file => ({ file, id: crypto.randomUUID(), name: file.name, size: file.size, type: file.type }))
     saveSessionDraftState(requestSessionId, {}, draftAttachments, imageFiles, value, draftScope)
     let uploadIds: string[]
+    let inputFileIds: string[]
     try {
-      uploadIds = await prepareUploads([...imageFiles, ...attachmentFiles], {
+      const prepared = await prepareUploads([...imageFiles, ...attachmentFiles], {
         sessionId: requestSessionId, agentId: options.agentId, channelId: options.channelId,
         token: options.token, sessionSig: requestSessionSig, visitorId: requestVisitorId,
+        directInput: isAgentStreamSession(),
       })
+      uploadIds = prepared.uploadIds
+      inputFileIds = prepared.inputFileIds
     } catch (err: any) {
       if (requestSessionId !== options.sessionId.value) return
       isReplying.value = false
@@ -342,6 +346,7 @@ export function useEmbedChatSession(options: {
       mcp_service_ids: [],
       mentioned_items: [],
       upload_ids: uploadIds,
+      input_file_ids: inputFileIds,
       query: outboundQuery,
       method: 'POST',
       url: endpoint,

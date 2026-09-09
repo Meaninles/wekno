@@ -14,6 +14,8 @@ import (
 type UploadResolver interface {
 	Resolve(context.Context, string, []string) (types.MessageAttachments, []string, error)
 	HistoryTargets(context.Context, string) ([]string, error)
+	ResolveOriginalInputs(context.Context, string, []string) (types.MessageAttachments, []types.OriginalInputFile, error)
+	HistoryOriginalInputs(context.Context, string) (types.MessageAttachments, []types.OriginalInputFile, error)
 }
 
 func (h *Handler) SetUploadResolver(resolver UploadResolver) { h.uploadResolver = resolver }
@@ -35,7 +37,15 @@ func (h *Handler) ResolveUploadAgent(c *gin.Context, id, filename string) (*type
 		if strings.TrimSpace(agent.Config.VLMModelID) == "" {
 			return nil, fmt.Errorf("a vision model is required to process images")
 		}
-	} else if !attachmentFileTypeAllowed(filename, agent.Config.SupportedFileTypes) {
+	} else if strings.HasPrefix(contentType, "audio/") {
+		if !agent.Config.AudioUploadEnabled {
+			return nil, fmt.Errorf("audio upload is not enabled for this agent")
+		}
+		if strings.TrimSpace(agent.Config.ASRModelID) == "" {
+			return nil, fmt.Errorf("an ASR model is required to process audio")
+		}
+	}
+	if !attachmentFileTypeAllowed(filename, agent.Config.SupportedFileTypes) {
 		return nil, fmt.Errorf("file type is not supported by the selected agent")
 	}
 	return agent, nil

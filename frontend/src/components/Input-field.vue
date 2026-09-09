@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES, chatImagePlaceholder } from "@/custom/modules/chatuploads/uploads"
+import { chatImagePlaceholder } from "@/custom/modules/chatuploads/uploads"
 import { ref, onMounted, onUnmounted, computed, watch, nextTick, h } from "vue";
 import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
@@ -28,7 +28,8 @@ import { type CustomAgent, BUILTIN_GENERAL_AGENT_ID, BUILTIN_KNOWLEDGE_QA_ID } f
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
-import AttachmentUpload, { type AttachmentFile } from './AttachmentUpload.vue';
+import ChatUploadCards from '@/custom/modules/chatuploads/ChatUploadCards.vue';
+import type { AttachmentFile } from '@/custom/modules/chatuploads/types';
 import { resolveAgentEnabledFromMode } from '@/custom/modules/agentConversationMode/policy';
 import {
   kbSatisfiesAgentRequirements,
@@ -73,16 +74,15 @@ const showSkillSelector = ref(false);
 // 暂时隐藏对话界面的联网选择入口，保留相关状态与业务逻辑，后续恢复时改为 true。
 const SHOW_WEB_SEARCH_SELECTOR = false;
 
-// Image upload state
+// The composer keeps one ordered file list. Legacy image/attachment getters
+// below still serve draft/message callers, but there is only one upload UI and
+// one file picker for all supported document, image and audio types.
+const uploadedFiles = ref<AttachmentFile[]>([]);
 const uploadedImages = ref<Array<{ file: File; preview: string }>>([]);
-const imageInputRef = ref<HTMLInputElement>();
-const imageUploading = ref(false);
-
-// Attachment upload state
-const attachmentUploadRef = ref<InstanceType<typeof AttachmentUpload>>();
 const uploadedAttachments = ref<AttachmentFile[]>([]);
+const uploadCardsRef = ref<InstanceType<typeof ChatUploadCards>>();
 const CHAT_FILE_DROP_EVENT = 'weknora:chat-file-drop';
-const CHAT_ATTACHMENT_MAX_FILES = 5;
+const CHAT_ATTACHMENT_MAX_FILES = 10;
 
 const isImageFile = (file: File) => {
   if (file.type.startsWith('image/')) {
@@ -94,21 +94,7 @@ const isImageFile = (file: File) => {
 
 const handleDroppedFiles = (files: File[]) => {
   if (!files.length) return;
-
-  const imageFiles = files.filter(isImageFile);
-  const attachmentFiles = files.filter(file => !isImageFile(file));
-
-  if (imageFiles.length > 0) {
-    if (isImageUploadEnabledByAgent.value) {
-      addImageFiles(imageFiles);
-    } else {
-      MessagePlugin.warning(t('input.imageUploadDisabledByAgent'));
-    }
-  }
-
-  if (attachmentFiles.length > 0) {
-    attachmentUploadRef.value?.addFiles(attachmentFiles);
-  }
+  uploadCardsRef.value?.addFiles(files);
 };
 
 const handleChatFileDrop = (event: Event) => {
@@ -118,76 +104,41 @@ const handleChatFileDrop = (event: Event) => {
   handleDroppedFiles(files);
 };
 
-const handleImageSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement;
-  if (!input.files) return;
-  addImageFiles(Array.from(input.files));
-  input.value = '';
+const rebuildLegacyUploadViews = (files: AttachmentFile[]) => {
+  uploadedFiles.value = files;
+  uploadedImages.value = files.filter((item) => isImageFile(item.file)).map((item) => ({ file: item.file, preview: chatImagePlaceholder() }));
+  uploadedAttachments.value = files.filter((item) => !isImageFile(item.file)).map((item) => ({ ...item }));
 };
 
-const addImageFiles = (files: File[]) => {
-  if (!isImageUploadEnabledByAgent.value) return;
-  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'];
-  const maxSize = CHAT_UPLOAD_MAX_BYTES;
-  for (const file of files) {
-    if (uploadedImages.value.length >= 5) {
-      MessagePlugin.warning(t('chat.imageTooMany'));
-      break;
-    }
-    if (!allowed.includes(file.type)) {
-      MessagePlugin.warning(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`);
-      continue;
-    }
-    if (file.size > maxSize) {
-      MessagePlugin.warning(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`);
-      continue;
-    }
-    uploadedImages.value.push({ file, preview: chatImagePlaceholder() });
-  }
-};
+const handleComposerFilesUpdate = (files: AttachmentFile[]) => rebuildLegacyUploadViews(files);
 
-const removeImage = (index: number) => {
-  const removed = uploadedImages.value.splice(index, 1);
-  if (removed.length > 0) URL.revokeObjectURL(removed[0].preview);
-};
+const addImageFiles = (files: File[]) => uploadCardsRef.value?.addFiles(files);
 
-const clearUploadedImages = () => {
-  uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
-  uploadedImages.value = [];
-};
+const clearUploadedImages = () => rebuildLegacyUploadViews(uploadedFiles.value.filter((item) => !isImageFile(item.file)));
 
 const setUploadedImages = (files: File[] = []) => {
-  clearUploadedImages();
-  addImageFiles(files.filter((file): file is File => file instanceof File));
+  const next = files.filter((file): file is File => file instanceof File).slice(0, CHAT_ATTACHMENT_MAX_FILES)
+    .map((file) => ({ file, id: crypto.randomUUID(), name: file.name, size: file.size, type: file.type }));
+  rebuildLegacyUploadViews([...uploadedFiles.value.filter((item) => !isImageFile(item.file)), ...next]);
 };
 
-const getUploadedImages = (): File[] => uploadedImages.value
-  .map(img => img.file)
-  .filter((file): file is File => file instanceof File);
+const getUploadedImages = (): File[] => uploadedFiles.value
+  .filter((item) => isImageFile(item.file))
+  .map((item) => item.file);
 
 const setUploadedAttachments = (attachments: AttachmentFile[] = []) => {
   const nextAttachments = attachments
     .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
     .slice(0, CHAT_ATTACHMENT_MAX_FILES)
     .map(attachment => ({ ...attachment }));
-
-  uploadedAttachments.value = nextAttachments;
-  nextTick(() => {
-    attachmentUploadRef.value?.setFiles(nextAttachments);
-  });
+  rebuildLegacyUploadViews([...uploadedFiles.value.filter((item) => isImageFile(item.file)), ...nextAttachments]);
 };
 
-const getUploadedAttachments = (): AttachmentFile[] => uploadedAttachments.value
-  .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
+const getUploadedAttachments = (): AttachmentFile[] => uploadedFiles.value
+  .filter((item) => !isImageFile(item.file))
   .map((attachment) => ({ ...attachment }));
 
-const clearUploadedAttachments = () => {
-  setUploadedAttachments([]);
-};
-
-const triggerImageUpload = () => {
-  imageInputRef.value?.click();
-};
+const clearUploadedAttachments = () => rebuildLegacyUploadViews(uploadedFiles.value.filter((item) => isImageFile(item.file)));
 const atButtonRef = ref<HTMLElement>();
 const skillButtonRef = ref<HTMLElement>();
 const showAgentModeSelector = ref(false);
@@ -312,9 +263,8 @@ watch([selectedAgentId, agentKnowledgeBases, agentKBSelectionMode], ([newAgentId
       loadMentionItems(mentionQuery.value, true);
     }
     // Clear images when switching to an agent that doesn't support image upload
-    if (!isImageUploadEnabledByAgent.value && uploadedImages.value.length > 0) {
-      uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
-      uploadedImages.value = [];
+    if (!isImageUploadEnabledByAgent.value && uploadedFiles.value.some((item) => isImageFile(item.file))) {
+      clearUploadedImages();
     }
   }
 }, { immediate: true });
@@ -387,6 +337,44 @@ const agentSupportedFileTypes = computed(() => {
   if (!hasAgentConfig.value) return [];
   return currentAgentConfig.value?.supported_file_types || [];
 });
+
+// Keep the chat picker aligned with the parser registry. The static fallback
+// keeps the picker usable before the dynamic DocReader engine list arrives;
+// dynamic engines are unioned in when available.
+const BUILTIN_CHAT_FILE_TYPES = [
+  'docx', 'doc', 'pdf', 'md', 'markdown', 'txt', 'text', 'csv', 'json',
+  'xlsx', 'xls', 'pptx', 'ppt', 'epub', 'mhtml',
+  'jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp',
+  'mp3', 'wav', 'm4a', 'flac', 'ogg',
+];
+const parserFileTypes = computed(() => {
+  const dynamic = (editorResources.parserEngines || []).flatMap((engine: any) => {
+    const values = engine?.file_types || engine?.FileTypes || engine?.supported_file_types || [];
+    return Array.isArray(values) ? values : [];
+  });
+  const configured = agentSupportedFileTypes.value;
+  const values = configured.length > 0 ? configured : [...BUILTIN_CHAT_FILE_TYPES, ...dynamic];
+  return Array.from(new Set(values.map((value: string) => String(value || '').trim().toLowerCase().replace(/^\./, '')).filter(Boolean)));
+});
+const fileExtension = (file: File) => {
+  const name = file.name.split(/[?#]/)[0];
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+};
+const isAudioFile = (file: File) => file.type.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'flac', 'ogg'].includes(fileExtension(file));
+const validateComposerFile = (file: File): string | undefined => {
+  const extension = fileExtension(file);
+  if (agentSupportedFileTypes.value.length > 0 && !agentSupportedFileTypes.value.some((value: string) => String(value).replace(/^\./, '').toLowerCase() === extension)) {
+    return `当前智能体不支持该文件类型：${file.name}`;
+  }
+  if (isImageFile(file) && !isImageUploadEnabledByAgent.value) {
+    return t('input.imageUploadDisabledByAgent');
+  }
+  if (isAudioFile(file) && (!currentAgentConfig.value?.audio_upload_enabled || !String(currentAgentConfig.value?.asr_model_id || '').trim())) {
+    return `当前智能体未配置语音解析模型：${file.name}`;
+  }
+  return undefined;
+};
 
 // 智能体配置的工具列表，驱动 @ 菜单的 KB 兼容性过滤
 const agentAllowedTools = computed<string[]>(() => {
@@ -521,6 +509,18 @@ const props = defineProps({
     required: false
   },
   embeddedMode: {
+    type: Boolean,
+    default: false
+  },
+  inert: {
+    type: Boolean,
+    default: false
+  },
+  uploadRows: {
+    type: Array,
+    default: () => []
+  },
+  uploadsPreparing: {
     type: Boolean,
     default: false
   }
@@ -1696,6 +1696,7 @@ onMounted(() => {
     loadChatModels(),
     loadAgents(),
     loadMCPServices(),
+    editorResources.ensureParserEngines(),
   ]);
   window.addEventListener(CHAT_FILE_DROP_EVENT, handleChatFileDrop as EventListener);
 
@@ -1775,6 +1776,8 @@ watch(() => uiStore.showSettingsModal, (visible, prevVisible) => {
 const emit = defineEmits<{
   (e: 'send-msg', query: string, modelId: string, mentionedItems: MentionRequestItem[], imageFiles: File[], attachmentFiles: AttachmentFile[]): void;
   (e: 'stop-generation'): void;
+  (e: 'upload-retry', key: string): void;
+  (e: 'upload-cancel'): void;
 }>();
 
 const createSession = async (val: string) => {
@@ -1874,8 +1877,8 @@ const createSession = async (val: string) => {
     service_id: item.serviceId,
     skill_name: item.skillName,
   }));
-  const imageFiles = uploadedImages.value.map(img => img.file);
-  const attachmentFiles = uploadedAttachments.value.map(attachment => ({ ...attachment }));
+  const imageFiles = getUploadedImages();
+  const attachmentFiles = getUploadedAttachments();
 
   // Blur the textarea BEFORE emitting, so that when the parent navigates away
   // and Vue unmounts this component, TDesign's blur handler won't fire on a
@@ -2400,23 +2403,21 @@ defineExpose({
 </script>
 <template>
   <div class="answers-input" :class="{ 'is-embedded': embeddedMode }" @drop="onDrop" @dragover="onDragOver">
-    <!-- Hidden file input for image upload -->
-    <input ref="imageInputRef" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/tiff" multiple
-      style="display:none" @change="handleImageSelect" />
     <!-- 富文本输入框容器 -->
     <div class="rich-input-container" data-guide="chat-input">
-      <!-- 图片预览区域 -->
-      <div v-if="uploadedImages.length > 0" class="image-preview-bar">
-        <div v-for="(img, idx) in uploadedImages" :key="idx" class="image-preview-item">
-          <img :src="img.preview" class="image-preview-thumb" />
-          <span class="image-preview-remove" @click="removeImage(idx)">×</span>
-        </div>
-      </div>
-
-      <!-- 附件列表区域 (由 AttachmentUpload 组件渲染) -->
-      <AttachmentUpload ref="attachmentUploadRef" :max-files="CHAT_ATTACHMENT_MAX_FILES" :max-size="CHAT_UPLOAD_MAX_MB"
-        :supported-file-types="agentSupportedFileTypes"
-        @update:files="uploadedAttachments = $event" />
+      <!-- 文件、图片、语音共用一组卡片和一个文件入口；卡片只使用通用文件图标。 -->
+      <ChatUploadCards
+        ref="uploadCardsRef"
+        :files="uploadedFiles"
+        :rows="props.uploadRows"
+        :max-files="CHAT_ATTACHMENT_MAX_FILES"
+        :supported-file-types="parserFileTypes"
+        :disabled="Boolean(props.inert)"
+        :validating-file="validateComposerFile"
+        @update:files="handleComposerFilesUpdate"
+        @retry="emit('upload-retry', $event)"
+        @cancel="emit('upload-cancel')"
+      />
 
       <!-- 选中的知识库、文件和 Skill 标签（显示在输入框内顶部） -->
       <div v-if="allSelectedItems.length > 0 || selectedSkillNames.length > 0 || selectedProfessionalSkillNames.length > 0" class="selected-tags-inline">

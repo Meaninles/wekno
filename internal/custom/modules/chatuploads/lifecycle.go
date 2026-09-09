@@ -19,7 +19,29 @@ func (s *Service) DeleteSessionUploads(ctx context.Context, tenantID uint64, own
 	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND chat_owner_id = ? AND chat_session_id IN ?", tenantID, owner, sessionIDs).Find(&rows).Error; err != nil {
 		return err
 	}
-	return s.deleteOrphans(ctx, rows)
+	if err := s.deleteOrphans(ctx, rows); err != nil {
+		return err
+	}
+	var originals []*OriginalUpload
+	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND owner_id = ? AND session_id IN ? AND deleted_at IS NULL", tenantID, owner, sessionIDs).Find(&originals).Error; err != nil {
+		return err
+	}
+	var failures []error
+	for _, row := range originals {
+		if err := s.withAcceptance(ctx, &types.Session{ID: row.SessionID, TenantID: row.TenantID}, func() error {
+			var alive int64
+			if err := s.db.WithContext(ctx).Model(&types.Session{}).Where("id = ? AND tenant_id = ?", row.SessionID, row.TenantID).Count(&alive).Error; err != nil {
+				return err
+			}
+			if alive > 0 {
+				return nil
+			}
+			return s.deleteOriginalRow(ctx, row)
+		}); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (s *Service) sweep(ctx context.Context) error {
@@ -31,7 +53,23 @@ func (s *Service) sweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.deleteOrphans(ctx, rows)
+	if err := s.deleteOrphans(ctx, rows); err != nil {
+		return err
+	}
+	var originals []*OriginalUpload
+	if err := s.db.WithContext(ctx).Raw(`SELECT o.* FROM custom_chat_original_uploads o
+		WHERE o.deleted_at IS NULL AND NOT EXISTS
+		(SELECT 1 FROM sessions ss WHERE ss.id = o.session_id AND ss.tenant_id = o.tenant_id AND ss.deleted_at IS NULL)
+		ORDER BY o.created_at, o.id LIMIT 100`).Scan(&originals).Error; err != nil {
+		return err
+	}
+	var failures []error
+	for _, row := range originals {
+		if err := s.deleteOriginalRow(ctx, row); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (s *Service) deleteOrphans(ctx context.Context, rows []types.KnowledgeBase) error {

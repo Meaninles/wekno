@@ -68,6 +68,7 @@ type AgentConfig struct {
 	// Runtime-only fields (not persisted)
 	RuntimeModelID           string                    `json:"-"` // Chat model ID selected for the current agent run.
 	VLMModelID               string                    `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
+	ASRModelID               string                    `json:"-"` // ASR model ID for Agent-kernel audio transcription (set from CustomAgent config)
 	LightweightSkillContext  string                    `json:"-"` // Platform-resolved lightweight Skill system instructions for this run.
 	RuntimeLightweightSkills []RuntimeLightweightSkill `json:"-"`
 	// DurableUserContext is the bounded, user-only source ledger for completed

@@ -89,6 +89,9 @@ func (s *sessionService) BuildAgentRuntimeConfig(
 	if req.CustomAgent.Config.VLMModelID != "" {
 		agentConfig.VLMModelID = req.CustomAgent.Config.VLMModelID
 	}
+	if req.CustomAgent.Config.AudioUploadEnabled && req.CustomAgent.Config.ASRModelID != "" {
+		agentConfig.ASRModelID = req.CustomAgent.Config.ASRModelID
+	}
 
 	effectiveModelID, err := s.resolveChatModelID(ctx, req, agentConfig.KnowledgeBases, agentConfig.KnowledgeIDs)
 	if err != nil {

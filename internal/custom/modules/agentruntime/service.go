@@ -198,7 +198,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		DocumentTemplateContext: documentTemplateContextSpec(ctx, agentConfig),
 		VisibleContext:          s.buildVisibleContext(ctx, req, agentConfig),
 		ProfessionalSkills:      professionalSkills,
-		Tools:                   runtimeToolSpecs(registry),
+		Tools:                   runtimeToolSpecsWithInputs(registry, originalInputFiles, agentConfig),
 		RuntimeConfig:           runtimeConfigSpec(agentConfig),
 		LLM:                     llm,
 		ToolCallbackURL:         toolCallbackURL(),
@@ -220,7 +220,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		return err
 	}
 	role, _ := ctx.Value(types.TenantRoleContextKey).(types.TenantRole)
-	scope := RunScope{TenantRole: role, Config: agentConfig, ModelID: agentConfig.RuntimeModelID, ModelTenantID: agentConfig.AgentTenantID, VLMModelID: agentConfig.VLMModelID, SearchTargets: agentConfig.SearchTargets, PinnedMCPServiceIDs: agentConfig.PinnedMCPServiceIDs, PinnedSkillNames: agentConfig.PinnedSkillNames, RuntimeAttachments: agentConfig.RuntimeAttachments, NonInteractiveOAuth: types.IsMCPOAuthNonInteractive(ctx)}
+	scope := RunScope{TenantRole: role, Config: agentConfig, ModelID: agentConfig.RuntimeModelID, ModelTenantID: agentConfig.AgentTenantID, VLMModelID: agentConfig.VLMModelID, ASRModelID: agentConfig.ASRModelID, SearchTargets: agentConfig.SearchTargets, PinnedMCPServiceIDs: agentConfig.PinnedMCPServiceIDs, PinnedSkillNames: agentConfig.PinnedSkillNames, RuntimeAttachments: agentConfig.RuntimeAttachments, NonInteractiveOAuth: types.IsMCPOAuthNonInteractive(ctx)}
 	scope.LightweightSkills = lightweightSkills
 	scopeJSON, err := json.Marshal(scope)
 	if err != nil {

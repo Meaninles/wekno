@@ -68,6 +68,7 @@ type CreateKnowledgeQARequest struct {
 	Images            []ImageAttachment  `json:"images"`                       // Attached images for multimodal chat
 	AttachmentUploads []AttachmentUpload `json:"attachment_uploads,omitempty"` // Attached files (documents, audio, etc.)
 	UploadIDs         []string           `json:"upload_ids,omitempty"`         // Ready session-bound files, sent without original bytes.
+	InputFileIDs      []string           `json:"input_file_ids,omitempty"`     // Agent originals, sent without parser/vectorization.
 	Channel           string             `json:"channel"`                      // Source channel: "web", "api", "im", etc.
 }
 

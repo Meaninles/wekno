@@ -61,6 +61,7 @@ type RunScope struct {
 	ModelID             string                   `json:"model_id"`
 	ModelTenantID       uint64                   `json:"model_tenant_id"`
 	VLMModelID          string                   `json:"vlm_model_id"`
+	ASRModelID          string                   `json:"asr_model_id"`
 	SearchTargets       types.SearchTargets      `json:"search_targets"`
 	PinnedMCPServiceIDs []string                 `json:"pinned_mcp_service_ids"`
 	PinnedSkillNames    []string                 `json:"pinned_skill_names"`
@@ -71,7 +72,7 @@ type RunScope struct {
 
 func (scope *RunScope) config() *types.AgentConfig {
 	c := scope.Config
-	c.RuntimeModelID, c.AgentTenantID, c.VLMModelID = scope.ModelID, scope.ModelTenantID, scope.VLMModelID
+	c.RuntimeModelID, c.AgentTenantID, c.VLMModelID, c.ASRModelID = scope.ModelID, scope.ModelTenantID, scope.VLMModelID, scope.ASRModelID
 	c.SearchTargets, c.PinnedMCPServiceIDs, c.PinnedSkillNames = scope.SearchTargets, scope.PinnedMCPServiceIDs, scope.PinnedSkillNames
 	c.RuntimeAttachments = scope.RuntimeAttachments
 	c.RuntimeLightweightSkills = nil

@@ -45,7 +45,7 @@ export function useStream() {
   let renderTimer: number | null = null
 
   // 启动流式请求
-  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; skill_names?: string[]; professional_skill_names?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; upload_ids?: string[]; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
+  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; skill_names?: string[]; professional_skill_names?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; upload_ids?: string[]; input_file_ids?: string[]; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
     const myGeneration = ++streamGeneration
     // 重置状态
     output.value = '';
@@ -147,6 +147,7 @@ export function useStream() {
         postBody.mentioned_items = params.mentioned_items;
       }
       if (params.upload_ids?.length) postBody.upload_ids = params.upload_ids;
+      if (params.input_file_ids?.length) postBody.input_file_ids = params.input_file_ids;
       postBody.channel = embedToken ? "embed" : "web";
 
       lastStreamRequest.value = {

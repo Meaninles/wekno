@@ -1,5 +1,5 @@
 import type { SessionLastRequestStatePayload } from "@/stores/settings";
-import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
+import type { AttachmentFile } from "@/custom/modules/chatuploads/types";
 import { MessagePlugin } from 'tdesign-vue-next';
 import { draftKey, fileId, flushDraft, readDraft, writeDraft } from './storage';
 

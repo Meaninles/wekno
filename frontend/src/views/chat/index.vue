@@ -626,8 +626,15 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
 
     saveSessionDraftState(requestSessionId, requestSettings, attachmentFiles, imageFiles, value);
     let uploadIds = [];
+    let inputFileIds = [];
     try {
-        uploadIds = await prepareUploads([...imageFiles, ...attachmentFiles.map(a => a.file)], { sessionId: requestSessionId, agentId: selectedAgentId });
+        const prepared = await prepareUploads([...imageFiles, ...attachmentFiles.map(a => a.file)], {
+            sessionId: requestSessionId,
+            agentId: selectedAgentId,
+            directInput: agentEnabled,
+        });
+        uploadIds = prepared.uploadIds;
+        inputFileIds = prepared.inputFileIds;
     } catch (error) {
         if (requestSessionId !== String(session_id.value)) return;
         inputFieldRef.value?.restoreQuery(value);
@@ -671,6 +678,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         tag_ids: tagIds,
         mentioned_items: mentionedItems,
         upload_ids: uploadIds,
+        input_file_ids: inputFileIds,
         query: requestQuery,
         method: 'POST',
         url: endpoint,

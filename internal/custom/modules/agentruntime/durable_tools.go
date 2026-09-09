@@ -19,7 +19,7 @@ import (
 
 func toolReadOnly(name string) bool {
 	switch name {
-	case "knowledge_search", "grep_chunks", "list_knowledge_chunks", "get_document_info", "query_knowledge_graph", "web_search", "web_fetch", "wiki_search", "wiki_read_page", "wiki_read_source_doc", "read_skill", "get_conversation_history", "read_conversation", "db_catalog", "db_schema", "db_query", "table_schema", "table_analysis", "data_schema", "data_analysis":
+	case "knowledge_search", "grep_chunks", "list_knowledge_chunks", "get_document_info", "query_knowledge_graph", "web_search", "web_fetch", "wiki_search", "wiki_read_page", "wiki_read_source_doc", "read_skill", "get_conversation_history", "read_conversation", "db_catalog", "db_schema", "db_query", "table_schema", "table_analysis", "data_schema", "data_analysis", ToolTranscribeInputFile:
 		return true
 	default:
 		return false
@@ -172,7 +172,13 @@ func (s *Service) callTool(ctx context.Context, req ToolCallRequest) (*ToolCallR
 		return nil, err
 	}
 	started := time.Now()
-	result, callErr := registry.ExecuteTool(toolCtx, req.ToolName, req.Arguments)
+	var result *types.ToolResult
+	var callErr error
+	if req.ToolName == ToolTranscribeInputFile {
+		result, callErr = s.transcribeInputFile(toolCtx, row, requestPayload, arguments, config)
+	} else {
+		result, callErr = registry.ExecuteTool(toolCtx, req.ToolName, req.Arguments)
+	}
 	if result == nil {
 		result = &types.ToolResult{Success: false, Error: "tool returned no result"}
 	}

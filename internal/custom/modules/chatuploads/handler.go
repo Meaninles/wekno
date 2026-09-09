@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
@@ -34,9 +35,15 @@ func (h *Handler) Register(group *gin.RouterGroup) {
 
 func descriptor(k *types.Knowledge) gin.H {
 	return gin.H{"id": k.ID, "upload_id": k.GetMetadata()["chat_upload_id"], "upload_ids": uploadIDs(k), "file_name": k.FileName, "file_type": k.FileType,
-		"file_size": k.FileSize, "knowledge_id": k.ID, "knowledge_base_id": k.KnowledgeBaseID,
+		"original_input": false,
+		"file_size":      k.FileSize, "knowledge_id": k.ID, "knowledge_base_id": k.KnowledgeBaseID,
 		"parse_status": k.ParseStatus, "core_status": k.CoreStatus, "ready": ready(k), "error": k.ErrorMessage,
 		"processing_generation": k.ProcessingGeneration, "published_generation": k.PublishedGeneration, "updated_at": k.UpdatedAt}
+}
+func originalDescriptor(row *OriginalUpload) gin.H {
+	return gin.H{"id": row.ID, "upload_id": row.ID, "upload_ids": []string{row.ID}, "input_file_id": row.ID, "input_file_ids": []string{row.ID},
+		"file_name": row.FileName, "file_type": "." + row.FileType, "file_size": row.FileSize, "knowledge_id": "", "knowledge_base_id": "",
+		"original_input": true, "parse_status": "ready", "core_status": "ready", "ready": true, "error": "", "updated_at": row.UpdatedAt}
 }
 func fail(c *gin.Context, err error) {
 	status := http.StatusBadRequest
@@ -48,7 +55,14 @@ func fail(c *gin.Context, err error) {
 	if errors.As(err, &tooLarge) || errors.Is(err, ErrTooLarge) {
 		status = http.StatusRequestEntityTooLarge
 	}
-	c.JSON(status, gin.H{"success": false, "error": err.Error()})
+	body := gin.H{"success": false, "error": err.Error()}
+	if errors.Is(err, ErrTooLarge) || errors.As(err, &tooLarge) {
+		body["code"] = "CHAT_UPLOAD_FILE_TOO_LARGE"
+		body["max_file_bytes"] = MaxFileBytes
+		body["max_file_size_mib"] = MaxFileBytes / (1024 * 1024)
+		body["knowledge_base_hint"] = "文件过大时，可先上传到知识库，等待解析成功后，在对话中选择知识库文件进行问答。"
+	}
+	c.JSON(status, body)
 }
 func (h *Handler) Upload(c *gin.Context) {
 	// Authentication/session validation happens before reading a large body.
@@ -72,6 +86,19 @@ func (h *Handler) Upload(c *gin.Context) {
 		fail(c, err)
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(c.PostForm("mode")), "original") {
+		if agent == nil || !agent.IsAgentMode() {
+			fail(c, errors.New("original file mode is available only for Agent conversations"))
+			return
+		}
+		row, err := h.service.UploadOriginal(c.Request.Context(), c.Param("session_id"), c.PostForm("upload_id"), files[0])
+		if err != nil {
+			fail(c, err)
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"success": true, "data": originalDescriptor(row)})
+		return
+	}
 	k, err := h.service.Upload(c.Request.Context(), c.Param("session_id"), c.PostForm("upload_id"), files[0], agent)
 	if err != nil {
 		fail(c, err)
@@ -89,9 +116,21 @@ func (h *Handler) List(c *gin.Context) {
 	for _, row := range rows {
 		out = append(out, descriptor(row))
 	}
+	originals, err := h.service.ListOriginal(c.Request.Context(), c.Param("session_id"))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	for _, row := range originals {
+		out = append(out, originalDescriptor(row))
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": out, "max_file_bytes": MaxFileBytes})
 }
 func (h *Handler) Get(c *gin.Context) {
+	if row, err := h.service.GetOriginal(c.Request.Context(), c.Param("session_id"), c.Param("id")); err == nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": originalDescriptor(row)})
+		return
+	}
 	k, err := h.service.Get(c.Request.Context(), c.Param("session_id"), c.Param("id"))
 	if err != nil {
 		fail(c, err)
@@ -100,6 +139,18 @@ func (h *Handler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": descriptor(k)})
 }
 func (h *Handler) Download(c *gin.Context) {
+	if reader, name, contentType, err := h.service.OpenOriginal(c.Request.Context(), c.Param("session_id"), c.Param("id")); err == nil {
+		defer reader.Close()
+		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		c.Header("Content-Type", contentType)
+		c.Header("Cache-Control", "private, no-store")
+		c.Status(http.StatusOK)
+		_, _ = io.Copy(c.Writer, reader)
+		return
+	}
 	k, err := h.service.Get(c.Request.Context(), c.Param("session_id"), c.Param("id"))
 	if err != nil {
 		fail(c, err)
@@ -122,6 +173,10 @@ func (h *Handler) Download(c *gin.Context) {
 	_, _ = io.Copy(c.Writer, f)
 }
 func (h *Handler) Retry(c *gin.Context) {
+	if _, err := h.service.GetOriginal(c.Request.Context(), c.Param("session_id"), c.Param("id")); err == nil {
+		fail(c, errors.New("original input files do not require parsing or retry"))
+		return
+	}
 	k, err := h.service.Get(c.Request.Context(), c.Param("session_id"), c.Param("id"))
 	if err != nil {
 		fail(c, err)
@@ -139,6 +194,10 @@ func (h *Handler) Retry(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"success": true, "data": descriptor(k)})
 }
 func (h *Handler) Cancel(c *gin.Context) {
+	if _, err := h.service.GetOriginal(c.Request.Context(), c.Param("session_id"), c.Param("id")); err == nil {
+		fail(c, errors.New("original input files do not require parsing or cancellation"))
+		return
+	}
 	k, err := h.service.Get(c.Request.Context(), c.Param("session_id"), c.Param("id"))
 	if err != nil {
 		fail(c, err)
@@ -152,6 +211,14 @@ func (h *Handler) Cancel(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"success": true, "data": descriptor(k)})
 }
 func (h *Handler) Delete(c *gin.Context) {
+	if _, err := h.service.GetOriginal(c.Request.Context(), c.Param("session_id"), c.Param("id")); err == nil {
+		if err = h.service.DeleteOriginal(c.Request.Context(), c.Param("session_id"), c.Param("id")); err != nil {
+			fail(c, err)
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"success": true})
+		return
+	}
 	k, err := h.service.Get(c.Request.Context(), c.Param("session_id"), c.Param("id"))
 	if err != nil {
 		fail(c, err)

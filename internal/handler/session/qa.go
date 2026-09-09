@@ -44,12 +44,13 @@ type qaRequestContext struct {
 	webSearchEnabled          bool
 	enableMemory              bool // Whether memory feature is enabled
 	mentionedItems            types.MentionedItems
-	effectiveTenantID         uint64                   // when using shared agent, tenant ID for model/KB/MCP resolution; 0 = use context tenant
-	images                    []ImageAttachment        // Uploaded images with analysis text
-	userMessageID             string                   // Created user message ID (populated after createUserMessage)
-	channel                   string                   // Source channel: "web", "api", "im", etc.
-	attachments               types.MessageAttachments // Processed file attachments
-	chatQueueTicket           ChatQueueTicket          // Conversation-level model-pool admission lease
+	effectiveTenantID         uint64                    // when using shared agent, tenant ID for model/KB/MCP resolution; 0 = use context tenant
+	images                    []ImageAttachment         // Uploaded images with analysis text
+	userMessageID             string                    // Created user message ID (populated after createUserMessage)
+	channel                   string                    // Source channel: "web", "api", "im", etc.
+	attachments               types.MessageAttachments  // Processed file attachments
+	originalInputFiles        []types.OriginalInputFile // Agent originals; never parsed or vectorized
+	chatQueueTicket           ChatQueueTicket           // Conversation-level model-pool admission lease
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -79,6 +80,37 @@ func attachmentFileTypeAllowed(fileName string, supportedFileTypes []string) boo
 	return false
 }
 
+func appendUniqueMessageAttachments(dst, src types.MessageAttachments) types.MessageAttachments {
+	seen := make(map[string]bool, len(dst)+len(src))
+	for _, item := range dst {
+		key := item.UploadID + "\x00" + item.KnowledgeID + "\x00" + item.FileName
+		seen[key] = true
+	}
+	for _, item := range src {
+		key := item.UploadID + "\x00" + item.KnowledgeID + "\x00" + item.FileName
+		if !seen[key] {
+			dst = append(dst, item)
+			seen[key] = true
+		}
+	}
+	return dst
+}
+
+func appendUniqueOriginalInputs(dst, src []types.OriginalInputFile) []types.OriginalInputFile {
+	seen := make(map[string]bool, len(dst)+len(src))
+	for _, item := range dst {
+		seen[item.ID] = true
+	}
+	for _, item := range src {
+		if item.ID == "" || seen[item.ID] {
+			continue
+		}
+		dst = append(dst, item)
+		seen[item.ID] = true
+	}
+	return dst
+}
+
 // buildQARequest converts the qaRequestContext into a types.QARequest for service invocation.
 func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 	imageURLs, imageDescription := extractImageURLsAndOCRText(rc.images)
@@ -102,6 +134,7 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		WebSearchEnabled:          rc.webSearchEnabled,
 		EnableMemory:              rc.enableMemory,
 		Attachments:               rc.attachments,
+		OriginalInputFiles:        append([]types.OriginalInputFile(nil), rc.originalInputFiles...),
 	}
 }
 
@@ -180,6 +213,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	// Manual originals are accepted by the session upload endpoint before chat.
 	// The request contains stable handles, never a synchronous document parse.
 	var processedAttachments types.MessageAttachments
+	var originalInputFiles []types.OriginalInputFile
 	var sessionUploadKnowledgeIDs []string
 	// Staged sources use the same retrieval and paged tools as knowledge files.
 	if len(request.UploadIDs) > 0 {
@@ -194,6 +228,20 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		sessionUploadKnowledgeIDs = append(sessionUploadKnowledgeIDs, targets...)
 		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, targets...))
 	}
+	if len(request.InputFileIDs) > 0 {
+		if !request.AgentEnabled {
+			return nil, nil, errors.NewBadRequestError("input_file_ids are available only for Agent conversations")
+		}
+		if h.uploadResolver == nil {
+			return nil, nil, errors.NewInternalServerError("chat uploads are unavailable")
+		}
+		attachments, originals, err := h.uploadResolver.ResolveOriginalInputs(ctx, sessionID, request.InputFileIDs)
+		if err != nil {
+			return nil, nil, errors.NewBadRequestError(err.Error())
+		}
+		processedAttachments = append(processedAttachments, attachments...)
+		originalInputFiles = append(originalInputFiles, originals...)
+	}
 
 	if h.uploadResolver != nil && customAgent != nil && customAgent.Config.MultiTurnEnabled {
 		historyTargets, err := h.uploadResolver.HistoryTargets(ctx, sessionID)
@@ -202,6 +250,12 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		}
 		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, historyTargets...))
 		sessionUploadKnowledgeIDs = append(sessionUploadKnowledgeIDs, historyTargets...)
+		historyAttachments, historyOriginals, err := h.uploadResolver.HistoryOriginalInputs(ctx, sessionID)
+		if err != nil {
+			return nil, nil, errors.NewBadRequestError(err.Error())
+		}
+		processedAttachments = appendUniqueMessageAttachments(processedAttachments, historyAttachments)
+		originalInputFiles = appendUniqueOriginalInputs(originalInputFiles, historyOriginals)
 	}
 
 	// Resolve enable_memory:
@@ -258,6 +312,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		images:                    request.Images,
 		channel:                   request.Channel,
 		attachments:               processedAttachments,
+		originalInputFiles:        originalInputFiles,
 		sessionUploadKnowledgeIDs: dedupRequestStrings(sessionUploadKnowledgeIDs),
 		reqAgentEnabled:           request.AgentEnabled,
 		reqAgentID:                request.AgentID,

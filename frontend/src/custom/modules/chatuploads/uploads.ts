@@ -1,5 +1,5 @@
 import { onScopeDispose, ref } from 'vue'
-import { get, post, postUpload } from '@/utils/request'
+import { del, get, post, postUpload } from '@/utils/request'
 import { draftKey, embedDraftScope, flushDraft, uploadBinding } from '../sessionState/storage'
 
 import { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES } from './limits'
@@ -11,11 +11,13 @@ export function chatImagePlaceholder(): string {
   return 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80"><rect width="80" height="80" rx="8" fill="#edf1f5"/><path d="M20 20h40v40H20zM20 53l13-13 10 9 7-6 10 10" fill="none" stroke="#607080" stroke-width="3"/><circle cx="48" cy="32" r="4" fill="#607080"/></svg>')
 }
 
-type Source = { id: string; upload_ids: string[]; file_name: string; ready: boolean; parse_status: string; core_status: string; error?: string }
+type Source = { id: string; upload_ids: string[]; input_file_ids?: string[]; input_file_id?: string; file_name: string; ready: boolean; parse_status: string; core_status: string; original_input?: boolean; error?: string }
 export type UploadRow = { key: string; name: string; state: 'queued' | 'uploading' | 'processing' | 'ready' | 'failed' | 'cancelled'; error?: string; source?: Source }
-type Context = { sessionId: string; agentId?: string; channelId?: string; token?: string; sessionSig?: string; visitorId?: string }
+type Context = { sessionId: string; agentId?: string; channelId?: string; token?: string; sessionSig?: string; visitorId?: string; directInput?: boolean }
 type Reply<T> = { success: boolean; data: T }
 const cancelled = () => new DOMException('已取消文件处理，输入内容已保留', 'AbortError')
+export const chatUploadLimitMessage = (name = '文件') =>
+  `${name}：文件和图片每个最大 ${CHAT_UPLOAD_MAX_MB} MiB，且不能为空。文件过大时，可先上传到知识库，等待解析成功后，在对话中选择知识库文件进行问答。`
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(cancelled())
@@ -41,12 +43,12 @@ export function useChatUploads() {
   }
   onScopeDispose(detach)
 
-  async function prepare(files: File[], ctx: Context): Promise<string[]> {
-    if (!files.length) return []
+  async function prepare(files: File[], ctx: Context): Promise<{ uploadIds: string[]; inputFileIds: string[] }> {
+    if (!files.length) return { uploadIds: [], inputFileIds: [] }
     if (preparing.value) throw new Error('文件仍在处理中')
     if (!ctx.sessionId) throw new Error('请先创建对话')
     for (const file of files) {
-      if (!file.size || file.size > CHAT_UPLOAD_MAX_BYTES) throw new Error(`${file.name}：文件和图片每个最大 ${CHAT_UPLOAD_MAX_MB} MiB，且不能为空`)
+      if (!file.size || file.size > CHAT_UPLOAD_MAX_BYTES) throw new Error(chatUploadLimitMessage(file.name))
     }
     const uniqueFiles = [...new Set(files)]
     const endpoint = ctx.channelId
@@ -64,12 +66,18 @@ export function useChatUploads() {
     cancelAccepted = async () => {
       // A dropped upload response can still have committed. Recover by the
       // caller's stable ID, then cancel only this batch's accepted sources.
-      const known = new Set(bound.flatMap(b => b.sourceId ? [b.sourceId] : []))
+      const known = new Map<string, boolean>()
       try {
         const res = await get<Reply<Source[]>>(endpoint, { headers })
-        for (const source of res.data) if (bound.some(b => source.upload_ids.includes(b.uploadId))) known.add(source.id)
+        for (const source of res.data) {
+          if (bound.some(b => source.upload_ids.includes(b.uploadId))) known.set(source.id, !!source.original_input)
+        }
       } catch { /* Preserve originals if cancellation cannot reach the server. */ }
-      await Promise.allSettled([...known].map(id => post(`${endpoint}/${id}/cancel`, {}, { headers })))
+      await Promise.allSettled([...known].map(([id, original]) =>
+        original
+          ? del(`${endpoint}/${id}`, undefined, { headers })
+          : post(`${endpoint}/${id}/cancel`, {}, { headers }),
+      ))
     }
     const waitForRetry = (row: UploadRow) => new Promise<void>((resolve, reject) => {
       if (active.signal.aborted) return reject(cancelled())
@@ -77,7 +85,7 @@ export function useChatUploads() {
       active.signal.addEventListener('abort', abort, { once: true })
       retries.set(row.key, () => { retries.delete(row.key); active.signal.removeEventListener('abort', abort); resolve() })
     })
-    async function process(index: number): Promise<string> {
+    async function process(index: number): Promise<Source> {
       const row = rows.value[index], binding = bound[index], file = uniqueFiles[index]
       while (!active.signal.aborted) {
         try {
@@ -93,6 +101,7 @@ export function useChatUploads() {
             form.append('file', file, file.name)
             form.append('upload_id', binding.uploadId)
             form.append('agent_id', ctx.agentId || '')
+            if (ctx.directInput) form.append('mode', 'original')
             let attempts = 0
             while (true) {
               try {
@@ -122,7 +131,7 @@ export function useChatUploads() {
             row.source = source
           }
           row.state = 'ready'
-          return source.id
+          return source
         } catch (error: any) {
           if (active.signal.aborted) { row.state = 'cancelled'; throw cancelled() }
           row.state = 'failed'
@@ -138,11 +147,17 @@ export function useChatUploads() {
       if (active.signal.aborted) throw cancelled()
       rows.value.forEach((row, i) => { row.key = bound[i].uploadId })
       let next = 0
-      const results: string[] = new Array(uniqueFiles.length)
+      const results: Source[] = new Array(uniqueFiles.length)
       await Promise.all(Array.from({ length: Math.min(2, uniqueFiles.length) }, async () => {
-        while (next < uniqueFiles.length) { const index = next++; results[index] = await process(index) }
+        while (next < uniqueFiles.length) {
+          const index = next++
+          results[index] = await process(index)
+        }
       }))
-      return [...new Set(results)]
+      return {
+        uploadIds: [...new Set(results.filter(source => !source.original_input).map(source => source.id))],
+        inputFileIds: [...new Set(results.filter(source => source.original_input).map(source => source.input_file_id || source.id))],
+      }
     } finally {
       retries.clear()
       preparing.value = false

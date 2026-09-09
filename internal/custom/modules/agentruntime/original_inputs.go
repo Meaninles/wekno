@@ -256,6 +256,19 @@ func resolveOriginalInputFileService(ctx context.Context, _ interfaces.FileServi
 	return svc
 }
 
+// NewOriginalInputFileService creates the private object store used for files
+// that are handed to the Agent Harness without entering the knowledge-base
+// parser/vector pipeline. It is intentionally the same provider factory used
+// by run-time reads so an accepted upload and a later Agent tool call cannot
+// drift to different storage namespaces.
+func NewOriginalInputFileService() (interfaces.FileService, error) {
+	provider := originalInputStorageProvider()
+	if provider == "" {
+		return nil, nil
+	}
+	return newOriginalInputFileService(provider)
+}
+
 // originalInputStorageProvider keeps deployment compatibility:
 // explicit AGENT_RUNTIME_ORIGINAL_INPUT_* config wins, otherwise an
 // existing STORAGE_TYPE=obs/minio deployment is reused with the dedicated

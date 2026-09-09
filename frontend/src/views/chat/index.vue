@@ -70,9 +70,10 @@
                 :rejection="queueRejectionNotice"
                 @close="queueRejectionNotice = null"
             />
-            <ChatUploadProgress :rows="uploadRows" :preparing="uploadsPreparing" @retry="retryUpload" @cancel="cancelUploads" />
-            <InputField ref="inputFieldRef" :inert="uploadsPreparing || undefined"
+            <InputField ref="inputFieldRef"
+                :upload-rows="uploadRows" :uploads-preparing="uploadsPreparing"
                 @send-msg="(query, modelId, mentionedItems, imageFiles, attachmentFiles) => sendMsg(query, modelId, mentionedItems, imageFiles, attachmentFiles)"
+                @files-changed="preloadInputUploads" @upload-retry="retryUpload" @upload-cancel="cancelUploads"
                 @stop-generation="handleStopGeneration" :isReplying="isReplying" :sessionId="session_id"
                 :assistantMessageId="currentAssistantMessageId" :embeddedMode="embeddedMode"></InputField>
         </div>
@@ -83,7 +84,6 @@
 </template>
 <script setup>
 import { useChatUploads, chatImagePlaceholder, CHAT_UPLOAD_MAX_BYTES, CHAT_UPLOAD_MAX_MB } from '@/custom/modules/chatuploads/uploads'
-import ChatUploadProgress from '@/custom/modules/chatuploads/ChatUploadProgress.vue'
 const { rows: uploadRows, preparing: uploadsPreparing, prepare: prepareUploads, retry: retryUpload, cancel: cancelUploads, detach: detachUploads } = useChatUploads()
 
 import { storeToRefs } from 'pinia';
@@ -189,6 +189,20 @@ const inputFieldRef = ref();
 
 const getInputAttachments = () => inputFieldRef.value?.getUploadedAttachments?.() || [];
 const getInputImages = () => inputFieldRef.value?.getUploadedImages?.() || [];
+
+// Start the durable upload as soon as the user selects files. Sending while
+// this promise is pending simply awaits the same batch in sendMsg.
+const preloadInputUploads = (files) => {
+    if (!files?.length || !session_id.value) return;
+    const agentEnabled = useSettingsStoreInstance.isAgentStreamMode;
+    void prepareUploads(files.map((item) => item.file), {
+        sessionId: String(session_id.value),
+        agentId: useSettingsStoreInstance.selectedAgentId || '',
+        directInput: agentEnabled,
+    }).catch((error) => {
+        if (error?.name !== 'AbortError') MessagePlugin.error(error?.message || '文件处理失败');
+    });
+};
 
 const saveCurrentConversationDraft = () => {
     if (props.embeddedMode || !session_id.value) return;
@@ -548,7 +562,6 @@ const handleQueueCancel = async (messageId) => {
 };
 
 const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = [], attachmentFiles = []) => {
-    if (uploadsPreparing.value) return;
     stopStream();
     prepareForNewOutgoingMessage();
     isReplying.value = true;
@@ -646,6 +659,10 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         return;
     }
     if (requestSessionId !== String(session_id.value)) return;
+    // The successful upload is now represented by the user message. Keep the
+    // cards visible while it was preparing, then clear only the composer files
+    // before the next turn; the catch path restores them if stream setup fails.
+    inputFieldRef.value?.clearFiles?.();
     // 将@提及的知识库和文件信息存入用户消息
     const optimisticUserMessage = { content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' };
     messagesList.push(optimisticUserMessage);

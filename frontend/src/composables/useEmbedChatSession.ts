@@ -273,7 +273,6 @@ export function useEmbedChatSession(options: {
     value: string,
     opts: { webSearchEnabled?: boolean; imageFiles?: File[]; attachmentFiles?: File[] } = {},
   ) => {
-    if (uploadsPreparing.value) return
     stopStream()
     prepareForNewOutgoingMessage()
     const outboundQuery = buildQueryWithHostContext(value, options.hostContext?.value)
@@ -415,7 +414,7 @@ export function useEmbedChatSession(options: {
   })
 
   return {
-    uploadRows, uploadsPreparing, retryUpload, cancelUploads,
+    uploadRows, uploadsPreparing, prepareUploads, retryUpload, cancelUploads,
     messagesList,
     loading,
     isReplying,

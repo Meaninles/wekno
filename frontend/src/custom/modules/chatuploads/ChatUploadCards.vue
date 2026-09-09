@@ -135,7 +135,7 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
 </script>
 
 <template>
-  <div v-if="files.length || rows.length" class="chat-upload-cards" aria-live="polite">
+  <div v-if="files.length || rows.some((row) => row.state !== 'ready')" class="chat-upload-cards" aria-live="polite">
     <input ref="inputRef" type="file" multiple hidden :accept="accept" @change="handleSelect" />
     <div v-for="(file, index) in files" :key="file.id" class="chat-upload-card">
       <div class="chat-upload-card__progress" :class="`is-${rowFor(index, file)?.state || 'queued'}`" aria-hidden="true">
@@ -154,11 +154,12 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
           {{ rowStatus(rowFor(index, file)) }}
         </div>
       </div>
-      <button type="button" class="chat-upload-card__remove" :aria-label="t('common.remove')" @click="removeFile(file.id)">×</button>
+      <button type="button" class="chat-upload-card__remove" :aria-label="t('common.remove')" :disabled="disabled" @click="removeFile(file.id)">×</button>
       <button
         v-if="rowFor(index, file)?.state === 'failed'"
         type="button"
         class="chat-upload-card__retry"
+        :disabled="disabled && rowFor(index, file)?.state !== 'failed'"
         @click="emit('retry', rowFor(index, file)?.key || file.id)"
       >重试</button>
     </div>

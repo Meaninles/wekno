@@ -67,12 +67,17 @@
     </transition>
 
     <div class="embed-chat__input">
-      <ChatUploadProgress :rows="uploadRows" :preparing="uploadsPreparing" @retry="retryUpload" @cancel="cancelUploads" />
-      <EmbedInputField ref="inputRef" :inert="uploadsPreparing || undefined"
+      <EmbedInputField ref="inputRef"
         :isReplying="isReplying"
         :show-web-search-toggle="showWebSearchToggle"
         v-model:web-search-enabled="webSearchEnabled"
         :show-file-upload-toggle="showFileUploadToggle"
+        :allow-images="props.agentImageUploadEnabled !== false"
+        :upload-rows="uploadRows"
+        :uploads-preparing="uploadsPreparing"
+        @files-changed="preloadEmbedUploads"
+        @upload-retry="retryUpload"
+        @upload-cancel="cancelUploads"
         @send-msg="onSendMsg"
         @stop-generation="handleStopGeneration"
       />
@@ -84,13 +89,14 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { onEmbedHostOpenWithQuery } from '@/api/embed'
 import EmbedInputField from '@/components/EmbedInputField.vue'
-import ChatUploadProgress from '@/custom/modules/chatuploads/ChatUploadProgress.vue'
 const inputRef = ref<InstanceType<typeof EmbedInputField> | null>(null)
 import EmbedBotMessage from '@/views/embed/EmbedBotMessage.vue'
 import EmbedUserMessage from '@/views/embed/EmbedUserMessage.vue'
 import { useEmbedChatSession } from '@/composables/useEmbedChatSession'
+import { embedToast } from '@/utils/embedToast'
 import { getSessionDraftState } from '@/custom/modules/sessionState/draftState'
 import { embedDraftScope } from '@/custom/modules/sessionState/storage'
+import { isAgentStreamAgentId } from '@/utils/agent-mode'
 
 type EmbedImage = { url?: string; data?: string }
 type EmbedAttachment = { file_name: string; file_size?: number }
@@ -148,7 +154,7 @@ const showWebSearchToggle = computed(
   () => props.allowWebSearch === true && props.agentWebSearchEnabled === true,
 )
 const showFileUploadToggle = computed(
-  () => props.allowFileUpload === true && props.agentImageUploadEnabled === true,
+  () => props.allowFileUpload === true,
 )
 
 watch(webSearchEnabled, (enabled) => {
@@ -168,7 +174,7 @@ watch(() => props.hostContext, (ctx) => {
 }, { deep: true })
 
 const {
-  uploadRows, uploadsPreparing, retryUpload, cancelUploads,
+  uploadRows, uploadsPreparing, prepareUploads, retryUpload, cancelUploads,
   messagesList,
   loading,
   isReplying,
@@ -202,6 +208,21 @@ const {
   },
 })
 
+const preloadEmbedUploads = (files: Array<{ file: File }>) => {
+  if (!files?.length || !props.sessionId) return
+  void prepareUploads(files.map((item) => item.file), {
+    sessionId: props.sessionId,
+    agentId: props.agentId,
+    channelId: props.channelId,
+    token: props.token,
+    sessionSig: props.sessionSig,
+    visitorId: props.visitorId,
+    directInput: isAgentStreamAgentId(props.agentId, true),
+  }).catch((error: any) => {
+    if (error?.name !== 'AbortError') embedToast(error?.message || '文件处理失败')
+  })
+}
+
 const welcomeText = computed(() => props.welcomeMessage?.trim() || '')
 const hasWelcomeText = computed(() => welcomeText.value.length > 0)
 
@@ -221,6 +242,8 @@ const onSendMsg = (query: string, imageFiles: File[] = [], attachmentFiles: File
     webSearchEnabled: webSearchEnabled.value,
     imageFiles,
     attachmentFiles,
+  }).then(() => {
+    if (props.sessionId === requestSession) inputRef.value?.clearFiles?.()
   }).catch(() => {
     if (props.sessionId === requestSession) inputRef.value?.restoreDraft(query, imageFiles, attachmentFiles)
   })

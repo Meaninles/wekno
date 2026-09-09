@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { useChatUploads, chatImagePlaceholder, CHAT_UPLOAD_MAX_BYTES, CHAT_UPLOAD_MAX_MB } from '@/custom/modules/chatuploads/uploads'
-import ChatUploadProgress from '@/custom/modules/chatuploads/ChatUploadProgress.vue'
+import { useChatUploads, chatImagePlaceholder } from '@/custom/modules/chatuploads/uploads'
 const { rows: uploadRows, preparing: uploadsPreparing, prepare: prepareUploads, retry: retryUpload, cancel: cancelUploads, detach: detachUploads } = useChatUploads()
 
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -34,6 +33,7 @@ import { listSkills, type SkillInfo } from "@/api/skill";
 import { useChatStreamHandler } from "@/composables/useChatStreamHandler";
 import { useAuthStore } from "@/stores/auth";
 import { useChatResourcesStore } from "@/stores/chatResources";
+import { useEditorResourcesStore } from "@/stores/editorResources";
 import { useOrganizationStore } from "@/stores/organization";
 import { useSettingsStore } from "@/stores/settings";
 import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentPins";
@@ -43,6 +43,7 @@ import { synchronizeSessionTitle } from "@/custom/modules/sessiontitle/client";
 import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
 import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/custom/modules/chatuploads/types";
+import ChatUploadCards from "@/custom/modules/chatuploads/ChatUploadCards.vue";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
 import ChatQueueRejectionBanner from "@/custom/modules/chatqueue/ChatQueueRejectionBanner.vue";
 import type { ChatQueueRejection } from "@/custom/modules/chatqueue/types";
@@ -69,6 +70,7 @@ const { t } = useI18n();
 const authStore = useAuthStore();
 const settingsStore = useSettingsStore();
 const chatResources = useChatResourcesStore();
+const editorResources = useEditorResourcesStore();
 const organizationStore = useOrganizationStore();
 const agentPins = useChatAgentPins();
 const lightweightPins = useChatSkillPins("lightweight");
@@ -91,8 +93,7 @@ const currentAssistantMessageId = ref("");
 const fullContent = ref("");
 const scrollRef = ref<HTMLElement | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
-const imageInputRef = ref<HTMLInputElement | null>(null);
-const attachmentInputRef = ref<HTMLInputElement | null>(null);
+const uploadCardsRef = ref<InstanceType<typeof ChatUploadCards> | null>(null);
 const shouldFollowAnswer = ref(true);
 
 const sessions = ref<any[]>([]);
@@ -362,9 +363,74 @@ const isKnowledgeFileAllowedByAgent = (file: any) => isFileTypeAllowedByAgent(kn
 const isAttachmentAllowedByAgent = (file: File | { name?: string }) =>
   isFileTypeAllowedByAgent(fileTypeFromName(file?.name));
 
-const attachmentAcceptTypes = computed(() =>
-  agentSupportedFileTypes.value.map((type) => `.${type}`).join(","),
+const BUILTIN_MOBILE_UPLOAD_TYPES = [
+  "docx", "doc", "pdf", "md", "markdown", "txt", "text", "csv", "json",
+  "xlsx", "xls", "pptx", "ppt", "epub", "mhtml",
+  "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp",
+  "mp3", "wav", "m4a", "flac", "ogg",
+];
+
+const mobileUploadTypes = computed(() =>
+  agentSupportedFileTypes.value.length > 0
+    ? agentSupportedFileTypes.value
+    : Array.from(new Set([
+      ...BUILTIN_MOBILE_UPLOAD_TYPES,
+      ...editorResources.parserEngines.flatMap((engine: any) => engine?.FileTypes || engine?.file_types || []),
+    ].map((type) => normalizeFileType(type)).filter(Boolean))),
 );
+
+const isMobileImageFile = (file: File) =>
+  file.type.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"].includes(fileTypeFromName(file.name));
+
+const isMobileAudioFile = (file: File) =>
+  file.type.startsWith("audio/") || ["mp3", "wav", "m4a", "flac", "ogg"].includes(fileTypeFromName(file.name));
+
+const mobileComposerFiles = computed<AttachmentFile[]>(() => [
+  ...pendingImages.value.map((file, index) => ({
+    file,
+    id: `mobile-image-${index}-${uploadFileKey(file)}`,
+    name: file.name,
+    size: file.size,
+    type: file.type || `.${fileTypeFromName(file.name)}`,
+  })),
+  ...pendingAttachments.value.map((attachment, index) => ({
+    file: attachment.file,
+    id: `mobile-attachment-${index}-${uploadFileKey(attachment.file)}`,
+    name: attachment.name || attachment.file.name,
+    size: attachment.size || attachment.file.size,
+    type: attachment.file.type || `.${fileTypeFromName(attachment.file.name)}`,
+  })),
+]);
+
+const validateMobileComposerFile = (file: File) => {
+  if (agentSupportedFileTypes.value.length > 0 && !isAttachmentAllowedByAgent(file)) {
+    return `当前智能体不支持该文件类型：${file.name}`;
+  }
+  if (isMobileImageFile(file) && currentAgentConfig.value?.image_upload_enabled === false) {
+    return `当前智能体未启用图片上传：${file.name}`;
+  }
+  if (isMobileAudioFile(file) && (
+    currentAgentConfig.value?.audio_upload_enabled === false ||
+    !String(currentAgentConfig.value?.asr_model_id || "").trim()
+  )) {
+    return `当前智能体未配置语音解析模型：${file.name}`;
+  }
+  return undefined;
+};
+
+const handleMobileComposerFiles = (files: AttachmentFile[]) => {
+  pendingImages.value = uniqueFilesByIdentity(
+    files.filter((item) => isMobileImageFile(item.file)).map((item) => item.file),
+  );
+  pendingAttachments.value = uniqueAttachmentsByIdentity(
+    files.filter((item) => !isMobileImageFile(item.file)).map((item) => ({
+      file: item.file,
+      name: item.name,
+      size: item.size,
+    })),
+  );
+  preloadMobileUploads(files);
+};
 
 const activeFileRows = computed(() =>
   activeFileKbId.value
@@ -544,27 +610,6 @@ const selectedResourceChips = computed<MobileResourceChip[]>(() => {
   for (const name of selectedProfessionalSkillNames.value) {
     pushUniqueChip(chips, seen, { id: `professional:${name}`, type: "professional", name }, `skill-name:${name}`);
   }
-  pendingImages.value.forEach((file, index) => {
-    pushUniqueChip(
-      chips,
-      seen,
-      { id: `image:${index}:${file.name}`, type: "image", name: file.name || `图片 ${index + 1}` },
-      `image:${uploadFileKey(file)}`,
-    );
-  });
-  pendingAttachments.value.forEach((file, index) => {
-    pushUniqueChip(
-      chips,
-      seen,
-      {
-        id: `attachment:${index}:${file.name}`,
-        type: "attachment",
-        name: file.name,
-        meta: formatFileSize(file.size),
-      },
-      `attachment:${uploadFileKey(file.file)}`,
-    );
-  });
   return chips;
 });
 
@@ -993,6 +1038,18 @@ const ensureSession = async () => {
   return id;
 };
 
+const preloadMobileUploads = (files: AttachmentFile[]) => {
+  if (isHydratingConversationState || !files.length || !currentSessionId.value) return;
+  const agentEnabled = settingsStore.isAgentStreamMode;
+  void prepareUploads(files.map((item) => item.file), {
+    sessionId: currentSessionId.value,
+    agentId: selectedAgentId.value,
+    directInput: agentEnabled,
+  }).catch((error: any) => {
+    if (error?.name !== "AbortError") MessagePlugin.error(error?.message || "文件处理失败");
+  });
+};
+
 const loadMessages = async () => {
   if (!currentSessionId.value) return;
   const requestedSessionId = currentSessionId.value;
@@ -1417,14 +1474,6 @@ const removeChip = (chip: MobileResourceChip) => {
       settingsStore.removeSkill(name || chip.id);
     }
   }
-  if (chip.type === "image") {
-    const index = Number(chip.id.split(":")[1]);
-    pendingImages.value.splice(index, 1);
-  }
-  if (chip.type === "attachment") {
-    const index = Number(chip.id.split(":")[1]);
-    pendingAttachments.value.splice(index, 1);
-  }
 };
 
 const clearSelectedResources = () => {
@@ -1592,6 +1641,8 @@ const sendMessage = async () => {
       method: "POST",
       url: endpoint,
     });
+    pendingImages.value = [];
+    pendingAttachments.value = [];
     void markSessionAsRead(sessionId);
     void loadSessions();
   } catch (err: any) {
@@ -1616,40 +1667,6 @@ const stopGenerating = async () => {
     await stopSession(currentSessionId.value, messageId).catch(() => undefined);
   }
   void loadSessions({ silent: true });
-};
-
-const checkUploadSize = (file: File) => {
-  if (file.size > 0 && file.size <= CHAT_UPLOAD_MAX_BYTES) return true;
-  MessagePlugin.warning(`${file.name}：文件和图片每个最大 ${CHAT_UPLOAD_MAX_MB} MiB，且不能为空`);
-  return false;
-};
-
-const handleImageFiles = (event: Event) => {
-  const files = Array.from((event.target as HTMLInputElement).files || []);
-  pendingImages.value = uniqueFilesByIdentity([
-    ...pendingImages.value,
-    ...files.filter((file) => file.type.startsWith("image/") && checkUploadSize(file)),
-  ]).slice(0, 6);
-  (event.target as HTMLInputElement).value = "";
-};
-
-const handleAttachmentFiles = (event: Event) => {
-  const files = Array.from((event.target as HTMLInputElement).files || []);
-  const acceptedFiles = files.filter((file) => {
-    if (!checkUploadSize(file)) return false;
-    if (isAttachmentAllowedByAgent(file)) return true;
-    MessagePlugin.warning(`当前智能体不支持该文件类型：${file.name}`);
-    return false;
-  });
-  pendingAttachments.value = uniqueAttachmentsByIdentity([
-    ...pendingAttachments.value,
-    ...acceptedFiles.map((file) => ({
-      file,
-      name: file.name,
-      size: file.size,
-    })),
-  ]).slice(0, 6);
-  (event.target as HTMLInputElement).value = "";
 };
 
 const COMPOSER_MIN_HEIGHT = 28;
@@ -1781,6 +1798,7 @@ onChunk((data) => {
 });
 
 onMounted(async () => {
+  void editorResources.ensureParserEngines();
   if (currentSessionId.value) {
     await hydrateMobileConversationState(currentSessionId.value);
   } else {
@@ -1844,11 +1862,21 @@ onBeforeUnmount(() => {
     </section>
 
     <footer class="mobile-composer">
-      <ChatUploadProgress :rows="uploadRows" :preparing="uploadsPreparing" @retry="retryUpload" @cancel="cancelUploads" />
-
       <ChatQueueRejectionBanner
         :rejection="queueRejectionNotice"
         @close="queueRejectionNotice = null"
+      />
+      <ChatUploadCards
+        ref="uploadCardsRef"
+        :files="mobileComposerFiles"
+        :rows="uploadRows"
+        :max-files="10"
+        :supported-file-types="mobileUploadTypes"
+        :disabled="uploadsPreparing"
+        :validating-file="validateMobileComposerFile"
+        @update:files="handleMobileComposerFiles"
+        @retry="retryUpload"
+        @cancel="cancelUploads"
       />
       <MobileResourceRail :inert="uploadsPreparing || undefined" :items="selectedResourceChips" @remove="removeChip" @clear="clearSelectedResources" />
 
@@ -1872,15 +1900,10 @@ onBeforeUnmount(() => {
           <MobileIcon name="internet" />
           <span>联网</span>
         </button>
-        <button type="button" class="config-pill" @click="imageInputRef?.click()">
-          <MobileIcon name="image" />
-          <span>图片</span>
-          <em v-if="pendingImages.length">{{ pendingImages.length }}</em>
-        </button>
-        <button type="button" class="config-pill" @click="attachmentInputRef?.click()">
+        <button type="button" class="config-pill" :disabled="uploadsPreparing" @click="uploadCardsRef?.triggerFileSelect()">
           <MobileIcon name="attach" />
-          <span>附件</span>
-          <em v-if="pendingAttachments.length">{{ pendingAttachments.length }}</em>
+          <span>文件</span>
+          <em v-if="mobileComposerFiles.length">{{ mobileComposerFiles.length }}</em>
         </button>
         <button type="button" class="config-pill" @click="openSheet('skill')">
           <MobileIcon name="lightbulb" />
@@ -1889,7 +1912,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div class="input-row" :inert="uploadsPreparing || undefined">
+      <div class="input-row">
         <textarea
           ref="textareaRef"
           v-model="inputValue"
@@ -1897,16 +1920,14 @@ onBeforeUnmount(() => {
           placeholder="向智汇提问..."
           @keydown.enter.exact.prevent="sendMessage"
         />
-        <button v-if="isReplying && !uploadsPreparing" type="button" class="send-button stop" aria-label="停止" @click="stopGenerating">
+        <button v-if="isReplying" type="button" class="send-button stop" aria-label="停止" @click="stopGenerating">
           <MobileIcon name="stop-circle" />
         </button>
-        <button v-else type="button" class="send-button" :disabled="uploadsPreparing || !inputValue.trim()" aria-label="发送" @click="sendMessage">
+        <button v-else type="button" class="send-button" :disabled="!inputValue.trim()" aria-label="发送" @click="sendMessage">
           <MobileIcon name="send" />
         </button>
       </div>
 
-      <input ref="imageInputRef" type="file" accept="image/*" multiple hidden @change="handleImageFiles" />
-      <input ref="attachmentInputRef" type="file" :accept="attachmentAcceptTypes" multiple hidden @change="handleAttachmentFiles" />
     </footer>
 
     <div v-if="drawerOpen" class="drawer-layer" @click.self="drawerOpen = false">

@@ -21,6 +21,9 @@ func (s *Service) transcribeInputFile(
 	if config == nil || strings.TrimSpace(config.ASRModelID) == "" {
 		return nil, fmt.Errorf("the Agent has no configured ASR model")
 	}
+	if s.modelService == nil {
+		return nil, fmt.Errorf("ASR model service is unavailable")
+	}
 	inputID, _ := arguments["input_file_id"].(string)
 	inputID = strings.TrimSpace(inputID)
 	if inputID == "" {
@@ -43,12 +46,16 @@ func (s *Service) transcribeInputFile(
 	if err != nil {
 		return nil, err
 	}
-	modelCtx := context.WithValue(ctx, types.TenantIDContextKey, config.AgentTenantID)
+	tenantID := config.AgentTenantID
+	if tenantID == 0 {
+		tenantID = row.TenantID
+	}
+	modelCtx := context.WithValue(ctx, types.TenantIDContextKey, tenantID)
 	transcriber, err := s.modelService.GetASRModel(modelCtx, config.ASRModelID)
 	if err != nil {
 		return nil, fmt.Errorf("load configured ASR model: %w", err)
 	}
-	result, err := transcriber.Transcribe(ctx, data, fileName)
+	result, err := transcriber.Transcribe(modelCtx, data, fileName)
 	if err != nil {
 		return nil, fmt.Errorf("audio transcription failed: %w", err)
 	}

@@ -15,6 +15,7 @@ type Source = { id: string; upload_ids: string[]; input_file_ids?: string[]; inp
 export type UploadRow = { key: string; name: string; state: 'queued' | 'uploading' | 'processing' | 'ready' | 'failed' | 'cancelled'; error?: string; source?: Source }
 type Context = { sessionId: string; agentId?: string; channelId?: string; token?: string; sessionSig?: string; visitorId?: string; directInput?: boolean }
 type Reply<T> = { success: boolean; data: T }
+type PreparedUploads = { uploadIds: string[]; inputFileIds: string[] }
 const cancelled = () => new DOMException('已取消文件处理，输入内容已保留', 'AbortError')
 export const chatUploadLimitMessage = (name = '文件') =>
   `${name}：文件和图片每个最大 ${CHAT_UPLOAD_MAX_MB} MiB，且不能为空。文件过大时，可先上传到知识库，等待解析成功后，在对话中选择知识库文件进行问答。`
@@ -33,27 +34,50 @@ export function useChatUploads() {
   let controller: AbortController | undefined
   let cancelAccepted: (() => Promise<void>) | undefined
   const retries = new Map<string, () => void>()
+  let activeBatch: { key: string; promise: Promise<PreparedUploads> } | undefined
+  let completedBatch: { key: string; result: PreparedUploads } | undefined
   const retry = (key: string) => retries.get(key)?.()
   // Leaving a conversation detaches the waiter; durable processing and its
   // source identity remain available when the draft is reopened.
-  const detach = () => controller?.abort()
+  const detach = () => {
+    controller?.abort()
+    activeBatch = undefined
+    completedBatch = undefined
+  }
   const cancel = async () => {
     controller?.abort()
+    completedBatch = undefined
     await cancelAccepted?.()
   }
   onScopeDispose(detach)
 
-  async function prepare(files: File[], ctx: Context): Promise<{ uploadIds: string[]; inputFileIds: string[] }> {
-    if (!files.length) return { uploadIds: [], inputFileIds: [] }
-    if (preparing.value) throw new Error('文件仍在处理中')
+  const fileIdentity = (file: File) => `${file.name}\u0000${file.size}\u0000${file.lastModified}`
+  const batchIdentity = (files: File[], ctx: Context) => JSON.stringify({
+    // The composer keeps display order, while senders historically grouped
+    // images before documents. The upload batch is a set, so both views must
+    // await the same in-flight work.
+    files: files.map(fileIdentity).sort(),
+    sessionId: ctx.sessionId,
+    agentId: ctx.agentId || '',
+    channelId: ctx.channelId || '',
+    sessionSig: ctx.sessionSig || '',
+    visitorId: ctx.visitorId || '',
+    directInput: ctx.directInput === true,
+  })
+
+  async function runPrepare(uniqueFiles: File[], ctx: Context): Promise<PreparedUploads> {
     if (!ctx.sessionId) throw new Error('请先创建对话')
-    for (const file of files) {
+    for (const file of uniqueFiles) {
       if (!file.size || file.size > CHAT_UPLOAD_MAX_BYTES) throw new Error(chatUploadLimitMessage(file.name))
     }
-    const uniqueFiles = [...new Set(files)]
     const endpoint = ctx.channelId
       ? `/api/v1/embed/${encodeURIComponent(ctx.channelId)}/chat-uploads/sessions/${encodeURIComponent(ctx.sessionId)}`
       : `/api/v1/custom/chat-uploads/sessions/${encodeURIComponent(ctx.sessionId)}`
+    // Keep normal parsed uploads and Agent direct originals in separate local
+    // bindings. A user can switch modes while the same File object is still
+    // present in the composer; reusing the parsed source there would silently
+    // drop input_file_ids from the Agent request.
+    const bindingEndpoint = `${endpoint}#${ctx.directInput ? 'original' : 'knowledge'}`
     const headers = ctx.token ? { Authorization: `Embed ${ctx.token}`, 'X-Embed-Session': ctx.sessionSig || '', 'X-Embed-Visitor': ctx.visitorId || '' } : undefined
     const active = new AbortController()
     controller = active
@@ -121,7 +145,7 @@ export function useChatUploads() {
             }
           }
           binding.sourceId = source.id
-          await uploadBinding(key, file, endpoint, source.id)
+          await uploadBinding(key, file, bindingEndpoint, source.id)
           row.source = source
           row.state = 'processing'
           while (!source.ready) {
@@ -143,7 +167,7 @@ export function useChatUploads() {
     }
     try {
       await flushDraft(key)
-      bound = await Promise.all(uniqueFiles.map(file => uploadBinding(key, file, endpoint)))
+      bound = await Promise.all(uniqueFiles.map(file => uploadBinding(key, file, bindingEndpoint)))
       if (active.signal.aborted) throw cancelled()
       rows.value.forEach((row, i) => { row.key = bound[i].uploadId })
       let next = 0
@@ -165,6 +189,28 @@ export function useChatUploads() {
       controller = undefined
       cancelAccepted = undefined
     }
+  }
+
+  function prepare(files: File[], ctx: Context): Promise<PreparedUploads> {
+    if (!files.length) return Promise.resolve({ uploadIds: [], inputFileIds: [] })
+    const uniqueFiles = [...new Set(files)]
+    const key = batchIdentity(uniqueFiles, ctx)
+    if (activeBatch) {
+      if (activeBatch.key === key) return activeBatch.promise
+      return Promise.reject(new Error('文件仍在处理中'))
+    }
+    if (completedBatch?.key === key) return Promise.resolve(completedBatch.result)
+
+    const promise = runPrepare(uniqueFiles, ctx)
+      .then((result) => {
+        completedBatch = { key, result }
+        return result
+      })
+      .finally(() => {
+        if (activeBatch?.key === key) activeBatch = undefined
+      })
+    activeBatch = { key, promise }
+    return promise
   }
   return { rows, preparing, prepare, retry, cancel, detach }
 }

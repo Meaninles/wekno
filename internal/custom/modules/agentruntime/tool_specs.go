@@ -10,6 +10,7 @@ import (
 )
 
 const ToolTranscribeInputFile = "transcribe_input_file"
+const ToolInspectInputImage = "inspect_input_image"
 
 func runtimeToolSpecs(registry interfaces.AgentToolRegistry) []RuntimeToolSpec {
 	if registry == nil {
@@ -43,25 +44,83 @@ func runtimeToolSpecs(registry interfaces.AgentToolRegistry) []RuntimeToolSpec {
 
 func runtimeToolSpecsWithInputs(registry interfaces.AgentToolRegistry, inputs []OriginalInputFileSpec, config *types.AgentConfig) []RuntimeToolSpec {
 	out := runtimeToolSpecs(registry)
-	if config == nil || strings.TrimSpace(config.ASRModelID) == "" || !hasAudioOriginalInput(inputs) {
+	if config == nil {
 		return out
 	}
+	if strings.TrimSpace(config.ASRModelID) != "" && hasDirectAudioOriginalInput(inputs) {
+		out = appendInputToolIfMissing(out, audioTranscriptionToolSpec())
+	}
+	if strings.TrimSpace(config.VLMModelID) != "" && hasDirectImageOriginalInput(inputs) {
+		out = appendInputToolIfMissing(out, imageInspectionToolSpec())
+	}
+	return out
+}
+
+func appendInputToolIfMissing(out []RuntimeToolSpec, spec RuntimeToolSpec) []RuntimeToolSpec {
 	for _, item := range out {
-		if item.Name == ToolTranscribeInputFile {
+		if item.Name == spec.Name {
 			return out
 		}
 	}
-	return append(out, audioTranscriptionToolSpec())
+	return append(out, spec)
 }
 
 func hasAudioOriginalInput(inputs []OriginalInputFileSpec) bool {
 	for _, item := range inputs {
-		switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(item.FileType)), ".") {
-		case "mp3", "wav", "m4a", "flac", "ogg":
+		if isAudioFileType(item.FileType) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasDirectAudioOriginalInput(inputs []OriginalInputFileSpec) bool {
+	for _, item := range inputs {
+		if isDirectOriginalInput(item) && isAudioFileType(item.FileType) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasImageOriginalInput(inputs []OriginalInputFileSpec) bool {
+	for _, item := range inputs {
+		if isImageFileType(item.FileType) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDirectImageOriginalInput(inputs []OriginalInputFileSpec) bool {
+	for _, item := range inputs {
+		if isDirectOriginalInput(item) && isImageFileType(item.FileType) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDirectOriginalInput(item OriginalInputFileSpec) bool {
+	return item.Source == types.OriginalInputSourceChatUpload || item.Source == types.OriginalInputSourceChatImage
+}
+
+func isAudioFileType(fileType string) bool {
+	switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(fileType)), ".") {
+	case "mp3", "wav", "m4a", "flac", "ogg":
+		return true
+	default:
+		return false
+	}
+}
+
+func isImageFileType(fileType string) bool {
+	switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(fileType)), ".") {
+	case "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func audioTranscriptionToolSpec() RuntimeToolSpec {
@@ -71,6 +130,18 @@ func audioTranscriptionToolSpec() RuntimeToolSpec {
 		IsConcurrencySafe: false,
 		TimeoutSeconds:    900,
 		Description:       "Transcribe one uploaded audio input file with the Agent's configured ASR model. Use the exact input_file_id from the workspace input manifest. The primary chat model remains in control; this tool returns transcript and timestamped segments as evidence.",
+		Parameters:        json.RawMessage(`{"type":"object","additionalProperties":false,"required":["input_file_id"],"properties":{"input_file_id":{"type":"string","description":"Exact input_file_id from original_input_manifest.json"}}}`),
+		Source:            "native",
+	}
+}
+
+func imageInspectionToolSpec() RuntimeToolSpec {
+	return RuntimeToolSpec{
+		Name:              ToolInspectInputImage,
+		IsReadOnly:        true,
+		IsConcurrencySafe: false,
+		TimeoutSeconds:    900,
+		Description:       "Inspect one uploaded image with the Agent's configured vision model and return observations as evidence. Use the exact input_file_id from the workspace input manifest. The primary chat model remains in control.",
 		Parameters:        json.RawMessage(`{"type":"object","additionalProperties":false,"required":["input_file_id"],"properties":{"input_file_id":{"type":"string","description":"Exact input_file_id from original_input_manifest.json"}}}`),
 		Source:            "native",
 	}

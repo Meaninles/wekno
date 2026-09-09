@@ -30,6 +30,7 @@ import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
 import ChatUploadCards from '@/custom/modules/chatuploads/ChatUploadCards.vue';
 import type { AttachmentFile } from '@/custom/modules/chatuploads/types';
+import type { UploadRow } from '@/custom/modules/chatuploads/uploads';
 import { resolveAgentEnabledFromMode } from '@/custom/modules/agentConversationMode/policy';
 import {
   kbSatisfiesAgentRequirements,
@@ -89,7 +90,7 @@ const isImageFile = (file: File) => {
     return true;
   }
   const fileName = file.name.toLowerCase();
-  return ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'].some(ext => fileName.endsWith(ext));
+  return ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'].some(ext => fileName.endsWith(ext));
 };
 
 const handleDroppedFiles = (files: File[]) => {
@@ -110,7 +111,10 @@ const rebuildLegacyUploadViews = (files: AttachmentFile[]) => {
   uploadedAttachments.value = files.filter((item) => !isImageFile(item.file)).map((item) => ({ ...item }));
 };
 
-const handleComposerFilesUpdate = (files: AttachmentFile[]) => rebuildLegacyUploadViews(files);
+const handleComposerFilesUpdate = (files: AttachmentFile[]) => {
+  rebuildLegacyUploadViews(files);
+  emit('files-changed', files);
+};
 
 const addImageFiles = (files: File[]) => uploadCardsRef.value?.addFiles(files);
 
@@ -139,6 +143,15 @@ const getUploadedAttachments = (): AttachmentFile[] => uploadedFiles.value
   .map((attachment) => ({ ...attachment }));
 
 const clearUploadedAttachments = () => rebuildLegacyUploadViews(uploadedFiles.value.filter((item) => isImageFile(item.file)));
+
+// Clear the unified composer only after the request has accepted the prepared
+// files. The split legacy clear methods above intentionally keep the other
+// category for draft compatibility, so sending must use this all-files path.
+const clearFiles = () => {
+  uploadedFiles.value = [];
+  uploadedImages.value = [];
+  uploadedAttachments.value = [];
+};
 const atButtonRef = ref<HTMLElement>();
 const skillButtonRef = ref<HTMLElement>();
 const showAgentModeSelector = ref(false);
@@ -1776,6 +1789,7 @@ watch(() => uiStore.showSettingsModal, (visible, prevVisible) => {
 const emit = defineEmits<{
   (e: 'send-msg', query: string, modelId: string, mentionedItems: MentionRequestItem[], imageFiles: File[], attachmentFiles: AttachmentFile[]): void;
   (e: 'stop-generation'): void;
+  (e: 'files-changed', files: AttachmentFile[]): void;
   (e: 'upload-retry', key: string): void;
   (e: 'upload-cancel'): void;
 }>();
@@ -2398,6 +2412,7 @@ defineExpose({
   setUploadedAttachments,
   getUploadedAttachments,
   clearUploadedAttachments,
+  clearFiles,
 });
 
 </script>
@@ -2409,10 +2424,10 @@ defineExpose({
       <ChatUploadCards
         ref="uploadCardsRef"
         :files="uploadedFiles"
-        :rows="props.uploadRows"
+        :rows="props.uploadRows as UploadRow[]"
         :max-files="CHAT_ATTACHMENT_MAX_FILES"
         :supported-file-types="parserFileTypes"
-        :disabled="Boolean(props.inert)"
+        :disabled="Boolean(props.inert) || Boolean(props.uploadsPreparing)"
         :validating-file="validateComposerFile"
         @update:files="handleComposerFilesUpdate"
         @retry="emit('upload-retry', $event)"
@@ -2534,46 +2549,20 @@ defineExpose({
             </div>
           </t-tooltip>
 
-          <!-- 图片上传按钮 -->
+          <!-- 文件、图片、语音共用一个入口；卡片按扩展名决定后端路径。 -->
           <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
             <template #content>
-              <div v-if="!isImageUploadEnabledByAgent" class="tooltip-with-link">
-                <span>{{ $t('input.imageUploadDisabledByAgent') }}</span>
-                <a href="#" @click.prevent="handleGoToAgentSettings('model')">{{ $t('input.goToAgentSettings') }}</a>
-              </div>
-              <span v-else>{{ $t('chat.imageUploadTooltip') }}</span>
+              <span>{{ uploadedFiles.length > 0 ? `已选择 ${uploadedFiles.length} 个文件` : '上传文件、图片或语音' }}</span>
             </template>
-            <div class="control-btn image-upload-btn" :class="{
-              'active': uploadedImages.length > 0,
-              'disabled': !isImageUploadEnabledByAgent
-            }" @click.stop="isImageUploadEnabledByAgent && triggerImageUpload()">
-              <svg width="18" height="18" viewBox="0 0 1024 1024" fill="currentColor" class="control-icon">
-                <path
-                  d="M896 128H128c-35.3 0-64 28.7-64 64v640c0 35.3 28.7 64 64 64h768c35.3 0 64-28.7 64-64V192c0-35.3-28.7-64-64-64zM128 832V192h768l0.1 640H128z" />
-                <path d="M352 448a96 96 0 1 0 0-192 96 96 0 0 0 0 192z" />
-                <path d="M128 768l224-288 160 160 192-256L896 640v128H128z" />
-              </svg>
-              <span v-if="uploadedImages.length > 0" class="image-count">{{ uploadedImages.length }}</span>
-            </div>
-          </t-tooltip>
-
-          <!-- 附件上传按钮 -->
-          <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
-            <template #content>
-              <span>{{ uploadedAttachments.length > 0 ? $t('chat.attachmentWithCount', {
-                count: uploadedAttachments.length
-              }) : $t('chat.attachmentUploadTooltip') }}</span>
-            </template>
-            <div class="control-btn attachment-upload-btn" :class="{ 'active': uploadedAttachments.length > 0 }"
-              @click.stop="attachmentUploadRef?.triggerFileSelect()">
+            <div class="control-btn attachment-upload-btn" :class="{ 'active': uploadedFiles.length > 0 }"
+              @click.stop="uploadCardsRef?.triggerFileSelect()">
               <!-- 回形针图标 -->
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                 stroke-linecap="round" stroke-linejoin="round" class="control-icon">
                 <path
                   d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
-              <span v-if="uploadedAttachments.length > 0" class="attachment-count">{{ uploadedAttachments.length
-              }}</span>
+              <span v-if="uploadedFiles.length > 0" class="attachment-count">{{ uploadedFiles.length }}</span>
             </div>
           </t-tooltip>
 
@@ -3111,45 +3100,6 @@ const getImgSrc = (url: string) => {
   color: var(--td-brand-color);
 }
 
-/* Image upload */
-.image-upload-btn {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  min-width: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  color: var(--td-text-color-secondary, #666);
-
-  &:hover {
-    background: var(--td-bg-color-secondarycontainer-hover, #f0f0f0);
-    color: var(--td-text-color-primary, #333);
-  }
-
-  &.active {
-    background: rgba(16, 185, 129, 0.1);
-    color: #07C05F;
-  }
-
-  .image-count {
-    position: absolute;
-    top: -2px;
-    right: -2px;
-    background: #07C05F;
-    color: #fff;
-    font-size: 10px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-  }
-}
-
 /* Attachment upload */
 .attachment-upload-btn {
   width: 28px;
@@ -3186,49 +3136,6 @@ const getImgSrc = (url: string) => {
     align-items: center;
     justify-content: center;
     line-height: 1;
-  }
-}
-
-.image-preview-bar {
-  display: flex;
-  gap: 8px;
-  padding: 8px 12px 4px;
-  flex-wrap: wrap;
-}
-
-.image-preview-item {
-  position: relative;
-  width: 60px;
-  height: 60px;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--td-border-level-1-color, #e7e7e7);
-
-  .image-preview-thumb {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .image-preview-remove {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    width: 16px;
-    height: 16px;
-    background: rgba(0, 0, 0, 0.5);
-    color: #fff;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    cursor: pointer;
-    line-height: 1;
-
-    &:hover {
-      background: rgba(0, 0, 0, 0.7);
-    }
   }
 }
 

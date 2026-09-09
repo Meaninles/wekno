@@ -25,6 +25,36 @@ async def test_file_agents_never_expose_a_model_publish_tool():
     await workspace.close()
 
 
+@pytest.mark.asyncio
+async def test_plain_chat_does_not_add_original_file_prompt_context():
+    payload=request(system_prompt="BASE SYSTEM PROMPT")
+    workspace=RuntimeWorkspace(payload,MemoryControl(payload))
+    await workspace.initialize()
+    assert payload.system_prompt == "BASE SYSTEM PROMPT"
+    assert "[ORIGINAL_INPUT_FILES]" not in payload.system_prompt
+    assert "input_file_id" not in payload.system_prompt
+    await workspace.close()
+
+
+@pytest.mark.asyncio
+async def test_file_prompt_is_scoped_to_each_supplied_file_type():
+    payload=request(system_prompt="BASE SYSTEM PROMPT", original_input_files=[
+        {"id":"image-1", "source":"weknora_chat_upload_original", "file_name":"diagram.png", "file_type":"png"},
+        {"id":"audio-1", "source":"weknora_chat_upload_original", "file_name":"meeting.wav", "file_type":"wav"},
+        {"id":"document-1", "source":"weknora_chat_upload_original", "file_name":"notes.pdf", "file_type":"pdf"},
+    ])
+    workspace=RuntimeWorkspace(payload,MemoryControl(payload))
+    await workspace.initialize()
+    assert "[ORIGINAL_INPUT_FILES]" in payload.system_prompt
+    assert '"input_file_id": "image-1"' in payload.system_prompt
+    assert "inspect_input_image" in payload.system_prompt
+    assert '"input_file_id": "audio-1"' in payload.system_prompt
+    assert "transcribe_input_file" in payload.system_prompt
+    assert '"input_file_id": "document-1"' in payload.system_prompt
+    assert "appropriate document/text tool" in payload.system_prompt
+    await workspace.close()
+
+
 @pytest.mark.parametrize("path",["../escape","/etc/passwd","/workspace/../../control/epoch"])
 def test_workspace_paths_cannot_escape_run(path):
     with pytest.raises(ValueError):safe_path(path)

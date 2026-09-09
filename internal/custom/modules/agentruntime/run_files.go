@@ -73,13 +73,14 @@ func (s *Service) ResolveRunFile(
 			return nil, "", "", fmt.Errorf("artifact exceeds ingestion limit")
 		}
 		return data, fileName, sha256Hex(data), nil
-	case "input_file":
+	case "input_file", "input_image":
 		spec, ok := originalInputFilesByID(payload.OriginalInputFiles)[sourceID]
 		if !ok {
 			return nil, "", "", fmt.Errorf("input file is not part of the current run")
 		}
-		if spec.Source != types.OriginalInputSourceChatUpload && spec.Source != types.OriginalInputSourceChatImage {
-			return nil, "", "", fmt.Errorf("knowledge ingestion accepts only a current-turn uploaded attachment or a current-run artifact")
+		allowedSource := spec.Source == types.OriginalInputSourceChatUpload || spec.Source == types.OriginalInputSourceChatImage
+		if !allowedSource {
+			return nil, "", "", fmt.Errorf("input source is not allowed for this operation")
 		}
 		if strings.TrimSpace(spec.StorageURL) == "" {
 			return nil, "", "", fmt.Errorf("input file has no trusted storage object")
@@ -109,7 +110,7 @@ func (s *Service) ResolveRunFile(
 		}
 		return data, spec.FileName, sha, nil
 	default:
-		return nil, "", "", fmt.Errorf("source_type must be artifact or input_file")
+		return nil, "", "", fmt.Errorf("source_type must be artifact, input_file or input_image")
 	}
 }
 

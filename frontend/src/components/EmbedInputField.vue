@@ -1,49 +1,28 @@
 <template>
   <div class="embed-input-box" :class="{ 'is-replying': isReplying }">
-    <div v-if="uploadedAttachments.length" class="embed-input-box__files">
-      <div v-for="(att, index) in uploadedAttachments" :key="`${att.file.name}-${index}`" class="embed-file-chip">
-        <t-icon name="file" size="14px" />
-        <span class="embed-file-chip__name">{{ att.file.name }}</span>
-        <button type="button" class="embed-file-chip__remove" @click="removeAttachment(index)">
-          <t-icon name="close" size="12px" />
-        </button>
-      </div>
-    </div>
-    <div v-if="uploadedImages.length" class="embed-input-box__images">
-      <div v-for="(img, index) in uploadedImages" :key="index" class="embed-image-thumb">
-        <img :src="img.preview" :alt="img.file.name" />
-        <button type="button" class="embed-image-thumb__remove" @click="removeImage(index)">
-          <t-icon name="close" size="12px" />
-        </button>
-      </div>
-    </div>
+    <ChatUploadCards
+      ref="uploadCardsRef"
+      :files="uploadedFiles"
+      :rows="props.uploadRows"
+      :max-files="10"
+      :supported-file-types="uploadTypes"
+      :disabled="Boolean(props.inert) || Boolean(props.uploadsPreparing)"
+      :validating-file="validateEmbedFile"
+      @update:files="handleFilesUpdate"
+      @retry="emit('upload-retry', $event)"
+      @cancel="emit('upload-cancel')"
+    />
     <t-textarea
       v-if="textareaReady"
       ref="textareaRef"
       v-model="query"
       class="embed-input-box__textarea"
-      :class="{ 'has-images': uploadedImages.length > 0 }"
+      :class="{ 'has-files': uploadedFiles.length > 0 }"
       :placeholder="t('input.placeholder')"
       :autosize="{ minRows: 2, maxRows: 6 }"
       @keydown="onKeydown"
       @compositionstart="isComposing = true"
       @compositionend="isComposing = false"
-    />
-    <input
-      ref="imageInputRef"
-      type="file"
-      accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/tiff"
-      multiple
-      class="embed-hidden-file-input"
-      @change="handleImageSelect"
-    />
-    <input
-      ref="fileInputRef"
-      type="file"
-      accept=".pdf,.doc,.docx,.txt,.md,.csv,.xlsx,.xls,.ppt,.pptx,application/pdf,text/plain"
-      multiple
-      class="embed-hidden-file-input"
-      @change="handleFileSelect"
     />
     <div class="embed-input-box__bar">
       <div v-if="showWebSearchToggle || showFileUploadToggle" class="embed-input-box__controls">
@@ -67,24 +46,14 @@
             </svg>
           </button>
         </t-tooltip>
-        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="t('chat.imageUploadTooltip')">
-          <button
-            type="button"
-            class="embed-control-btn embed-image-btn"
-            :class="{ active: uploadedImages.length > 0 }"
-            :aria-label="t('chat.imageUploadTooltip')"
-            @click="triggerImageUpload"
-          >
-            <t-icon name="image" size="18px" />
-          </button>
-        </t-tooltip>
-        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="t('chat.attachmentUploadTooltip')">
+        <t-tooltip v-if="showFileUploadToggle" placement="top" :content="'上传文件、图片或语音'">
           <button
             type="button"
             class="embed-control-btn embed-file-btn"
-            :class="{ active: uploadedAttachments.length > 0 }"
-            :aria-label="t('chat.attachmentUploadTooltip')"
-            @click="triggerFileUpload"
+            :class="{ active: uploadedFiles.length > 0 }"
+            :aria-label="'上传文件、图片或语音'"
+            :disabled="props.uploadsPreparing"
+            @click="uploadCardsRef?.triggerFileSelect()"
           >
             <t-icon name="attach" size="18px" />
           </button>
@@ -114,23 +83,40 @@
 </template>
 
 <script setup lang="ts">
-import { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES, chatImagePlaceholder } from "@/custom/modules/chatuploads/uploads"
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { embedToast } from '@/utils/embedToast'
 import { isEmbedImageFile } from '@/utils/embedFile'
+import ChatUploadCards from '@/custom/modules/chatuploads/ChatUploadCards.vue'
+import type { AttachmentFile } from '@/custom/modules/chatuploads/types'
+import type { UploadRow } from '@/custom/modules/chatuploads/uploads'
+
+const DEFAULT_EMBED_UPLOAD_TYPES = [
+  'docx', 'doc', 'pdf', 'md', 'markdown', 'txt', 'text', 'csv', 'json',
+  'xlsx', 'xls', 'pptx', 'ppt', 'epub', 'mhtml',
+  'jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp',
+  'mp3', 'wav', 'm4a', 'flac', 'ogg',
+]
 
 const props = defineProps<{
   isReplying: boolean
   showWebSearchToggle?: boolean
   webSearchEnabled?: boolean
   showFileUploadToggle?: boolean
+  inert?: boolean
+  uploadsPreparing?: boolean
+  uploadRows?: UploadRow[]
+  supportedFileTypes?: string[]
+  allowImages?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'send-msg', query: string, imageFiles: File[], attachmentFiles: File[]): void
   (e: 'stop-generation'): void
   (e: 'update:webSearchEnabled', value: boolean): void
+  (e: 'files-changed', files: AttachmentFile[]): void
+  (e: 'upload-retry', key: string): void
+  (e: 'upload-cancel'): void
 }>()
 
 const { t } = useI18n()
@@ -152,13 +138,32 @@ onMounted(() => {
     textareaReady.value = true
   })
 })
-const imageInputRef = ref<HTMLInputElement | null>(null)
-const fileInputRef = ref<HTMLInputElement | null>(null)
-const uploadedImages = ref<Array<{ file: File; preview: string }>>([])
-const uploadedAttachments = ref<Array<{ file: File }>>([])
+const uploadCardsRef = ref<InstanceType<typeof ChatUploadCards> | null>(null)
+const uploadedFiles = ref<AttachmentFile[]>([])
+
+const uploadTypes = computed(() => {
+  const configured = (props.supportedFileTypes || []).map((type) => String(type || '').trim().toLowerCase().replace(/^\./, '')).filter(Boolean)
+  return configured.length > 0 ? [...new Set(configured)] : DEFAULT_EMBED_UPLOAD_TYPES
+})
+
+const fileExtension = (file: File) => {
+  const name = file.name.split(/[?#]/)[0]
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : ''
+}
+
+const isAudioFile = (file: File) => file.type.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'flac', 'ogg'].includes(fileExtension(file))
+
+const validateEmbedFile = (file: File) => {
+  if (isEmbedImageFile(file) && props.allowImages === false) {
+    return '当前嵌入渠道未启用图片上传'
+  }
+  if (isAudioFile(file)) return undefined
+  return undefined
+}
 
 const canSend = computed(() =>
-  query.value.trim().length > 0 || uploadedImages.value.length > 0 || uploadedAttachments.value.length > 0)
+  query.value.trim().length > 0 || uploadedFiles.value.length > 0)
 
 const toggleWebSearch = () => {
   const next = !props.webSearchEnabled
@@ -166,96 +171,32 @@ const toggleWebSearch = () => {
   embedToast(next ? t('input.messages.webSearchEnabled') : t('input.messages.webSearchDisabled'))
 }
 
-const triggerImageUpload = () => {
-  imageInputRef.value?.click()
-}
-
-const triggerFileUpload = () => {
-  fileInputRef.value?.click()
-}
-
-const addImageFiles = (files: File[]) => {
-  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff']
-  const maxSize = CHAT_UPLOAD_MAX_BYTES
-  for (const file of files) {
-    if (!isEmbedImageFile(file)) continue
-    if (uploadedImages.value.length >= 5) {
-      embedToast(t('chat.imageTooMany'))
-      break
-    }
-    if (!allowed.includes(file.type)) {
-      embedToast(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`)
-      continue
-    }
-    if (file.size > maxSize) {
-      embedToast(`支持 JPG、PNG、GIF、WebP、BMP、TIFF 图片，每张最大 ${CHAT_UPLOAD_MAX_MB} MiB`)
-      continue
-    }
-    uploadedImages.value.push({ file, preview: chatImagePlaceholder() })
-  }
-}
-
-const handleImageSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement
-  if (!input.files) return
-  addImageFiles(Array.from(input.files))
-  input.value = ''
-}
-
-const addAttachmentFiles = (files: File[]) => {
-  const maxSize = CHAT_UPLOAD_MAX_BYTES
-  for (const file of files) {
-    if (isEmbedImageFile(file)) continue
-    if (uploadedAttachments.value.length >= 5) {
-      embedToast(t('chat.attachmentTooMany', { max: 5 }))
-      break
-    }
-    if (file.size > maxSize) {
-      embedToast(`文件每个最大 ${CHAT_UPLOAD_MAX_MB} MiB`)
-      continue
-    }
-    uploadedAttachments.value.push({ file })
-  }
-}
-
-const handleFileSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement
-  if (!input.files) return
-  addAttachmentFiles(Array.from(input.files))
-  input.value = ''
-}
-
-const removeAttachment = (index: number) => {
-  uploadedAttachments.value.splice(index, 1)
-}
-
-const removeImage = (index: number) => {
-  const removed = uploadedImages.value.splice(index, 1)
-  if (removed.length > 0) URL.revokeObjectURL(removed[0].preview)
+const handleFilesUpdate = (files: AttachmentFile[]) => {
+  uploadedFiles.value = files
+  emit('files-changed', files)
 }
 
 const submit = () => {
   if (props.isReplying || !canSend.value) return
   const val = query.value.trim()
-  const imageFiles = uploadedImages.value.map((img) => img.file)
-  const attachmentFiles = uploadedAttachments.value.map((att) => att.file)
+  const imageFiles = uploadedFiles.value.filter((item) => isEmbedImageFile(item.file)).map((item) => item.file)
+  const attachmentFiles = uploadedFiles.value.filter((item) => !isEmbedImageFile(item.file)).map((item) => item.file)
   const textarea = getTextareaEl()
   if (textarea) textarea.blur()
   emit('send-msg', val, imageFiles, attachmentFiles)
   if (getTextareaEl()) query.value = ''
-  uploadedImages.value.forEach((img) => URL.revokeObjectURL(img.preview))
-  uploadedImages.value = []
-  uploadedAttachments.value = []
 }
 
 defineExpose({ restoreDraft: (text: string, images: File[], attachments: File[]) => {
   query.value = text
-  uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview))
-  uploadedImages.value = []
-  uploadedAttachments.value = []
-  addImageFiles(images)
-  addAttachmentFiles(attachments)
-} })
+  uploadedFiles.value = [...images, ...attachments].filter((file): file is File => file instanceof File).map((file) => ({
+    file,
+    id: crypto.randomUUID(),
+    name: file.name,
+    size: file.size,
+    type: file.type || `.${fileExtension(file)}`,
+  }))
+}, clearFiles: () => { uploadedFiles.value = [] } })
 
 const onKeydown = (_val: string, ctx: { e: KeyboardEvent }) => {
   const e = ctx?.e
@@ -266,9 +207,6 @@ const onKeydown = (_val: string, ctx: { e: KeyboardEvent }) => {
   submit()
 }
 
-onUnmounted(() => {
-  uploadedImages.value.forEach((img) => URL.revokeObjectURL(img.preview))
-})
 </script>
 
 <style scoped lang="less">
@@ -287,20 +225,6 @@ onUnmounted(() => {
     border-color: var(--embed-primary, var(--td-brand-color, #07c05f));
   }
 
-  &__files {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 12px 16px 0;
-  }
-
-  &__images {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 12px 16px 0;
-  }
-
   &__textarea {
     width: 100%;
 
@@ -314,7 +238,7 @@ onUnmounted(() => {
       resize: none;
     }
 
-    &.has-images :deep(.t-textarea__inner) {
+    &.has-files :deep(.t-textarea__inner) {
       padding-top: 8px;
     }
   }
@@ -345,66 +269,6 @@ onUnmounted(() => {
     margin-left: auto;
     display: flex;
     align-items: center;
-  }
-}
-
-.embed-hidden-file-input {
-  display: none;
-}
-
-.embed-file-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--td-bg-color-secondarycontainer, #f3f3f3);
-  font-size: 12px;
-
-  &__name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  &__remove {
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    padding: 0;
-    color: var(--td-text-color-placeholder);
-  }
-}
-
-.embed-image-thumb {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--td-component-border, #e7e7e7);
-
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  &__remove {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    width: 18px;
-    height: 18px;
-    border: none;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    color: #fff;
-    background: rgba(0, 0, 0, 0.55);
   }
 }
 

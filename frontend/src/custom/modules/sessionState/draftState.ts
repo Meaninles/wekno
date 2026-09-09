@@ -13,7 +13,7 @@ export interface SessionDraftState {
 const sessionDrafts = new Map<string, SessionDraftState>();
 
 type StoredDraft = Omit<SessionDraftState, 'attachments' | 'images'> & {
-  attachments: Array<Omit<AttachmentFile, 'file' | 'preview'> & { fileId: string }>;
+  attachments: Array<Omit<AttachmentFile, 'file'> & { fileId: string }>;
   images: string[];
 };
 let storageErrorShown = false;
@@ -58,7 +58,7 @@ export function saveSessionDraftState(
   const draft = sessionDrafts.get(id)!;
   const stored: StoredDraft = {
     query: draft.query, settings: draft.settings,
-    attachments: draft.attachments.map(({ file, preview: _preview, ...metadata }) => ({ ...metadata, fileId: fileId(file) })),
+    attachments: draft.attachments.map(({ file, ...metadata }) => ({ ...metadata, fileId: fileId(file) })),
     images: draft.images.map(fileId),
   };
   void writeDraft(id, stored, [...draft.attachments.map(a => a.file), ...draft.images]).then(() => { storageErrorShown = false; }).catch(reportStorageError);

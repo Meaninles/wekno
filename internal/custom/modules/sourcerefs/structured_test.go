@@ -46,6 +46,34 @@ func structuredTestRefs() []*types.SearchResult {
 	return refs
 }
 
+func TestStructuredCitationMarkerRunsKeepOnlyFirstThree(t *testing.T) {
+	refs := structuredTestRefs()
+	refs = append(refs, &types.SearchResult{ID: "chunk-d", KnowledgeBaseID: "kb", KnowledgeID: "doc", ChunkType: "text", Content: "D", EvidenceContent: "D"})
+	AssignCitationIDs(refs)
+	for _, tc := range []struct {
+		body, raw, want string
+		count           int
+	}{
+		{"甲。", `[{"text":"甲。","source_ids":["S3","S1","S2","S4"]}]`, `甲。<src id="S3" /><src id="S1" /><src id="S2" />`, 3},
+		{"甲。", `[{"text":"甲。","source_ids":["S999","S1","S1"]},{"text":"甲。","source_ids":["S2","S3","S4"]}]`, `甲。<src id="S1" /><src id="S2" /><src id="S3" />`, 3},
+		{"甲。  ", `[{"text":"甲。","source_ids":["S1","S2","S3"]},{"text":"甲。  ","source_ids":["S4"]}]`, `甲。<src id="S1" /><src id="S2" /><src id="S3" />  `, 3},
+		{"甲。乙。", `[{"text":"甲。","source_ids":["S1","S2","S3","S4"]},{"text":"乙。","source_ids":["S4"]}]`, `甲。<src id="S1" /><src id="S2" /><src id="S3" />乙。<src id="S4" />`, 4},
+		{"甲。", `[{"text":"甲。","source_ids":["S2"]}]`, `甲。<src id="S2" />`, 1},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			raw := json.RawMessage(tc.raw)
+			answer, used, filtered := RenderStructuredCitations(tc.body, raw, refs)
+			require.Equal(t, tc.want, answer)
+			require.Equal(t, tc.body, citationLikeTagRE.ReplaceAllString(answer, ""))
+			require.Len(t, used, tc.count)
+			for _, item := range filtered {
+				require.LessOrEqual(t, len(item.SourceIDs), 3)
+			}
+			require.Equal(t, tc.raw, string(raw))
+		})
+	}
+}
+
 func TestStructuredCitationsMergeAndFirstOccurrence(t *testing.T) {
 	refs := structuredTestRefs()
 	answer, used, filtered := RenderStructuredCitations("正文A。正文B。正文A。", json.RawMessage(`[

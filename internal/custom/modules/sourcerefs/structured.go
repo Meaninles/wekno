@@ -125,6 +125,28 @@ func RenderStructuredCitations(answer string, raw json.RawMessage, refs []*types
 		positions = append(positions, insertion{end, item})
 	}
 	sort.SliceStable(positions, func(i, j int) bool { return positions[i].end < positions[j].end })
+	// Limit only the rendered marker run; generation and evidence stay intact.
+	// Whitespace between adjacent anchors does not start a new marker run.
+	remaining, previousEnd := 3, -1
+	for i := range positions {
+		pos := &positions[i]
+		if previousEnd < 0 || strings.Trim(answer[previousEnd:pos.end], " \t\r") != "" {
+			remaining = 3
+		}
+		if len(pos.citation.SourceIDs) > remaining {
+			pos.citation.SourceIDs = pos.citation.SourceIDs[:remaining]
+		}
+		remaining -= len(pos.citation.SourceIDs)
+		previousEnd = pos.end
+		filtered[byText[strconv.Itoa(pos.end)]].SourceIDs = pos.citation.SourceIDs
+	}
+	visible := filtered[:0]
+	for _, item := range filtered {
+		if len(item.SourceIDs) > 0 {
+			visible = append(visible, item)
+		}
+	}
+	filtered = visible
 	used := make([]*types.SearchResult, 0)
 	seen := map[string]bool{}
 	for _, pos := range positions {

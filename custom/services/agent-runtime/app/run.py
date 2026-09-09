@@ -11,7 +11,7 @@ from agentscope.model import ChatModelBase
 from agentscope.permission import PermissionMode
 from agentscope.tool import ToolBase, Toolkit
 
-from .context import messages, system_prompt
+from .context import messages, system_prompt, ProcessLanguage
 from .contracts import RunRequest, RunResult
 from .control import Control
 from .delivery import Delivery, DeliveryError
@@ -50,7 +50,7 @@ async def execute(payload: RunRequest, control: Control, model: ChatModelBase,
     agent = Agent(
         name="weknora", system_prompt=system_prompt(payload), model=model,
         toolkit=toolkit, state=state, offloader=offloader,
-        middlewares=[ContextProjection(data_backend), OutputPresentation(payload, offloader), Vision(control), AnswerProtocol(), IterationBudget(payload.runtime_config.max_iterations, control), lifecycle, delivery],
+        middlewares=[ProcessLanguage(), ContextProjection(data_backend), OutputPresentation(payload, offloader), Vision(control), AnswerProtocol(), IterationBudget(payload.runtime_config.max_iterations, control), lifecycle, delivery],
         model_config=ModelConfig(max_retries=0, fallback_model=None),
         context_config=ContextConfig(tool_result_limit=4096),
         # SDK's one structured-output grace decision is inside our public limit.

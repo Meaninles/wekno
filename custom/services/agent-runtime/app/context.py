@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from agentscope.message import Msg, TextBlock
+from agentscope.middleware import MiddlewareBase
 
 from .contracts import RunRequest
 from .tools import media_block
@@ -15,6 +16,21 @@ KNOWLEDGE_QA_SCOPE = """
 [/KNOWLEDGE_QA_SCOPE]
 """
 
+PROCESS_LANGUAGE = """
+[PROCESS_LANGUAGE]
+面向用户的过程展示语言为简体中文。你在工具调用前后输出的普通 assistant 文本会直接显示在聊天页面，属于用户可见的阶段说明，不是隐藏的内部笔记。
+每一轮的思考、分析、计划和阶段说明中的自然语言统一使用简体中文；即使技能、工具说明、工作区说明或历史阶段文本是英文，也保持中文。
+工具名称、代码、路径、网址及原文引用保留原样。不为展示进度额外调用模型或工具。最终答复仍遵循用户要求的语言。
+[/PROCESS_LANGUAGE]
+"""
+
+
+class ProcessLanguage(MiddlewareBase):
+    async def on_system_prompt(self, agent, prompt):
+        # The SDK appends skill/workspace instructions after the base prompt.
+        # Apply the presentation contract after that assembly, on every round.
+        return prompt + "\n" + PROCESS_LANGUAGE
+
 
 def system_prompt(payload: RunRequest) -> str:
     scope = KNOWLEDGE_QA_SCOPE if payload.runtime_config.agent_type == "knowledge-qa" else ""
@@ -22,7 +38,8 @@ def system_prompt(payload: RunRequest) -> str:
         "\n\n[ANSWER_DELIVERY]\n"
         "每次决策只选择一种操作：尚有必要工作时调用业务工具；已可回答或需要说明能力边界时，"
         "立即调用 GenerateStructuredOutput 提交完整答复并结束本轮。answer 字段是用户收到的全部正文，"
-        "保留必要限制。只生成完整正文，不填写引用列表或嵌入引用标签；独立的引用阶段随后处理来源定位。其他文本属于内部过程。\n[/ANSWER_DELIVERY]")
+        "保留必要限制。只生成完整正文，不填写引用列表或嵌入引用标签；独立的引用阶段随后处理来源定位。"
+        "普通文本用于向用户说明当前阶段。\n[/ANSWER_DELIVERY]")
     if payload.enable_artifacts and payload.runtime_config.agent_type != "knowledge-qa":
         prompt += ("\n\n[FILE_SOURCE_DATA]\n"
                    "Large business-tool results are delivered as complete JSON files in /workspace/source-data/ "

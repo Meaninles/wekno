@@ -358,6 +358,13 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         const toolCalls = step.tool_calls
         const hasToolCalls = toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0
 
+        if (step.process_kind) {
+          events.push({type:'thinking', event_id:step.event_id,
+            process_kind:step.process_kind, content:step.reasoning_content || step.thought || '',
+            done:true, thinking:step.process_status === 'running', timestamp:stepTimestamp || undefined})
+          return
+        }
+
         const reasoningText =
           step.reasoning_content && String(step.reasoning_content).trim()
             ? String(step.reasoning_content)
@@ -395,7 +402,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
               tool_call_id: toolCall.id,
               tool_name: toolCall.name,
               arguments: toolCall.args,
-              pending: false,
+              pending: step.process_status === 'stopped',
               success: result?.success !== false,
               output: result?.output || '',
               error: result?.error || undefined,
@@ -672,7 +679,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         const eventMap = message._eventMap as Map<string, ChatMessage>
         const stream = message.agentEventStream as ChatMessage[]
 
-        if (!data.done) {
+        if (!data.done || data.content) {
           let thinkingEvent = eventMap.get(eventId || '')
           if (!thinkingEvent) {
             log('[Thinking] Creating new thinking event, event_id:', eventId)
@@ -683,6 +690,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
               done: false,
               startTime: Date.now(),
               thinking: true,
+              process_kind: dataPayload?.process_kind,
             }
             stream.push(thinkingEvent)
             if (eventId) eventMap.set(eventId, thinkingEvent)
@@ -694,10 +702,14 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             )
           }
           if (data.content) {
+            const sequence = Number(dataPayload?.sequence) || 0
+            if (sequence && sequence <= Number(thinkingEvent.sequence || 0)) break
+            thinkingEvent.sequence = sequence
             thinkingEvent.content = String(thinkingEvent.content || '') + String(data.content)
             log('[Thinking] Event', eventId, 'accumulated:', String(thinkingEvent.content).length, 'chars')
           }
-        } else {
+        }
+        if (data.done) {
           const thinkingEvent = eventMap.get(eventId || '')
           if (thinkingEvent) {
             thinkingEvent.done = true

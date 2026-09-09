@@ -38,7 +38,7 @@ func fixtureRun(t *testing.T, db *gorm.DB) *RunRecord {
 
 func TestPostgresBudgetFailureIsIncompleteAndPublicInHistory(t *testing.T) {
 	db := testsupport.Postgres(t, &RunRecord{}, &RunOutbox{}, &ToolReceipt{})
-	require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text, content text, error_code varchar(40), is_completed boolean, updated_at timestamptz, deleted_at timestamptz)`).Error)
+	require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text, content text, error_code varchar(40), agent_steps jsonb, is_completed boolean, updated_at timestamptz, deleted_at timestamptz)`).Error)
 	row := fixtureRun(t, db)
 	require.NoError(t, db.Exec(`INSERT INTO messages(id,session_id,role,is_completed) VALUES ('message-1','session-1','assistant',false)`).Error)
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
@@ -61,7 +61,7 @@ func TestPostgresBudgetFailureIsIncompleteAndPublicInHistory(t *testing.T) {
 
 func TestPostgresRuntimeRejectsStaleAndCancelledCheckpoints(t *testing.T) {
 	db := testsupport.Postgres(t, &RunRecord{}, &RunOutbox{}, &ToolReceipt{})
-	require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text, content text, error_code varchar(40), is_completed boolean, updated_at timestamptz, deleted_at timestamptz)`).Error)
+	require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text, content text, error_code varchar(40), agent_steps jsonb, is_completed boolean, updated_at timestamptz, deleted_at timestamptz)`).Error)
 	row := fixtureRun(t, db)
 	service := &Service{db: db}
 	state := json.RawMessage(`{"run_id":"run-1","sdk_version":"2.0.7.post1","event_seq":0,"agent":{}}`)
@@ -77,7 +77,7 @@ func TestPostgresRuntimeRejectsStaleAndCancelledCheckpoints(t *testing.T) {
 
 func TestPostgresIdleClaimCommitsExpiredRunAndCompletesMessage(t *testing.T) {
 	db := testsupport.Postgres(t, &RunRecord{}, &RunOutbox{}, &ToolReceipt{})
-	require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text, content text, error_code varchar(40), is_completed boolean, updated_at timestamptz, deleted_at timestamptz)`).Error)
+	require.NoError(t, db.Exec(`CREATE TABLE messages (id text PRIMARY KEY, session_id text, role text, content text, error_code varchar(40), agent_steps jsonb, is_completed boolean, updated_at timestamptz, deleted_at timestamptz)`).Error)
 	row := fixtureRun(t, db)
 	require.NoError(t, db.Model(row).Update("deadline", time.Now().Add(-time.Minute)).Error)
 	require.NoError(t, db.Exec(`INSERT INTO messages(id,session_id,role,is_completed) VALUES ('message-1','session-1','assistant',false)`).Error)

@@ -16,7 +16,7 @@ import (
 )
 
 func TestPostgresFinalizationSurvivesDeadlineAndReclaimsWithoutModelConfiguration(t *testing.T) {
-	db := testsupport.Postgres(t, &RunRecord{}, &ModelRequest{})
+	db := testsupport.Postgres(t, &RunRecord{}, &ModelRequest{}, &RunOutbox{})
 	row := fixtureRun(t, db)
 	row.Payload = json.RawMessage(`{"enable_artifacts":true}`)
 	row.OutputBaseline = json.RawMessage(`{"/workspace/outputs/old.txt":"old-hash"}`)
@@ -62,7 +62,7 @@ func TestPostgresFinalizationSurvivesDeadlineAndReclaimsWithoutModelConfiguratio
 
 func TestPostgresBaselineAndFinalizationUseGlobalAuthAndImmutableRunOwnership(t *testing.T) {
 	t.Setenv("AGENT_RUNTIME_API_KEY", "internal-test-key")
-	db := testsupport.Postgres(t, &RunRecord{}, &ModelRequest{})
+	db := testsupport.Postgres(t, &RunRecord{}, &ModelRequest{}, &RunOutbox{})
 	row := fixtureRun(t, db)
 	router := gin.New()
 	router.Use(middleware.Auth(nil, &accountJWTRejector{}, nil, nil))

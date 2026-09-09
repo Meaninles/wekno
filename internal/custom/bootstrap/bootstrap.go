@@ -680,6 +680,7 @@ func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers, uploadGuard
 		return
 	}
 	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.AgentRuntime.DownloadEmbedArtifact)
+	embed.GET("/sessions/:session_id/messages/:message_id/process/:call_id/sources", handlers.AgentRuntime.EmbedProcessSources)
 	if handlers.SessionTitles != nil && sessionGuard != nil {
 		handlers.SessionTitles.Register(embed.Group("", sessionGuard))
 	}
@@ -1028,6 +1029,7 @@ func RegisterRoutes(
 	agentRuntimeRoutes := v1.Group("/custom/agent-runtime")
 	{
 		agentRuntimeRoutes.GET("/artifacts/:id/download", handlers.AgentRuntime.DownloadArtifact)
+		agentRuntimeRoutes.GET("/messages/:message_id/process/:call_id/sources", handlers.AgentRuntime.ProcessSources)
 	}
 
 	answerFeedbackRoutes := v1.Group("/custom/answer-feedback")

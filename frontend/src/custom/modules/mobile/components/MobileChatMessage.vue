@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ProcessPreview from "@/custom/modules/agentstream/ProcessPreview.vue";
+import { reasoningRoundCount } from '@/custom/modules/agentstream/processPresentation';
 import FailureNotice from '@/custom/modules/failures/FailureNotice.vue';
 import { messageFailure } from '@/custom/modules/failures/failures';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
@@ -147,52 +149,6 @@ const closePreImg = () => {
   reviewImg.value = false;
   reviewUrl.value = "";
 };
-
-const latestAgentPreview = computed(() => {
-  const stream = Array.isArray(props.message.agentEventStream)
-    ? props.message.agentEventStream
-    : [];
-  for (let index = stream.length - 1; index >= 0; index -= 1) {
-    const event = stream[index] || {};
-    const progress = event.agent_progress?.message || event.agent_progress_history?.at?.(-1)?.message;
-    const text =
-      progress ||
-      event.content ||
-      event.output ||
-      event.tool_data?.agent_progress_message ||
-      event.tool_data?.message ||
-      (event.tool_name ? `正在调用 ${event.tool_name}` : "");
-    if (String(text || "").trim()) return String(text).trim();
-  }
-  if (props.message.thinkContent) return String(props.message.thinkContent);
-  if (props.message.content) return String(props.message.content);
-  return "正在分析上下文和可用工具";
-});
-
-const agentStepPreviews = computed(() => {
-  const stream = Array.isArray(props.message.agentEventStream)
-    ? props.message.agentEventStream
-    : [];
-  const steps: string[] = [];
-  const seen = new Set<string>();
-
-  for (const event of stream) {
-    const progress = event.agent_progress?.message || event.agent_progress_history?.at?.(-1)?.message;
-    const text =
-      progress ||
-      event.content ||
-      event.output ||
-      event.tool_data?.agent_progress_message ||
-      event.tool_data?.message ||
-      (event.tool_name ? `正在调用 ${event.tool_name}` : "");
-    const normalized = String(text || "").trim();
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    steps.push(normalized);
-  }
-
-  return steps.slice(-2);
-});
 
 const shouldShowThinking = computed(() => {
   return !props.shareMode && isAssistant.value && props.message.isAgentMode && !props.message.is_completed;
@@ -364,7 +320,7 @@ const completedAgentSummary = computed(() => {
   if (simpleConversation.value) return duration ? `耗时 ${duration}` : "";
   if (props.message.agent_mode === true) {
 	const stream = Array.isArray(props.message.agentEventStream) ? props.message.agentEventStream : [];
-	const rounds = stream.filter((event: any) => event?.type === "thinking").length;
+	const rounds = reasoningRoundCount(stream);
 	const tools = agentToolCountFromMessage(props.message);
     const parts: string[] = [];
     if (rounds > 0) parts.push(`思考 ${rounds} 轮`);
@@ -1165,17 +1121,12 @@ const replyFailure = computed(() => messageFailure(props.message));
           <MobileIcon name="file" />
           <span>{{ retrievalStats?.citationFailed ? '引用补充失败，正文已保留' : '未引用参考资料' }}</span>
         </div>
-        <div v-if="completedAgentSummary" class="mobile-run-summary">{{ completedAgentSummary }}</div>
-        <div v-if="shouldShowThinking" class="thinking-card">
-          <div class="thinking-title">正在思考</div>
-          <div v-if="agentStepPreviews.length" class="thinking-steps">
-            <div v-for="step in agentStepPreviews" :key="step" class="thinking-step">
-              <span />
-              <em>{{ step }}</em>
-            </div>
-          </div>
-          <div v-else class="thinking-preview">{{ latestAgentPreview }}</div>
-        </div>
+        <div v-if="completedAgentSummary && (shareMode || !message.agentEventStream?.length)" class="mobile-run-summary">{{ completedAgentSummary }}</div>
+        <ProcessPreview v-if="shouldShowThinking" :message="message" />
+        <details v-if="!shareMode && message.is_completed && message.agentEventStream?.length" class="mobile-process-history">
+          <summary class="mobile-run-summary">{{ completedAgentSummary || '处理结束' }}</summary>
+          <ProcessPreview :message="message" history />
+        </details>
 
         <template v-if="!shouldShowThinking">
           <template v-for="segment in answerSegments" :key="segment.key">

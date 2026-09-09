@@ -258,8 +258,11 @@ type ToolCall struct {
 
 // AgentStep represents one iteration of the ReAct loop
 type AgentStep struct {
-	Iteration int    `json:"iteration"` // Iteration number (0-indexed)
-	Thought   string `json:"thought"`   // LLM's reasoning/thinking (Think phase)
+	ProcessKind   string `json:"process_kind,omitempty"`
+	EventID       string `json:"event_id,omitempty"`
+	ProcessStatus string `json:"process_status,omitempty"`
+	Iteration     int    `json:"iteration"` // Iteration number (0-indexed)
+	Thought       string `json:"thought"`   // LLM's reasoning/thinking (Think phase)
 	// ReasoningContent stores the OpenAI-protocol reasoning_content emitted by the
 	// model in this round. Persisted on AgentStep so cross-turn replay can put it
 	// back on the assistant message — required by MiMo / DeepSeek V3.2+ thinking

@@ -22,7 +22,7 @@
                 :session="session" :content="answerText" :embedded-mode="embeddedMode" />
             <CompletedSimpleRunSummary v-if="!session.isRagMode && !session.isAgentMode" :message="session" />
             <div v-if="session.isRagMode" class="rag-answer-stack">
-                <RagPipelineProgress :session="session" :embedded-mode="embeddedMode" />
+                <RagPipelineProgress v-if="!session.isAgentMode" :session="session" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay v-if="session.isAgentMode" :session="session" :session-id="sessionId"
                     :user-query="userQuery" :rag-mode="true" :share-mode="shareMode" />
             </div>

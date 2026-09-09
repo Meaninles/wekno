@@ -342,6 +342,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 	}
 
 	var outputs []string
+	pages := []map[string]any{}
 	var errs []string
 	// Per-slug list of KB IDs where the slug was found. A slug may exist in
 	// multiple KBs when the agent has several wiki KBs in scope.
@@ -401,6 +402,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 			}
 		}
 
+		pages = append(pages, map[string]any{"slug": page.Slug, "title": page.Title, "knowledge_base_id": kbID, "content": contentBody})
 		rendered := fmt.Sprintf(`<wiki_page>
 <metadata>
 <knowledge_base_id>%s</knowledge_base_id>
@@ -538,6 +540,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 		Data: map[string]interface{}{
 			"found_kbs":       foundKBs,
 			"ambiguous_slugs": ambiguous,
+			"pages":           pages,
 		},
 	}
 	attachWikiReceipt(result, effectiveScopes, slugsToFetch, len(outputs), len(outputs), errs)
@@ -641,6 +644,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	}
 
 	var allOutputs []string
+	pages := []map[string]any{}
 	var searchErrors []string
 	candidateCount, resultCount := 0, 0
 	limitReached := false
@@ -715,6 +719,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			t.mu.Unlock()
 
 			snippet := extractSnippet(p.Content, query)
+			pages = append(pages, map[string]any{"slug": p.Slug, "title": p.Title, "knowledge_base_id": h.kbID, "snippet": snippet, "summary": p.Summary})
 			snippetTag := ""
 			if snippet != "" {
 				snippetTag = fmt.Sprintf("\n<match_snippet>%s</match_snippet>", snippet)
@@ -743,6 +748,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		Output:  strings.Join(allOutputs, "\n\n"),
 		Data: map[string]interface{}{
 			"found_kbs": foundKBs,
+			"pages":     pages,
 		},
 	}
 	result.Data["candidate_limit_reached"] = limitReached

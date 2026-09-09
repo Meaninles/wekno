@@ -221,7 +221,7 @@ func (s *Service) callTool(ctx context.Context, req ToolCallRequest) (*ToolCallR
 		if updated.RowsAffected != 1 {
 			return errRunFenced
 		}
-		emitted := event.Event{Type: event.EventAgentToolResult, SessionID: row.SessionID, Data: event.AgentToolResultData{ToolCallID: req.ToolCallID, ToolName: req.ToolName, Output: result.Output, Error: result.Error, Success: result.Success, Duration: duration, Data: result.Data}}
+		emitted := event.Event{Type: event.EventAgentToolResult, SessionID: row.SessionID, Data: event.AgentToolResultData{ToolCallID: req.ToolCallID, ToolName: req.ToolName, Output: result.Output, Error: result.Error, Success: result.Success, Duration: duration, Data: withProcessSources(result.Data)}}
 		body, e := json.Marshal(emitted)
 		if e != nil {
 			return e
@@ -348,19 +348,5 @@ func runSteps(db *gorm.DB, id string) ([]types.AgentStep, error) {
 	if err := db.Where("run_id = ?", id).Order("created_at, call_id").Find(&calls).Error; err != nil {
 		return nil, err
 	}
-	steps := make([]types.AgentStep, 0, len(calls))
-	for i, call := range calls {
-		var args map[string]any
-		var result ToolCallResponse
-		if err := json.Unmarshal(call.Arguments, &args); err != nil {
-			return nil, err
-		}
-		if len(call.Response) > 0 {
-			if err := json.Unmarshal(call.Response, &result); err != nil {
-				return nil, err
-			}
-		}
-		steps = append(steps, types.AgentStep{Iteration: i, ToolCalls: []types.ToolCall{{ID: call.CallID, Name: call.Name, Args: args, Result: &types.ToolResult{Success: result.Success, Output: result.Output, Error: result.Error, Data: result.Data}}}})
-	}
-	return steps, nil
+	return processSteps(db, id, calls)
 }

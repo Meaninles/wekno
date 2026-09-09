@@ -480,8 +480,8 @@ func (s *Service) replayRun(ctx context.Context, initial *RunRecord, bus *event.
 			}
 			cursor = stored.Seq
 			switch item.Type {
-			case "thought_delta":
-				bus.Emit(ctx, event.Event{ID: initial.MessageID, Type: event.EventAgentThought, SessionID: initial.SessionID, Data: event.AgentThoughtData{Content: item.Content, Iteration: int(item.Revision)}})
+			case "thought_delta", "commentary", "process_status":
+				bus.Emit(ctx, event.Event{ID: processEventID(initial.ID, item), Type: event.EventAgentThought, SessionID: initial.SessionID, Data: event.AgentThoughtData{Content: item.Content, Iteration: int(item.Revision), Done: item.Done, Kind: item.Type, Sequence: stored.Seq}})
 			case "answer_delta":
 				// Candidate text is private until structured citation filtering at commit.
 				continue

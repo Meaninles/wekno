@@ -16,212 +16,16 @@
           </div>
         </div>
       </div>
-      <!-- Tree children (intermediate steps) -->
-      <div v-if="showIntermediateSteps" class="tree-children">
-        <template v-for="(event, index) in visibleIntermediateEvents" :key="getEventKey(event, index)">
-          <div v-if="event && event.type" class="tree-child"
-            :class="{ 'tree-child-last': !isConversationDone && index === visibleIntermediateEvents.length - 1 }">
-            <div class="tree-branch"></div>
-            <div class="tree-child-content">
-              <!-- Plan Task Change Event -->
-              <div v-if="event.type === 'plan_task_change'" class="plan-task-change-event">
-                <div class="plan-task-change-card">
-                  <div class="plan-task-change-content">
-                    <strong>{{ $t('agent.taskLabel') }}</strong> {{ event.task }}
-                  </div>
-                </div>
-              </div>
-
-              <!-- Thinking Event (streaming / merged). When a round's retracted
-                   preamble was folded in, it becomes the card title and the
-                   reasoning is the expandable body. -->
-              <div v-if="event.type === 'thinking'" class="tool-event">
-                <div class="action-card" :class="{ 'action-pending': isThinkingActive(event.event_id) }">
-                  <div class="action-header" @click="toggleEvent(event.event_id)">
-                    <div class="action-title">
-                      <span class="action-title-icon icon-mask" :style="maskIconStyle(thinkingIcon)"
-                        aria-hidden="true" />
-                      <span v-if="event.title" class="action-name action-preamble-title">{{ event.title }}</span>
-                      <span v-else-if="isEventExpanded(event.event_id)" class="action-name">{{ $t('agent.think')
-                      }}</span>
-                      <span v-else-if="getThinkingSummary(event)" class="action-summary">{{ getThinkingSummary(event)
-                        }}</span>
-                    </div>
-                  </div>
-                  <div v-if="event.content && isEventExpanded(event.event_id)" class="action-details">
-                    <div class="thinking-detail-content markdown-content">
-                      <div v-html="renderMarkdownContent(event.content)"></div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Thinking Tool Call -->
-              <div v-else-if="event.type === 'tool_call' && event.tool_name === 'thinking'" class="tool-event">
-                <div class="action-card"
-                  :class="{ 'action-pending': event.pending || isThinkingActive(event.tool_call_id) }">
-                  <div class="action-header" @click="toggleEvent(event.tool_call_id)">
-                    <div class="action-title">
-                      <span class="action-title-icon icon-mask" :style="maskIconStyle(thinkingIcon)"
-                        aria-hidden="true" />
-                      <span class="action-name">{{ $t('agent.think') }}</span>
-                      <span v-if="event.tool_data?.thought_number" class="action-badge">{{
-                        event.tool_data.thought_number }}/{{ event.tool_data.total_thoughts }}</span>
-                      <span v-if="getThinkingSummary(event) && !isEventExpanded(event.tool_call_id)"
-                        class="action-summary">{{ getThinkingSummary(event) }}</span>
-                    </div>
-                  </div>
-                  <div v-if="event.tool_data?.thought && isEventExpanded(event.tool_call_id)" class="action-details">
-                    <div class="thinking-detail-content markdown-content">
-                      <div v-html="renderMarkdownContent(event.tool_data.thought)"></div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- MCP tool human approval (issue #1173) -->
-              <div v-else-if="event.type === 'tool_approval_required'" class="tool-event">
-                <ToolApprovalCard :pending-id="event.pending_id" :service-name="event.service_name || ''"
-                  :mcp-tool-name="event.mcp_tool_name || ''" :description="event.description"
-                  :args-json="event.args_json" :timeout-seconds="event.timeout_seconds"
-                  :requested-at="event.requested_at" :resolved="event.resolved" :approved="event.approved"
-                  :resolve-reason="event.resolve_reason" v-bind="embedAuthProps" />
-              </div>
-
-              <!-- MCP OAuth in-conversation authorization prompt -->
-              <div v-else-if="event.type === 'mcp_oauth_required'" class="tool-event">
-                <McpOAuthCard :pending-id="event.pending_id" :service-id="event.service_id || ''"
-                  :service-name="event.service_name || ''" :mcp-tool-name="event.mcp_tool_name || ''"
-                  :timeout-seconds="event.timeout_seconds" :requested-at="event.requested_at"
-                  :resolved="event.resolved" :authorized="event.authorized"
-                  :resolve-reason="event.resolve_reason" :timed-out="event.timed_out" :canceled="event.canceled"
-                  v-bind="embedAuthProps" />
-              </div>
-
-              <!-- Tool Call Event (non-thinking) -->
-              <div v-else-if="event.type === 'tool_call'" class="tool-event">
-                <div class="action-card" :class="{
-                  'action-pending': event.pending,
-                  'action-error': event.success === false
-                }">
-                  <div class="action-header" @click="handleActionHeaderClick(event)"
-                    :class="{ 'no-results': !hasResults(event) }">
-                    <div class="action-title">
-                      <t-icon v-if="event.tool_name" class="action-title-icon"
-                        :name="getToolIconName(event.tool_name)" />
-                      <t-tooltip v-if="event.tool_name === 'todo_write' && event.tool_data?.steps"
-                        :content="t('agent.updatePlan')" placement="top">
-                        <span class="action-name">{{ $t('agent.updatePlan') }}</span>
-                      </t-tooltip>
-                      <t-tooltip v-else :content="getToolTitle(event)" placement="top">
-                        <span class="action-name" :class="{ 'agent-progress-title': getAgentProgressMessage(event) }">
-                          {{ getToolTitle(event) }}
-                        </span>
-                      </t-tooltip>
-                    </div>
-                  </div>
-
-                  <div v-if="!event.pending && event.tool_name === 'todo_write' && event.tool_data?.steps"
-                    class="plan-status-summary-fixed">
-                    <div class="plan-status-text">
-                      <template v-for="(part, partIndex) in getPlanStatusItems(event)" :key="partIndex">
-                        <t-icon :name="part.icon" :class="['status-icon', part.class]" />
-                        <span>{{ part.label }} {{ part.count }}</span>
-                        <span v-if="partIndex < getPlanStatusItems(event).length - 1" class="separator">·</span>
-                      </template>
-                    </div>
-                  </div>
-
-                  <div
-                    v-if="!event.pending && isKnowledgeSearchToolName(event.tool_name) && event.tool_data && getSearchResultsSummary(event)"
-                    class="search-results-summary-fixed">
-                    <div class="results-summary-text" v-html="getSearchResultsSummary(event)"></div>
-                  </div>
-
-                  <div v-if="!event.pending && isWebSearchToolName(event.tool_name) && event.tool_data"
-                    class="search-results-summary-fixed">
-                    <div class="results-summary-text"
-                      v-html="t('agent.webSearchFound', { count: getResultsCount(event.tool_data) })">
-                    </div>
-                  </div>
-
-                  <div v-if="!event.pending && event.tool_name === 'grep_chunks' && event.tool_data"
-                    class="search-results-summary-fixed grep-summary">
-                    <div class="results-summary-text" v-html="getGrepResultsSummary(event.tool_data)"></div>
-                  </div>
-
-                  <div v-if="!event.pending && event.tool_name === 'list_knowledge_chunks' && event.tool_data"
-                    class="search-results-summary-fixed knowledge-chunks-summary">
-                    <div class="results-summary-text" v-html="getKnowledgeChunksSummary(event.tool_data)"></div>
-                  </div>
-
-                  <div v-if="!event.pending && getToolError(event)" class="tool-error-summary">
-                    <div class="tool-error-text">{{ getToolError(event) }}</div>
-                  </div>
-
-                  <div v-if="isEventExpanded(event.tool_call_id) && event.agent_progress_history?.length"
-                    class="agent-progress-history">
-                    <div v-for="(item, progressIndex) in event.agent_progress_history"
-                      :key="`${event.tool_call_id}-agent-progress-${progressIndex}`" class="agent-progress-history-item">
-                      <span class="agent-progress-history-dot"></span>
-                      <span class="agent-progress-history-message">{{ item.message }}</span>
-                    </div>
-                  </div>
-
-                  <div v-if="isEventExpanded(event.tool_call_id) && !event.pending && hasResults(event)"
-                    class="action-details">
-                    <div v-if="getToolError(event)" class="tool-output-wrapper tool-error-output">
-                      <div class="detail-output-wrapper">
-                        <div class="detail-output">{{ getToolError(event) }}</div>
-                      </div>
-                    </div>
-                    <div v-else-if="event.display_type && event.tool_data" class="tool-result-wrapper">
-                      <ToolResultRenderer :display-type="event.display_type" :tool-data="event.tool_data"
-                        :output="event.output" :arguments="event.arguments" :embedded-mode="embeddedMode"
-                        :embed-channel-id="embedChannelId" :embed-token="embedToken" :embed-session-id="sessionId"
-                        :embed-session-sig="embedSessionSig" />
-                    </div>
-                    <div v-else-if="event.output" class="tool-output-wrapper">
-                      <div class="fallback-header">
-                        <span class="fallback-label">{{ $t('chat.rawOutputLabel') }}</span>
-                      </div>
-                      <div class="detail-output-wrapper">
-                        <div class="detail-output">{{ event.output }}</div>
-                      </div>
-                    </div>
-                    <!-- Raw arguments hidden for user-friendly display -->
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </template>
-        <div v-if="isConversationDone" class="tree-child tree-child-last agent-step-done">
-          <div class="tree-branch"></div>
-          <div class="tree-child-content">
-            <div class="action-card">
-              <div class="action-header no-results">
-                <div class="action-title">
-                  <t-icon class="action-title-icon" name="check-circle" />
-                  <span class="action-name">{{ t('common.finish') }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <ProcessPreview v-if="showIntermediateSteps" :message="session" history :session-id="sessionId" :embed-channel-id="embedChannelId" :embed-token="embedToken" :embed-session-sig="embedSessionSig" />
     </div>
 
     <!-- Event Stream (non-tree mode: before answer starts, or answer events) -->
-    <div v-if="!ragMode || displayEvents.length > 0 || showAgentActivityIndicator" ref="streamingStepsContainer"
+    <div v-if="!ragMode || displayEvents.length > 0 || showAgentActivityIndicator || showLiveProcessPreview" ref="streamingStepsContainer"
       class="streaming-steps-container" :class="{
         'streaming-steps-constrained': !answerEverStarted && !isConversationDone,
         'is-streaming-timeline': showStreamingTimeline
       }">
-      <LiveProcessPreview
-        v-if="showLiveProcessPreview"
-        :items="liveProcessPreviews"
-      />
+      <ProcessPreview v-if="showLiveProcessPreview" :message="session" :session-id="sessionId" :embed-channel-id="embedChannelId" :embed-token="embedToken" :embed-session-sig="embedSessionSig" />
       <template v-for="(event, index) in displayEvents" :key="getEventKey(event, index)">
         <div v-if="event && event.type" class="event-item" :class="{
           'event-answer': event.type === 'answer',
@@ -542,7 +346,8 @@ import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
-import LiveProcessPreview from '@/custom/modules/agentstream/LiveProcessPreview.vue';
+import ProcessPreview from '@/custom/modules/agentstream/ProcessPreview.vue';
+import { reasoningRoundCount } from '@/custom/modules/agentstream/processPresentation';
 import {
   agentToolCountFromMessage,
   formatCompletedRunDuration,
@@ -1053,7 +858,6 @@ const usesRuntimeTerminalDelivery = computed(
 const liveProjection = computed<LiveAgentProjection | null>(() =>
   readLiveAgentProjection(props.session as unknown as Record<string, unknown>),
 );
-const liveProcessPreviews = computed(() => liveProjection.value?.previews || []);
 
 const isRagPipelineToolCallEvent = (event: any): boolean => {
   return Boolean(
@@ -1263,7 +1067,6 @@ let streamingMermaidRenderId = 0;
 
 const activeAnswerMarkdown = computed(() => {
   if (
-    usesRuntimeTerminalDelivery.value &&
     !isConversationDone.value &&
     liveProjection.value?.activeAnswer
   ) {
@@ -1283,7 +1086,6 @@ const activeAnswerMarkdown = computed(() => {
 // smoothed typewriter text for this event and the raw content for any others.
 const activeAnswerEventRef = computed(() => {
   if (
-    usesRuntimeTerminalDelivery.value &&
     !isConversationDone.value &&
     liveProjection.value?.activeAnswer
   ) {
@@ -1363,14 +1165,11 @@ watch(answerFullyRendered, (ready) => {
 // Agent: dots until the turn completes. RAG: pipeline dots before answer; answer stream dots after.
 const showLiveProcessPreview = computed(
   () =>
-    usesRuntimeTerminalDelivery.value &&
-    !isConversationDone.value &&
-    !props.ragMode &&
-    !shareMode.value,
+    !isConversationDone.value && !shareMode.value,
 );
 
 const showAgentActivityIndicator = computed(() => {
-  if (isConversationDone.value) return false;
+  if (isConversationDone.value || showLiveProcessPreview.value) return false;
   if (props.ragMode) return hasAnswerStarted.value || hasNonRagToolEvents.value;
   return !showLiveProcessPreview.value;
 });
@@ -1476,7 +1275,7 @@ const intermediateStepsCount = computed(() => {
 // thinking card plus its tool calls).
 const reasoningRoundsCount = computed(() => {
   if (!hasAnswerStarted.value && !isConversationDone.value) return 0;
-  return intermediateEvents.value.filter((e: any) => e.type === 'thinking').length;
+  return reasoningRoundCount(eventStream.value);
 });
 
 const otherToolCallsCount = computed(() => {
@@ -1538,15 +1337,9 @@ const intermediateStepsSummaryHtml = computed(() => {
   return intermediateStepsSummary.value;
 });
 
-// Should show the collapsed steps indicator (tree root). Collapse ONLY once the
-// conversation is done. In RAG quick-answer mode, RagPipelineProgress owns the
-// retrieval timeline; keep AgentStreamDisplay for additional tool/skill calls.
+// All agent types share the same completed process disclosure.
 const shouldShowCollapsedSteps = computed(() => {
-  // isAgentMode is also used internally to reuse this renderer for restored
-  // quick-answer pipelines. Tool telemetry belongs only to a real ReAct turn,
-  // whose backend-authoritative per-message flag is agent_mode=true.
-  if (props.ragMode && props.session?.agent_mode !== true) return false
-  if (props.ragMode && !hasNonRagToolEvents.value) return false
+  if (shareMode.value) return false;
   const hasSteps = intermediateStepsCount.value > 0;
   return isConversationDone.value && (hasSteps || retrievalStats.value !== null);
 });
@@ -1918,15 +1711,15 @@ const displayEvents = computed(() => {
   // Live runs use the O(1) projection maintained by the stream handler. This
   // avoids rebuilding the complete event tree for every token while still
   // keeping approval/OAuth cards actionable and the current answer visible.
-  if (
-    usesRuntimeTerminalDelivery.value &&
-    !isConversationDone.value &&
-    liveProjection.value
-  ) {
-    const interactive = liveProjection.value.interactiveEvents.filter(
+  if (!isConversationDone.value) {
+    const interactive = (liveProjection.value?.interactiveEvents || stream.filter(
+      (event: any) => ['tool_approval_required', 'mcp_oauth_required'].includes(event.type),
+    )).filter(
       (event: any) => event && event.resolved !== true,
     );
-    const answer = liveProjection.value.activeAnswer;
+    const answer = liveProjection.value?.activeAnswer || stream.filter(
+      (event: any) => event.type === 'answer' && event.superseded !== true,
+    ).at(-1);
     if (
       answer &&
       answer.superseded !== true &&
@@ -1943,25 +1736,6 @@ const displayEvents = computed(() => {
   // If the same turn also emits additional tool/skill calls, show those here.
   if (props.ragMode && !hasNonRagToolEvents.value) {
     return result.filter((e: any) => e.type === 'answer' && !e.superseded);
-  }
-
-  // While the conversation is still running, keep the same lightweight tool-log
-  // surface as the completed tree. Raw thinking narration is noisy during
-  // streaming; the active state is represented by the compact activity dots.
-  if (!isConversationDone.value) {
-    const lastRenderableIndex = (() => {
-      for (let i = result.length - 1; i >= 0; i -= 1) {
-        if (result[i]?.type !== 'agent_complete') return i;
-      }
-      return -1;
-    })();
-    return result.filter((e: any, index: number) => {
-      if (isRagDelegatedEvent(e)) return false;
-      if (isTransientStatusEvent(e)) return index === lastRenderableIndex;
-      if (e.type === 'thinking') return false;
-      if (e.type === 'tool_call' && e.tool_name === 'thinking') return false;
-      return true;
-    });
   }
 
   // Done: the steps live in the collapsed tree; show only the answer here.

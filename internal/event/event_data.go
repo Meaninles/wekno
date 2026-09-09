@@ -179,6 +179,8 @@ type AgentThoughtData struct {
 	Content   string `json:"content"`
 	Iteration int    `json:"iteration"`
 	Done      bool   `json:"done"`
+	Kind      string `json:"kind,omitempty"`
+	Sequence  int64  `json:"sequence,omitempty"`
 }
 
 // AgentProgressData represents user-visible generic agent progress.

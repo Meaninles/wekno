@@ -353,8 +353,16 @@ func terminateRun(tx *gorm.DB, row *RunRecord, status, reason string, codes ...s
 			return storeResult(tx, row, result, "incomplete")
 		}
 	}
+	steps, err := runSteps(tx, row.ID)
+	if err != nil {
+		return err
+	}
+	stepsJSON, err := json.Marshal(steps)
+	if err != nil {
+		return err
+	}
 	if err := tx.Model(&types.Message{}).Where("id = ? AND session_id = ? AND role = 'assistant'", row.MessageID, row.SessionID).Updates(map[string]any{
-		"is_completed": true, "content": failure.Message, "error_code": failure.Code, "updated_at": time.Now(),
+		"is_completed": true, "content": failure.Message, "error_code": failure.Code, "updated_at": time.Now(), "agent_steps": string(stepsJSON),
 	}).Error; err != nil {
 		return err
 	}

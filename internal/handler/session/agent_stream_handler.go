@@ -221,6 +221,9 @@ func (h *AgentStreamHandler) handleThought(ctx context.Context, evt event.Event)
 		}
 	}
 
+	metadata["process_kind"] = data.Kind
+	metadata["sequence"] = data.Sequence
+	metadata["iteration"] = data.Iteration
 	h.mu.Unlock()
 
 	// Append this chunk to stream (no accumulation - frontend will accumulate)

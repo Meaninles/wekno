@@ -48,5 +48,8 @@ func beginFinalization(tx *gorm.DB, row *RunRecord, value Finalization) error {
 	row.Finalization = raw
 	row.Status = "finalizing"
 	row.Deadline = time.Now().Add(deliveryWindow)
+	if err := outbox(tx, row, StreamEvent{Type: "process_status", ID: "delivery", Revision: row.Revision, Content: "正在整理并交付结果"}); err != nil {
+		return err
+	}
 	return tx.Save(row).Error
 }

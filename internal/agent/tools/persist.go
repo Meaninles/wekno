@@ -23,6 +23,19 @@ const (
 // sent to browsers through SSE or history APIs. It intentionally keeps only
 // fields currently needed by frontend renderers and caps user/content payloads.
 func SanitizeToolDataForClient(data map[string]interface{}) map[string]interface{} {
+	out := sanitizeToolDisplayData(data)
+	if out != nil {
+		if value, ok := data["process_sources"]; ok {
+			out["process_sources"] = sanitizeMapList(value, 2, []string{"id", "kind", "title", "url", "knowledge_id", "knowledge_base"}, map[string]int{"title": 240, "url": 2048, "knowledge_base": 240})
+		}
+		if value, ok := data["process_source_count"]; ok {
+			out["process_source_count"] = value
+		}
+	}
+	return out
+}
+
+func sanitizeToolDisplayData(data map[string]interface{}) map[string]interface{} {
 	if data == nil {
 		return nil
 	}

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from agentscope.event import ModelCallStartEvent, TextBlockDeltaEvent, ThinkingBlockDeltaEvent, ToolCallStartEvent, ToolCallDeltaEvent
+from agentscope.event import ModelCallStartEvent, ModelCallEndEvent, TextBlockDeltaEvent, ThinkingBlockDeltaEvent, ToolCallStartEvent, ToolCallDeltaEvent
 from agentscope.message import Msg
 
 from .contracts import RunEvent
@@ -22,14 +22,31 @@ class Events:
         self.first_text = True
         self.answer_streams = {}
         self.decision_tools = []
+        self.thought_blocks = set()
+        self.text_blocks = {}
 
     async def sdk(self, item) -> None:
         if isinstance(item, Msg):
             return
         if isinstance(item, ModelCallStartEvent):
+            await self.close_thoughts()
             self.revision += 1
             self.answer_streams.clear()
             self.decision_tools.clear()
+            self.text_blocks.clear()
+            await self.push(RunEvent(type="process_status", id="model", content="正在思考"), flush=True)
+        if isinstance(item, TextBlockDeltaEvent):
+            # Hold ordinary text until the decision proves it is a business-tool
+            # preamble. Final candidates and invalid decisions stay private.
+            self.text_blocks[item.block_id] = (self.text_blocks.get(item.block_id, "") + item.delta)[:12000]
+            return
+        if isinstance(item, ModelCallEndEvent):
+            await self.close_thoughts()
+            if self.decision_tools and ANSWER_TOOL not in self.decision_tools:
+                for block, text in self.text_blocks.items():
+                    if text.strip():
+                        await self.push(RunEvent(type="commentary", id=block, content=text, done=True))
+            self.text_blocks.clear()
         if isinstance(item, ToolCallStartEvent):
             self.decision_tools.append(item.tool_call_name)
             if ANSWER_TOOL in self.decision_tools and len(self.decision_tools) != 1:
@@ -42,10 +59,11 @@ class Events:
             final.feed(item.delta)
             # The complete candidate is filtered by the backend before publishing.
             return
-        elif final is not None or isinstance(item, TextBlockDeltaEvent):
+        elif final is not None:
             return
         elif isinstance(item, ThinkingBlockDeltaEvent):
-            event = RunEvent(type="thought_delta", content=item.delta, revision=self.revision, id=item.id)
+            self.thought_blocks.add(item.block_id)
+            event = RunEvent(type="thought_delta", content=item.delta, revision=self.revision, id=item.block_id)
         else:
             event = RunEvent(type="sdk", id=item.id, revision=self.revision,
                              data={"event_type":item.type})
@@ -53,6 +71,11 @@ class Events:
         if first:
             self.first_text = False
         await self.push(event, flush=first)
+
+    async def close_thoughts(self):
+        for block in sorted(self.thought_blocks):
+            await self.push(RunEvent(type="thought_delta", id=block, done=True))
+        self.thought_blocks.clear()
 
     async def push(self, event: RunEvent, *, flush: bool = False) -> None:
         async with self.lock:

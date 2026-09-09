@@ -125,8 +125,36 @@ const channelLabel = computed(() => {
 const channelClass = computed(() => props.channel ? `channel-${props.channel}` : '');
 
 const containerRef = ref(null);
-const displayImages = computed(() => normalizeMessageImages(props.images));
-const displayAttachments = computed(() => normalizeMessageAttachments(props.attachments));
+const IMAGE_EXTENSIONS = new Set([
+    'avif', 'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp',
+]);
+const isImageAttachment = (attachment) => {
+    const type = String(attachment?.file_type || '').trim().toLowerCase();
+    if (type.startsWith('image/')) return true;
+    const normalizedType = type.replace(/^\./, '').split(/[?#]/)[0];
+    if (IMAGE_EXTENSIONS.has(normalizedType)) return true;
+    const fileName = String(attachment?.file_name || '').toLowerCase().split(/[?#]/)[0];
+    const dot = fileName.lastIndexOf('.');
+    return dot >= 0 && IMAGE_EXTENSIONS.has(fileName.slice(dot + 1));
+};
+const normalizedAttachments = computed(() => normalizeMessageAttachments(props.attachments));
+const imageAttachments = computed(() => normalizedAttachments.value
+    .filter((attachment) => isImageAttachment(attachment) && !!attachment.url)
+    .map((attachment) => ({ ...attachment, name: attachment.file_name })));
+const displayImages = computed(() => {
+    const seen = new Set();
+    return [
+        ...normalizeMessageImages(props.images),
+        ...imageAttachments.value,
+    ].filter((image) => {
+        const key = String(image.url || image.name || '');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+});
+const displayAttachments = computed(() => normalizedAttachments.value
+    .filter((attachment) => !isImageAttachment(attachment) || !attachment.url));
 const hasImages = computed(() => displayImages.value.length > 0);
 const hasAttachments = computed(() => displayAttachments.value.length > 0);
 
@@ -165,7 +193,7 @@ const hydrateImages = async () => {
 };
 
 watch(
-    [() => props.images, () => props.shareMode, () => props.shareToken],
+    [() => props.images, () => props.attachments, () => props.shareMode, () => props.shareToken],
     hydrateImages,
     { deep: true },
 );

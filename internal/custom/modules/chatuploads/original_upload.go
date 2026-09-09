@@ -271,7 +271,19 @@ func (s *Service) HistoryOriginalInputs(ctx context.Context, sessionID string) (
 	for _, row := range rows {
 		ids = append(ids, row.ID)
 	}
-	return s.ResolveOriginalInputs(ctx, sessionID, ids)
+	// The per-turn selection limit must not limit a conversation's history.
+	var originals []types.OriginalInputFile
+	for start := 0; start < len(ids); start += 32 {
+		_, batch, err := s.ResolveOriginalInputs(ctx, sessionID, ids[start:min(start+32, len(ids))])
+		if err != nil {
+			return nil, nil, err
+		}
+		for i := range batch {
+			batch[i].Role = "historical_uploaded_file"
+		}
+		originals = append(originals, batch...)
+	}
+	return nil, originals, nil
 }
 
 func (s *Service) deleteOriginalRow(ctx context.Context, row *OriginalUpload) error {

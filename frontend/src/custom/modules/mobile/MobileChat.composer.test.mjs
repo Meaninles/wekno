@@ -7,9 +7,10 @@ import test from 'node:test'
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, 'views', 'MobileChat.vue'), 'utf8')
 
-test('mobile composer resets textarea height after clearing sent text', () => {
+test('mobile composer clears only sent upload payloads', () => {
   assert.match(source, /const clearComposerInput = async \(\) => \{\s*inputValue\.value = "";\s*await nextTick\(\);\s*autoGrow\(\);\s*\}/)
-  assert.match(source, /await clearComposerInput\(\);\s*saveSessionDraftState/)
+  assert.match(source, /const clearUploadedFiles = \(\) => \{\s*pendingImages\.value = \[\];\s*pendingAttachments\.value = \[\];\s*\}/)
+  assert.match(source, /await clearComposerInput\(\);\s*clearUploadedFiles\(\);\s*detachUploads\(\);\s*saveSessionDraftState\(\s*sessionId,\s*requestSettings,\s*\[\],\s*\[\],\s*""/)
 })
 
 test('mobile composer auto-grows after DOM value updates', () => {

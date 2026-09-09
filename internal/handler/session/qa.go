@@ -250,11 +250,10 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		}
 		knowledgeIDs = dedupRequestStrings(append(knowledgeIDs, historyTargets...))
 		sessionUploadKnowledgeIDs = append(sessionUploadKnowledgeIDs, historyTargets...)
-		historyAttachments, historyOriginals, err := h.uploadResolver.HistoryOriginalInputs(ctx, sessionID)
+		_, historyOriginals, err := h.uploadResolver.HistoryOriginalInputs(ctx, sessionID)
 		if err != nil {
 			return nil, nil, errors.NewBadRequestError(err.Error())
 		}
-		processedAttachments = appendUniqueMessageAttachments(processedAttachments, historyAttachments)
 		originalInputFiles = appendUniqueOriginalInputs(originalInputFiles, historyOriginals)
 	}
 

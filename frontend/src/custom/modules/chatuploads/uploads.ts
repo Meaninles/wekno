@@ -1,6 +1,6 @@
-import { onScopeDispose, ref } from 'vue'
+import { computed, onScopeDispose, ref, shallowRef } from 'vue'
 import { del, get, post, postUpload } from '@/utils/request'
-import { draftKey, embedDraftScope, flushDraft, uploadBinding } from '../sessionState/storage'
+import { draftKey, embedDraftScope, fileId, flushDraft, uploadBinding } from '../sessionState/storage'
 
 import { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES } from './limits'
 export { CHAT_UPLOAD_MAX_MB, CHAT_UPLOAD_MAX_BYTES } from './limits'
@@ -12,7 +12,7 @@ export function chatImagePlaceholder(): string {
 }
 
 type Source = { id: string; upload_ids: string[]; input_file_ids?: string[]; input_file_id?: string; file_name: string; ready: boolean; parse_status: string; core_status: string; original_input?: boolean; error?: string }
-export type UploadRow = { key: string; name: string; state: 'queued' | 'uploading' | 'processing' | 'ready' | 'failed' | 'cancelled'; error?: string; source?: Source }
+export type UploadRow = { key: string; fileId?: string; name: string; state: 'queued' | 'uploading' | 'processing' | 'ready' | 'failed' | 'cancelled'; error?: string; source?: Source }
 type Context = { sessionId: string; agentId?: string; channelId?: string; token?: string; sessionSig?: string; visitorId?: string; directInput?: boolean }
 type Reply<T> = { success: boolean; data: T }
 type PreparedUploads = { uploadIds: string[]; inputFileIds: string[] }
@@ -28,7 +28,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-export function useChatUploads() {
+function createUploadWorker() {
   const rows = ref<UploadRow[]>([])
   const preparing = ref(false)
   let controller: AbortController | undefined
@@ -49,7 +49,6 @@ export function useChatUploads() {
     completedBatch = undefined
     await cancelAccepted?.()
   }
-  onScopeDispose(detach)
 
   const fileIdentity = (file: File) => `${file.name}\u0000${file.size}\u0000${file.lastModified}`
   const batchIdentity = (files: File[], ctx: Context) => JSON.stringify({
@@ -84,7 +83,7 @@ export function useChatUploads() {
     const config = { headers, signal: active.signal }
     const key = draftKey(ctx.sessionId, ctx.channelId ? embedDraftScope(ctx.channelId, ctx.visitorId || '') : undefined)
     if (!key) throw new Error('无法确认附件所属会话，请重新登录')
-    rows.value = uniqueFiles.map((file, i) => ({ key: String(i), name: file.name, state: 'queued' }))
+    rows.value = uniqueFiles.map(file => ({ key: fileId(file), name: file.name, state: 'queued' }))
     preparing.value = true
     let bound: Awaited<ReturnType<typeof uploadBinding>>[] = []
     cancelAccepted = async () => {
@@ -110,11 +109,16 @@ export function useChatUploads() {
       retries.set(row.key, () => { retries.delete(row.key); active.signal.removeEventListener('abort', abort); resolve() })
     })
     async function process(index: number): Promise<Source> {
-      const row = rows.value[index], binding = bound[index], file = uniqueFiles[index]
+      const row = rows.value[index], file = uniqueFiles[index]
       while (!active.signal.aborted) {
         try {
           row.error = undefined
           row.state = 'processing'
+          await flushDraft(key)
+          const binding = bound[index] || await uploadBinding(key, file, bindingEndpoint)
+          bound[index] = binding
+          row.key = binding.uploadId
+          if (active.signal.aborted) throw cancelled()
           let source: Source
           if (binding.sourceId) {
             source = (await get<Reply<Source>>(`${endpoint}/${binding.sourceId}`, config)).data
@@ -166,10 +170,6 @@ export function useChatUploads() {
       throw cancelled()
     }
     try {
-      await flushDraft(key)
-      bound = await Promise.all(uniqueFiles.map(file => uploadBinding(key, file, bindingEndpoint)))
-      if (active.signal.aborted) throw cancelled()
-      rows.value.forEach((row, i) => { row.key = bound[i].uploadId })
       let next = 0
       const results: Source[] = new Array(uniqueFiles.length)
       await Promise.all(Array.from({ length: Math.min(2, uniqueFiles.length) }, async () => {
@@ -211,6 +211,96 @@ export function useChatUploads() {
       })
     activeBatch = { key, promise }
     return promise
+  }
+  return { rows, preparing, prepare, retry, cancel, detach }
+}
+
+// File identity survives IndexedDB draft restoration. A send awaits exactly its
+// selected files, while later selections reuse each file's existing operation.
+export function useChatUploads() {
+  type Task = { id: string; file: File; worker: ReturnType<typeof createUploadWorker>; promise: Promise<PreparedUploads> }
+  const tasks = new Map<string, Task>()
+  const selected = shallowRef<Task[]>([])
+  let epoch = 0
+  let latest: { files: File[]; ctx: Context } | undefined
+  let resume: typeof latest
+  let active = 0
+  const waiters: Array<() => void> = []
+  const rows = computed(() => selected.value.flatMap(task => task.worker.rows.value.length
+    ? task.worker.rows.value.map(row => ({ ...row, fileId: task.id }))
+    : [{ key: task.id, fileId: task.id, name: task.file.name, state: 'queued' as const }]))
+  const preparing = computed(() => rows.value.some(row => ['queued', 'uploading', 'processing'].includes(row.state)))
+  const detach = () => {
+    epoch++
+    latest = resume = undefined
+    for (const task of tasks.values()) task.worker.detach()
+    tasks.clear()
+    selected.value = []
+  }
+  const cancel = async () => {
+    const current = [...selected.value]
+    detach()
+    await Promise.all(current.map(task => task.worker.cancel()))
+  }
+  const visibilityChanged = () => {
+    if (document.hidden) {
+      const snapshot = latest
+      detach()
+      resume = snapshot
+    } else if (resume) {
+      const snapshot = resume
+      resume = undefined
+      // Restore upload status, never the cancelled send waiter.
+      void prepare(snapshot.files, snapshot.ctx).catch(() => {})
+    }
+  }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visibilityChanged)
+  onScopeDispose(() => {
+    detach()
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visibilityChanged)
+  })
+  const retry = (key: string) => {
+    for (const task of selected.value) task.worker.retry(key)
+  }
+  const prepare = (files: File[], ctx: Context): Promise<PreparedUploads> => {
+    latest = { files: [...files], ctx: { ...ctx } }
+    const generation = epoch
+    const chosen = [...new Set(files)].map(file => {
+      const id = fileId(file)
+      const key = JSON.stringify([id, ctx.sessionId, ctx.agentId, ctx.channelId, ctx.visitorId, ctx.directInput])
+      let task = tasks.get(key)
+      if (!task) {
+        const worker = createUploadWorker()
+        const promise = (async () => {
+          await Promise.resolve()
+          if (active >= 2) await new Promise<void>(resolve => waiters.push(resolve))
+          else active++
+          try {
+            if (epoch !== generation || tasks.get(key)?.worker !== worker) throw cancelled()
+            return await worker.prepare([file], ctx)
+          } finally {
+            const next = waiters.shift()
+            if (next) next()
+            else active--
+          }
+        })()
+        task = { id, file, worker, promise }
+        tasks.set(key, task)
+        void promise.catch(() => { if (tasks.get(key)?.promise === promise) tasks.delete(key) })
+      }
+      return task
+    })
+    selected.value = chosen
+    for (const [key, task] of tasks) {
+      if (!chosen.includes(task)) {
+        task.worker.detach()
+        tasks.delete(key)
+      }
+    }
+    return Promise.all(chosen.map(task => task.promise)).then(results => {
+      if (epoch !== generation) throw cancelled()
+      return { uploadIds: [...new Set(results.flatMap(r => r.uploadIds))], inputFileIds: [...new Set(results.flatMap(r => r.inputFileIds))] }
+    })
   }
   return { rows, preparing, prepare, retry, cancel, detach }
 }

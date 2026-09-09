@@ -38,7 +38,8 @@ async def test_plain_chat_does_not_add_original_file_prompt_context():
 
 @pytest.mark.asyncio
 async def test_file_prompt_is_scoped_to_each_supplied_file_type():
-    payload=request(system_prompt="BASE SYSTEM PROMPT", original_input_files=[
+    payload=request(system_prompt="BASE SYSTEM PROMPT", vision_llm={"model_name": "vision-fixture"},
+                    tools=[{"name": "transcribe_input_file"}], original_input_files=[
         {"id":"image-1", "source":"weknora_chat_upload_original", "file_name":"diagram.png", "file_type":"png"},
         {"id":"audio-1", "source":"weknora_chat_upload_original", "file_name":"meeting.wav", "file_type":"wav"},
         {"id":"document-1", "source":"weknora_chat_upload_original", "file_name":"notes.pdf", "file_type":"pdf"},

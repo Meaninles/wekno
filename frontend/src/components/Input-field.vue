@@ -2427,7 +2427,7 @@ defineExpose({
         :rows="props.uploadRows as UploadRow[]"
         :max-files="CHAT_ATTACHMENT_MAX_FILES"
         :supported-file-types="parserFileTypes"
-        :disabled="Boolean(props.inert) || Boolean(props.uploadsPreparing)"
+        :disabled="Boolean(props.inert) || Boolean(props.isReplying)"
         :validating-file="validateComposerFile"
         @update:files="handleComposerFilesUpdate"
         @retry="emit('upload-retry', $event)"

@@ -1011,6 +1011,7 @@ const hydrateMobileConversationState = async (sessionId: string) => {
     await resolveSelectedKnowledgeFileDetails();
   } finally {
     isHydratingConversationState = false;
+    preloadMobileUploads(mobileComposerFiles.value);
   }
 };
 
@@ -1029,20 +1030,36 @@ const loadSessions = async (options: { silent?: boolean } = {}) => {
   }
 };
 
-const ensureSession = async () => {
+let creatingSession: Promise<string> | undefined;
+const ensureSession = async (): Promise<string> => {
   if (currentSessionId.value) return currentSessionId.value;
+  if (creatingSession) return creatingSession;
+  const startingRoute = route.fullPath;
+  creatingSession = (async () => {
   const response: any = await createSessions({
     last_request_state: settingsStore.captureConversationScopedState(),
   });
   const id = response?.data?.id;
   if (!id) throw new Error("创建会话失败");
+  if (route.fullPath !== startingRoute) throw new DOMException("已离开对话", "AbortError");
   currentSessionId.value = id;
+  saveCurrentMobileDraft();
   await router.replace(`/chat/${id}`);
   return id;
+  })();
+  try { return await creatingSession; } finally { creatingSession = undefined; }
 };
 
 const preloadMobileUploads = (files: AttachmentFile[]) => {
-  if (isHydratingConversationState || !files.length || !currentSessionId.value) return;
+  if (isHydratingConversationState) return;
+  if (!currentSessionId.value) {
+    if (files.length) void ensureSession().then(() => preloadMobileUploads(mobileComposerFiles.value)).catch((error: any) => {
+      if (error?.name !== "AbortError") MessagePlugin.error(error?.message || "创建会话失败");
+    });
+    return;
+  }
+  saveSessionDraftState(currentSessionId.value, settingsStore.captureConversationScopedState(),
+    files.filter(item => !isMobileImageFile(item.file)), pendingImages.value, inputValue.value);
   const agentEnabled = settingsStore.isAgentStreamMode;
   void prepareUploads(files.map((item) => item.file), {
     sessionId: currentSessionId.value,
@@ -1609,11 +1626,13 @@ const sendMessage = async () => {
     };
 
     await clearComposerInput();
+    clearUploadedFiles();
+    detachUploads();
     saveSessionDraftState(
       sessionId,
       requestSettings,
-      requestDraftAttachments,
-      composerSnapshot.images,
+      [],
+      [],
       "",
     );
     await scrollToBottom(true);
@@ -1644,8 +1663,6 @@ const sendMessage = async () => {
       method: "POST",
       url: endpoint,
     });
-    pendingImages.value = [];
-    pendingAttachments.value = [];
     void markSessionAsRead(sessionId);
     void loadSessions();
   } catch (err: any) {
@@ -1687,6 +1704,13 @@ const clearComposerInput = async () => {
   inputValue.value = "";
   await nextTick();
   autoGrow();
+};
+
+// Sending a message must detach only the files belonging to that message.
+// Conversation resources and the rest of the composer state stay untouched.
+const clearUploadedFiles = () => {
+  pendingImages.value = [];
+  pendingAttachments.value = [];
 };
 
 watch(inputValue, () => {
@@ -1875,7 +1899,7 @@ onBeforeUnmount(() => {
         :rows="uploadRows"
         :max-files="10"
         :supported-file-types="mobileUploadTypes"
-        :disabled="uploadsPreparing"
+        :disabled="isReplying"
         :validating-file="validateMobileComposerFile"
         @update:files="handleMobileComposerFiles"
         @retry="retryUpload"
@@ -1883,12 +1907,12 @@ onBeforeUnmount(() => {
       />
       <MobileResourceRail :inert="uploadsPreparing || undefined" :items="selectedResourceChips" @remove="removeChip" @clear="clearSelectedResources" />
 
-      <div class="config-rail" :inert="uploadsPreparing || undefined">
-        <button type="button" class="config-pill" @click="openSheet('agent')">
+      <div class="config-rail">
+        <button type="button" class="config-pill" :disabled="uploadsPreparing" @click="openSheet('agent')">
           <MobileIcon name="user-talk" />
           <span>{{ agentLabel(selectedAgent) }}</span>
         </button>
-        <button type="button" class="config-pill" @click="openSheet('context')">
+        <button type="button" class="config-pill" :disabled="uploadsPreparing" @click="openSheet('context')">
           <MobileIcon name="folder" />
           <span>知识库</span>
           <em v-if="selectedKnowledgeContextCount">{{ selectedKnowledgeContextCount }}</em>
@@ -1904,12 +1928,12 @@ onBeforeUnmount(() => {
           <MobileIcon name="internet" />
           <span>联网</span>
         </button>
-        <button type="button" class="config-pill" :disabled="uploadsPreparing" @click="uploadCardsRef?.triggerFileSelect()">
+        <button type="button" class="config-pill" :disabled="isReplying" @click="uploadCardsRef?.triggerFileSelect()">
           <MobileIcon name="attach" />
           <span>文件</span>
           <em v-if="mobileComposerFiles.length">{{ mobileComposerFiles.length }}</em>
         </button>
-        <button type="button" class="config-pill" @click="openSheet('skill')">
+        <button type="button" class="config-pill" :disabled="uploadsPreparing" @click="openSheet('skill')">
           <MobileIcon name="lightbulb" />
           <span>技能</span>
           <em v-if="selectedSkillContextCount">{{ selectedSkillContextCount }}</em>

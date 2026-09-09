@@ -4,6 +4,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { CHAT_UPLOAD_MAX_BYTES, CHAT_UPLOAD_MAX_MB, chatUploadLimitMessage, type UploadRow } from './uploads'
 import type { AttachmentFile } from './types'
+import { fileId } from '../sessionState/storage'
 
 const props = withDefaults(defineProps<{
   files?: AttachmentFile[]
@@ -57,17 +58,27 @@ const fileExtension = (file: File) => {
   return dot >= 0 ? value.slice(dot + 1).toLowerCase() : ''
 }
 
-const rowFor = (index: number, file: AttachmentFile) =>
-  props.rows[index] || props.rows.find((row) => row.name === file.name)
+const rowFor = (index: number, file: AttachmentFile) => {
+  if (props.rows.some(row => row.fileId)) return props.rows.find(row => row.fileId === fileId(file.file))
+  const sameNameIndex = props.files
+    .slice(0, index)
+    .filter((item) => item.name === file.name)
+    .length
+  const sameNameRows = props.rows.filter((row) => row.name === file.name)
+  return sameNameRows[sameNameIndex] || props.rows[index]
+}
+
+const fileState = (index: number, file: AttachmentFile): UploadRow['state'] =>
+  rowFor(index, file)?.state || 'queued'
 
 const rowStatus = (row?: UploadRow) => {
-  if (!row) return ''
+  if (!row) return '等待上传'
   if (row.state === 'uploading') return '上传中'
-  if (row.state === 'processing') return '准备中'
-  if (row.state === 'ready') return '已就绪'
-  if (row.state === 'failed') return row.error || '失败，可重试'
+  if (row.state === 'processing') return '处理中'
+  if (row.state === 'ready') return '上传完成'
+  if (row.state === 'failed') return row.error || '上传失败，可重试'
   if (row.state === 'cancelled') return '已取消'
-  return '等待中'
+  return '等待上传'
 }
 
 const isSupported = (file: File) =>
@@ -139,19 +150,26 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
   <input ref="inputRef" type="file" multiple hidden :accept="accept" @change="handleSelect" />
   <div v-if="files.length || rows.some((row) => row.state !== 'ready')" class="chat-upload-cards" aria-live="polite">
     <div v-for="(file, index) in files" :key="file.id" class="chat-upload-card">
-      <div class="chat-upload-card__progress" :class="`is-${rowFor(index, file)?.state || 'queued'}`" aria-hidden="true">
-        <span class="chat-upload-card__progress-ring" />
-        <span class="chat-upload-card__file-icon">
+      <div
+        class="chat-upload-card__progress"
+        :class="`is-${fileState(index, file)}`"
+        role="img"
+        :aria-label="rowStatus(rowFor(index, file))"
+      >
+        <span class="chat-upload-card__progress-ring" aria-hidden="true" />
+        <span class="chat-upload-card__file-icon" aria-hidden="true">
           <svg viewBox="0 0 24 28" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M4 1.5h10l6 6V26a.5.5 0 0 1-.5.5h-15A.5.5 0 0 1 4 26V1.5Z" stroke="currentColor" stroke-width="1.5" />
             <path d="M14 1.5v6h6M7.5 13h9M7.5 17h9M7.5 21h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
           </svg>
         </span>
+        <span v-if="fileState(index, file) === 'ready'" class="chat-upload-card__state-mark is-ready" aria-hidden="true">✓</span>
+        <span v-else-if="fileState(index, file) === 'failed'" class="chat-upload-card__state-mark is-failed" aria-hidden="true">!</span>
       </div>
       <div class="chat-upload-card__info">
         <div class="chat-upload-card__name" :title="file.name">{{ file.name }}</div>
         <div class="chat-upload-card__meta">{{ extension(file.name) }} · {{ formatSize(file.size) }}</div>
-        <div v-if="rowFor(index, file)" class="chat-upload-card__status" :class="`is-${rowFor(index, file)?.state}`">
+        <div class="chat-upload-card__status" :class="`is-${fileState(index, file)}`">
           {{ rowStatus(rowFor(index, file)) }}
         </div>
       </div>
@@ -199,6 +217,8 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
   height: 34px;
   flex: 0 0 34px;
   color: var(--td-brand-color, #2f7cf6);
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 8%, transparent);
 }
 
 .chat-upload-card__progress-ring {
@@ -214,8 +234,22 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
   animation: chat-upload-spin .9s linear infinite;
 }
 
-.chat-upload-card__progress.is-ready .chat-upload-card__progress-ring { border-color: #2fb36e; }
-.chat-upload-card__progress.is-failed .chat-upload-card__progress-ring { border-color: #e34d59; }
+.chat-upload-card__progress.is-queued .chat-upload-card__progress-ring { border-style: dashed; }
+.chat-upload-card__progress.is-ready {
+  color: #2fb36e;
+  background: color-mix(in srgb, #2fb36e 12%, transparent);
+}
+.chat-upload-card__progress.is-ready .chat-upload-card__progress-ring { display: none; }
+.chat-upload-card__progress.is-failed {
+  color: #e34d59;
+  background: color-mix(in srgb, #e34d59 12%, transparent);
+}
+.chat-upload-card__progress.is-failed .chat-upload-card__progress-ring { border-color: currentColor; }
+.chat-upload-card__progress.is-cancelled {
+  color: var(--td-text-color-secondary, #888);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+.chat-upload-card__progress.is-cancelled .chat-upload-card__progress-ring { border-color: currentColor; }
 
 .chat-upload-card__file-icon {
   z-index: 1;
@@ -226,6 +260,25 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
 }
 
 .chat-upload-card__file-icon svg { width: 100%; height: 100%; }
+
+.chat-upload-card__state-mark {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--td-bg-color-container, #fff);
+  border-radius: 50%;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.chat-upload-card__state-mark.is-ready { background: #2fb36e; }
+.chat-upload-card__state-mark.is-failed { background: #e34d59; }
 
 .chat-upload-card__info { min-width: 0; flex: 1; }
 .chat-upload-card__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
@@ -238,4 +291,11 @@ defineExpose({ files: computed(() => props.files), triggerFileSelect, addFiles, 
 .chat-upload-cards__cancel { width: 100%; padding: 2px 0; border: 0; color: var(--td-text-color-secondary); background: transparent; cursor: pointer; text-align: left; font-size: 11px; }
 
 @keyframes chat-upload-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-upload-card__progress.is-uploading .chat-upload-card__progress-ring,
+  .chat-upload-card__progress.is-processing .chat-upload-card__progress-ring {
+    animation: none;
+  }
+}
 </style>

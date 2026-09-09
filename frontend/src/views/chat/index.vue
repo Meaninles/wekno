@@ -83,7 +83,7 @@
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
 </template>
 <script setup>
-import { useChatUploads, chatImagePlaceholder, CHAT_UPLOAD_MAX_BYTES, CHAT_UPLOAD_MAX_MB } from '@/custom/modules/chatuploads/uploads'
+import { useChatUploads } from '@/custom/modules/chatuploads/uploads'
 const { rows: uploadRows, preparing: uploadsPreparing, prepare: prepareUploads, retry: retryUpload, cancel: cancelUploads, detach: detachUploads } = useChatUploads()
 
 import { storeToRefs } from 'pinia';
@@ -193,7 +193,8 @@ const getInputImages = () => inputFieldRef.value?.getUploadedImages?.() || [];
 // Start the durable upload as soon as the user selects files. Sending while
 // this promise is pending simply awaits the same batch in sendMsg.
 const preloadInputUploads = (files) => {
-    if (!files?.length || !session_id.value) return;
+    if (!session_id.value) return;
+    saveCurrentConversationDraft();
     const agentEnabled = useSettingsStoreInstance.isAgentStreamMode;
     void prepareUploads(files.map((item) => item.file), {
         sessionId: String(session_id.value),
@@ -264,6 +265,7 @@ const hydrateConversationScopedState = async (sid, syncAttachments = true) => {
         inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
         inputFieldRef.value?.setUploadedImages?.(draft?.images || []);
         inputFieldRef.value?.restoreQuery?.(draft?.query || "");
+        preloadInputUploads([...getInputAttachments(), ...getInputImages().map(file => ({ file }))]);
     }
     return draft;
 };
@@ -572,7 +574,15 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     const requestSessionId = String(session_id.value);
     const requestSettings = useSettingsStoreInstance.captureConversationScopedState();
     const selectedAgentId = props.embeddedMode ? props.agentId : (useSettingsStoreInstance.selectedAgentId || '');
-    const userImages = imageFiles.map(file => ({ url: chatImagePlaceholder(), name: file.name }));
+    // Keep the original image visible in the optimistic desktop user message.
+    // The server-side attachment URL is only available after the message is
+    // persisted, so use a local object URL for the first render.
+    const userImages = imageFiles.map(file => ({
+        url: typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+            ? URL.createObjectURL(file)
+            : '',
+        name: file.name,
+    })).filter(image => image.url);
 
     // Get agent mode status from settings store (prefer selectedAgentId for builtins)
     const agentEnabled = props.embeddedMode
@@ -663,6 +673,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     // cards visible while it was preparing, then clear only the composer files
     // before the next turn; the catch path restores them if stream setup fails.
     inputFieldRef.value?.clearFiles?.();
+    detachUploads();
     // 将@提及的知识库和文件信息存入用户消息
     const optimisticUserMessage = { content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' };
     messagesList.push(optimisticUserMessage);
@@ -678,7 +689,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     // Once uploads are ready, the submitted text belongs to this request, not
     // the editable draft. Never clear a newer draft when the answer finishes.
     if (!props.embeddedMode) {
-        saveSessionDraftState(requestSessionId, requestSettings, attachmentFiles, imageFiles, "");
+        saveSessionDraftState(requestSessionId, requestSettings, [], [], "");
     }
     await startStream({
         session_id: requestSessionId,
@@ -861,6 +872,7 @@ onMounted(async () => {
         inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
         inputFieldRef.value?.setUploadedImages?.(draft?.images || []);
         inputFieldRef.value?.restoreQuery?.(draft?.query || '');
+        preloadInputUploads([...getInputAttachments(), ...getInputImages().map(file => ({ file }))]);
         scrollLock.value = false;
         hasMoreHistory.value = true;
         historyLoadingMore.value = false;

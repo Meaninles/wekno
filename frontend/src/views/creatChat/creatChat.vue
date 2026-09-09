@@ -4,7 +4,7 @@
             <div class="dialogue-title" style="--wails-draggable: drag">
                 <span style="--wails-draggable: drag">{{ $t('createChat.title') }}</span>
             </div>
-            <InputField ref="inputFieldRef" @send-msg="sendMsg"></InputField>
+            <InputField ref="inputFieldRef" :isReplying="creatingSession" @files-changed="startFileDraft" @send-msg="sendMsg"></InputField>
         </div>
     </div>
 
@@ -23,7 +23,7 @@ import { createSessions } from "@/api/chat/index";
 import { useMenuStore } from '@/stores/menu';
 import { useSettingsStore } from '@/stores/settings';
 import { useUIStore } from '@/stores/ui';
-import { useRoute, useRouter } from 'vue-router';
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useI18n } from 'vue-i18n';
 import KnowledgeBaseEditorModal from '@/views/knowledge/KnowledgeBaseEditorModal.vue';
@@ -43,6 +43,15 @@ const showChatContextualGuide = computed(() => {
 });
 
 const inputFieldRef = ref();
+const creatingSession = ref(false);
+let leftPage = false;
+onBeforeRouteLeave(() => { leftPage = true; });
+const startFileDraft = async (files: any[]) => {
+    if (!files.length || creatingSession.value) return;
+    await createNewSession(inputFieldRef.value?.getQuery?.() || '', '', [],
+        inputFieldRef.value?.getUploadedImages?.() || [],
+        inputFieldRef.value?.getUploadedAttachments?.() || [], true);
+};
 
 const parseQueryList = (value: unknown): string[] => {
     const raw = Array.isArray(value) ? value.join(',') : String(value || '');
@@ -84,7 +93,9 @@ const sendMsg = (value: string, modelId: string, mentionedItems: any[], imageFil
     createNewSession(value, modelId, mentionedItems, imageFiles, attachmentFiles);
 }
 
-async function createNewSession(value: string, modelId: string, mentionedItems: any[] = [], imageFiles: any[] = [], attachmentFiles: any[] = []) {
+async function createNewSession(value: string, modelId: string, mentionedItems: any[] = [], imageFiles: any[] = [], attachmentFiles: any[] = [], draftOnly = false) {
+    if (creatingSession.value) return;
+    creatingSession.value = true;
     const selectedKbs = settingsStore.settings.selectedKnowledgeBases || [];
     const selectedFiles = settingsStore.settings.selectedFiles || [];
     const requestState = settingsStore.captureConversationScopedState();
@@ -105,8 +116,9 @@ async function createNewSession(value: string, modelId: string, mentionedItems: 
 
     try {
         const res = await createSessions(sessionData);
+        if (leftPage) return;
         if (res.data && res.data.id) {
-            await navigateToSession(res.data.id, requestState, value, modelId, mentionedItems, imageFiles, attachmentFiles);
+            await navigateToSession(res.data.id, requestState, value, modelId, mentionedItems, imageFiles, attachmentFiles, draftOnly);
         } else {
             console.error('[createChat] Failed to create session');
             MessagePlugin.error(t('createChat.messages.createFailed'));
@@ -114,10 +126,12 @@ async function createNewSession(value: string, modelId: string, mentionedItems: 
     } catch (error) {
         console.error('[createChat] Create session error:', error);
         MessagePlugin.error(t('createChat.messages.createError'));
+    } finally {
+        creatingSession.value = false;
     }
 }
 
-const navigateToSession = async (sessionId: string, requestState: ReturnType<typeof settingsStore.captureConversationScopedState>, value: string, modelId: string, mentionedItems: any[], imageFiles: any[] = [], attachmentFiles: any[] = []) => {
+const navigateToSession = async (sessionId: string, requestState: ReturnType<typeof settingsStore.captureConversationScopedState>, value: string, modelId: string, mentionedItems: any[], imageFiles: any[] = [], attachmentFiles: any[] = [], draftOnly = false) => {
     const now = new Date().toISOString();
     let obj = {
         title: t('createChat.newSessionTitle'),
@@ -129,9 +143,9 @@ const navigateToSession = async (sessionId: string, requestState: ReturnType<typ
         updated_at: now
     };
     usemenuStore.updataMenuChildren(obj);
-    usemenuStore.changeIsFirstSession(true);
+    usemenuStore.changeIsFirstSession(!draftOnly);
     saveSessionDraftState(sessionId, requestState, attachmentFiles, imageFiles, value);
-    usemenuStore.changeFirstQuery(value, mentionedItems, modelId, imageFiles, attachmentFiles);
+    usemenuStore.changeFirstQuery(draftOnly ? '' : value, mentionedItems, modelId, imageFiles, attachmentFiles);
     router.push(`/platform/chat/${sessionId}`);
 }
 

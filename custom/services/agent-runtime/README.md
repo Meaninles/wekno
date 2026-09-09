@@ -38,6 +38,18 @@ SDK 文件缓存，连续编辑仍核对远端内容，避免额外读取并防�
 `/workspace/source-data/`，供代码直接读取结构化数据进行转换和导出。模型收到路径及明确标记的局部预览，按需读取完整数据；引用契约和来源元数据保持完整。
 输入数据及最终发布文件继续使用各自既有权限边界。
 
+文件问答复用内核的工作区和已安装格式库，不新增按文档格式划分的解析工具。
+有原始文件时，知识问答可使用工作区代码读取和计算，但仍不发布交付文件；
+任务范围由模型按用户所需结果理解，不使用关键词或扩展名进行意图分流。
+文件清单区分本轮附件与历史来源，历史文件仅供相关追问，不重复写入新消息附件。
+图片、音频按需调用已配置的专用模型；已有结果足够时无需重复解析。
+无原始文件的普通问答不注入文件提示词，也不开放工作区执行工具。
+
+真实主环境回归：`python custom/tests/agent_runtime/file_qa_regression.py`。
+脚本创建保留在正常会话列表的测试对话，覆盖混合文件和连续追问；
+`--session <id> --boundary` 检查交付文件、外部操作的范围提示及正常文本问答。
+上传状态机回归在 `frontend/` 执行 `node --test src/custom/modules/chatuploads/uploads.test.mjs`。
+
 开发编排为 `custom/docker-compose.agent-runtime.yml`，复用当前 API 和基础设施。
 运行 `uv run pytest` 检查 SDK 协议；真实开发验证脚本见 `custom/tests/agent_runtime`。
 成品保存到 `/workspace/outputs`，输入、脚本、预览和临时文件放在其他目录。

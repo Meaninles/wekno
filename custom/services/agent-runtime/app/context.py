@@ -31,6 +31,16 @@ class ProcessLanguage(MiddlewareBase):
         # Apply the presentation contract after that assembly, on every round.
         return prompt + "\n" + PROCESS_LANGUAGE
 
+    async def on_model_call(self, agent, input_kwargs, next_handler):
+        # Keep the current decision's presentation language salient after long
+        # English tool results, without persisting reminders in SDK history.
+        reminder = Msg(name="process_language", role="user", content=[TextBlock(text=(
+            "[过程展示要求] 本轮工具调用前后的阶段说明请用简体中文。"
+            "例如：‘我会先查找相关资料。’‘接下来核对检索结果。’"
+            "不要沿用工具结果或此前阶段说明的英文叙述；工具名称、代码、路径和网址保持原样。"
+            "继续完成原任务，无需回复这条提醒。"))])
+        return await next_handler(**{**input_kwargs, "messages": [*input_kwargs["messages"], reminder]})
+
 
 def system_prompt(payload: RunRequest) -> str:
     scope = KNOWLEDGE_QA_SCOPE if payload.runtime_config.agent_type == "knowledge-qa" else ""

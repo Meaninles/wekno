@@ -23,6 +23,29 @@ async def test_language_contract_reaches_actual_sdk_model_request_after_skill_in
     system = ''.join(block.text for block in system_message.content if isinstance(block, TextBlock))
     assert system.index('[PROCESS_LANGUAGE]') > system.index('Loaded English skill instructions')
     assert system.count('[PROCESS_LANGUAGE]') == 1
+    assert model.requests[0][-1].name == 'process_language'
+
+
+@pytest.mark.asyncio
+async def test_language_reminder_follows_tool_results_without_accumulating_or_retrying():
+    from agentscope.message import Msg, TextBlock
+
+    messages = [Msg(name='tool', role='user', content=[TextBlock(text='English tool result')])]
+    calls = []
+
+    async def next_handler(**kwargs):
+        calls.append(kwargs)
+        return 'unchanged response'
+
+    middleware = ProcessLanguage()
+    for _ in range(3):
+        assert await middleware.on_model_call(None, {'messages': messages}, next_handler) == 'unchanged response'
+    assert len(calls) == 3
+    assert len(messages) == 1
+    for call in calls:
+        assert call['messages'][0] is messages[0]
+        assert len(call['messages']) == 2
+        assert call['messages'][-1].name == 'process_language'
 
 @pytest.mark.parametrize('agent_type', ['knowledge-qa', 'general-agent', 'document-processing-agent', 'table-analysis', 'custom-agent'])
 @pytest.mark.asyncio

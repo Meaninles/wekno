@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -114,6 +115,19 @@ func TestSkillValidation(t *testing.T) {
 			name:        "name too long",
 			skillName:   "this-is-a-very-long-skill-name-that-exceeds-the-maximum-allowed-length-of-64-characters",
 			description: "A skill",
+			wantErr:     true,
+			errContains: "exceeds maximum length",
+		},
+		{
+			name:        "multibyte description at configured limit",
+			skillName:   "multibyte-skill",
+			description: strings.Repeat("中", MaxDescriptionLength),
+			wantErr:     false,
+		},
+		{
+			name:        "description too long",
+			skillName:   "long-description-skill",
+			description: strings.Repeat("a", MaxDescriptionLength+1),
 			wantErr:     true,
 			errContains: "exceeds maximum length",
 		},

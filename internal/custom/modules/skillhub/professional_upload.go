@@ -26,7 +26,7 @@ import (
 
 const (
 	maxProfessionalArchiveSize       = 30 * 1024 * 1024
-	maxProfessionalDescriptionLength = 1024
+	maxProfessionalDescriptionLength = skills.MaxDescriptionLength
 	maxProfessionalSkillFiles        = 300
 	professionalSkillMetaFile        = ".weknora-professional-skill.json"
 	professionalArchiveFile          = ".weknora-original-package"

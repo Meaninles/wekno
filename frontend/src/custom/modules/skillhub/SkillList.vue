@@ -292,7 +292,7 @@
           <t-form-item label="技能描述（可选）" name="description">
             <t-textarea
               v-model="professionalImportForm.description"
-              :maxlength="LIGHTWEIGHT_DESCRIPTION_MAX_CHARS"
+              :maxlength="PROFESSIONAL_DESCRIPTION_MAX_CHARS"
               :autosize="{ minRows: 3, maxRows: 5 }"
               placeholder="仅用于技能列表展示，不影响 SKILL.md 触发规则。"
             />
@@ -527,10 +527,11 @@ const RESERVED_SCOPES = new Set(['all', 'mine'])
 const PROFESSIONAL_PACKAGE_MAX_BYTES = 30 * 1024 * 1024
 const PROFESSIONAL_NAME_PATTERN = /^[\p{L}\p{N}-]{1,64}$/u
 const LIGHTWEIGHT_NAME_MAX_CHARS = 64
-const LIGHTWEIGHT_DESCRIPTION_MAX_CHARS = 1024
+const LIGHTWEIGHT_DESCRIPTION_MAX_CHARS = 1536
+const PROFESSIONAL_DESCRIPTION_MAX_CHARS = 1536
 const LIGHTWEIGHT_PROMPT_MAX_CHARS = 20000
 const lightweightRuleText = '名称 1-64 字且不含换行；提示词必填，最多 2 万字；描述可选。'
-const professionalRuleText = '名称统一使用包内 slug；缺失 slug 时从合法 name、目录名或包名推导；包不超过 30MB 且需含唯一 SKILL.md。'
+const professionalRuleText = '名称统一使用包内 slug；缺失 slug 时从合法 name、目录名或包名推导；SKILL.md 描述最多 1536 字；包不超过 30MB 且需含唯一 SKILL.md。'
 const mineSkills = computed(() => skills.value.filter((skill) => skill.is_mine))
 const allSkillsCount = computed(() => skills.value.length)
 
@@ -768,8 +769,8 @@ async function saveProfessionalSkill() {
     MessagePlugin.warning('编辑专业技能时运行标识不能为空')
     return
   }
-  if (charCount(description) > LIGHTWEIGHT_DESCRIPTION_MAX_CHARS) {
-    MessagePlugin.warning(`技能描述不能超过 ${LIGHTWEIGHT_DESCRIPTION_MAX_CHARS} 字`)
+  if (charCount(description) > PROFESSIONAL_DESCRIPTION_MAX_CHARS) {
+    MessagePlugin.warning(`技能描述不能超过 ${PROFESSIONAL_DESCRIPTION_MAX_CHARS} 字`)
     return
   }
   if (professionalEditorMode.value === 'create' && !professionalPackageFile.value) {

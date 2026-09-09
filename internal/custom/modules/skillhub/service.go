@@ -23,7 +23,7 @@ const (
 	shareTypeUser             = "user"
 
 	maxLightweightSkillNameRunes         = 64
-	maxLightweightSkillDescriptionRunes  = 1024
+	maxLightweightSkillDescriptionRunes  = skills.MaxDescriptionLength
 	maxLightweightSkillInstructionsRunes = 20000
 )
 

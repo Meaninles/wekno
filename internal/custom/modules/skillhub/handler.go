@@ -21,6 +21,8 @@ type Handler struct {
 	db      *gorm.DB
 }
 
+const skillDescriptionTooLongMessage = "技能描述过长，请精简 description 内容后重试（上限 1536 字）。"
+
 func NewHandler(service *Service, db *gorm.DB) *Handler {
 	return &Handler{service: service, db: db}
 }
@@ -334,6 +336,10 @@ func (h *Handler) fail(c *gin.Context, err error) {
 		c.Error(apperrors.NewConflictError(duplicateProfessionalSkillNameMessage))
 	case isLightweightSkillNameExistsError(err):
 		c.Error(apperrors.NewConflictError(duplicateLightweightSkillNameMessage))
+	case strings.Contains(msg, "skill validation failed: skill description exceeds maximum length"),
+		strings.Contains(msg, "professional skill description exceeds"),
+		strings.Contains(msg, "skill description must be at most"):
+		c.Error(apperrors.NewBadRequestError(skillDescriptionTooLongMessage))
 	case strings.Contains(msg, "permission denied"):
 		c.Error(apperrors.NewForbiddenError(msg))
 	case strings.Contains(msg, "record not found"):

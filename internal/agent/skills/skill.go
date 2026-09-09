@@ -9,14 +9,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Skill validation constants following Claude's specification
+// Skill validation constants. The Agent Skills specification uses a 1024
+// character description limit; WeKnora allows 50% more for custom and
+// multilingual skills while keeping the same metadata shape.
 const (
 	MaxNameLength        = 64
-	MaxDescriptionLength = 1024
+	MaxDescriptionLength = 1536
 	SkillFileName        = "SKILL.md"
 )
 
@@ -97,7 +100,7 @@ func (s *Skill) Validate() error {
 	if s.Description == "" {
 		return errors.New("skill description is required")
 	}
-	if len(s.Description) > MaxDescriptionLength {
+	if utf8.RuneCountInString(s.Description) > MaxDescriptionLength {
 		return fmt.Errorf("skill description exceeds maximum length of %d characters", MaxDescriptionLength)
 	}
 	if xmlTagPattern.MatchString(s.Description) {

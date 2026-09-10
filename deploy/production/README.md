@@ -71,10 +71,10 @@ Neo4j 保持在 `.54`，Ingress 保持现状；集群内 LiteLLM 当前不承载
 
 ## 发布硬门槛
 
-正式停机前必须同时具备：批准的 Git SHA；七个镜像的不可变 digest；填写完成且无
-`REPLACE_*` 的现场 values；三节点同版本 sandbox 镜像、发布技能 staging 目录及
-便携哈希清单；生产机渲染通过的三套清单；最终停机 cutoff；数据库备份和完整恢复
-演练 PASS。技能 staging 只能在业务 Pod 全部退出后原子切换。
+正式停机前必须同时具备：批准的 Git SHA；六个运行镜像的不可变 digest；填写完成且无
+`REPLACE_*` 的现场 values；三节点发布技能 staging 目录及便携哈希清单；生产机渲染
+通过的三套清单；最终停机 cutoff；数据库备份和完整恢复演练 PASS。旧 Go skill
+sandbox 镜像不属于当前发布集合。技能 staging 只能在业务 Pod 全部退出后原子切换。
 
 任何一个门槛不满足，都只允许继续准备，不允许切断业务 Ingress 路由或执行迁移。
 任何情况下都不得删除 `ingress-nginx`、Ingress Controller、其 Service 或其他

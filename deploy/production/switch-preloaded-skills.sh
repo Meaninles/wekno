@@ -38,13 +38,23 @@ restored_manifest=$7
 verify_tree() {
   local directory=$1
   local manifest=$2
-  [[ -d "$directory" && -s "$manifest" ]]
-  (cd "$directory" && sha256sum -c "$manifest" >/dev/null)
+  local computed
+  [[ -d "$directory" && -f "$manifest" ]]
+  computed=$(mktemp)
+  (
+    cd "$directory"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+  ) >"$computed"
+  if ! cmp -s "$manifest" "$computed"; then
+    rm -f -- "$computed"
+    return 1
+  fi
+  rm -f -- "$computed"
 }
 
-if [[ -d "$current" && -d "$stage" && ! -e "$rollback" && -s "$stage_manifest" ]]; then
+if [[ -d "$current" && -d "$stage" && ! -e "$rollback" && -f "$stage_manifest" ]]; then
   verify_tree "$stage" "$stage_manifest"
-  if [[ -s "$restored_manifest" ]]; then
+  if [[ -f "$restored_manifest" ]]; then
     verify_tree "$current" "$restored_manifest"
     state=rolled-back
   else
@@ -77,10 +87,26 @@ rollback=$3
 stage_manifest=$4
 active_manifest=$5
 rollback_manifest=$6
-[[ -d "$current" && -d "$stage" && -s "$stage_manifest" ]]
+verify_tree() {
+  local directory=$1
+  local manifest=$2
+  local computed
+  [[ -d "$directory" && -f "$manifest" ]]
+  computed=$(mktemp)
+  (
+    cd "$directory"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+  ) >"$computed"
+  if ! cmp -s "$manifest" "$computed"; then
+    rm -f -- "$computed"
+    return 1
+  fi
+  rm -f -- "$computed"
+}
+[[ -d "$current" && -d "$stage" && -f "$stage_manifest" ]]
 [[ ! -e "$rollback" && ! -e "$active_manifest" && ! -e "$rollback_manifest" ]]
 [[ $(stat -c %d "$current") == "$(stat -c %d "$stage")" ]]
-(cd "$stage" && sha256sum -c "$stage_manifest" >/dev/null)
+verify_tree "$stage" "$stage_manifest"
 printf 'SKILLS_APPLY_PREFLIGHT=PASS host=%s\n' "$(hostname)"
 REMOTE
 }
@@ -99,14 +125,29 @@ active_manifest=$5
 rollback_manifest=$6
 temporary_manifest="$rollback_manifest.tmp.$$"
 
-[[ -d "$current" && -d "$stage" && -s "$stage_manifest" ]]
+verify_tree() {
+  local directory=$1
+  local manifest=$2
+  local computed
+  [[ -d "$directory" && -f "$manifest" ]]
+  computed=$(mktemp)
+  (
+    cd "$directory"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+  ) >"$computed"
+  if ! cmp -s "$manifest" "$computed"; then
+    rm -f -- "$computed"
+    return 1
+  fi
+  rm -f -- "$computed"
+}
+[[ -d "$current" && -d "$stage" && -f "$stage_manifest" ]]
 [[ ! -e "$rollback" && ! -e "$active_manifest" && ! -e "$rollback_manifest" ]]
-(cd "$stage" && sha256sum -c "$stage_manifest" >/dev/null)
+verify_tree "$stage" "$stage_manifest"
 (
   cd "$current"
   find . -type f -print0 | sort -z | xargs -0 -r sha256sum
 ) >"$temporary_manifest"
-[[ -s "$temporary_manifest" ]]
 mv "$temporary_manifest" "$rollback_manifest"
 mv "$current" "$rollback"
 if ! mv "$stage" "$current"; then
@@ -120,7 +161,7 @@ if ! mv "$stage_manifest" "$active_manifest"; then
   rm -f -- "$rollback_manifest"
   exit 1
 fi
-if ! (cd "$current" && sha256sum -c "$active_manifest" >/dev/null); then
+if ! verify_tree "$current" "$active_manifest"; then
   mv "$active_manifest" "$stage_manifest"
   mv "$current" "$stage"
   mv "$rollback" "$current"
@@ -144,8 +185,24 @@ stage_manifest=$4
 active_manifest=$5
 rollback_manifest=$6
 [[ -d "$current" && ! -e "$stage" && -d "$rollback" ]]
-(cd "$current" && sha256sum -c "$active_manifest" >/dev/null)
-(cd "$rollback" && sha256sum -c "$rollback_manifest" >/dev/null)
+verify_tree() {
+  local directory=$1
+  local manifest=$2
+  local computed
+  [[ -d "$directory" && -f "$manifest" ]]
+  computed=$(mktemp)
+  (
+    cd "$directory"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+  ) >"$computed"
+  if ! cmp -s "$manifest" "$computed"; then
+    rm -f -- "$computed"
+    return 1
+  fi
+  rm -f -- "$computed"
+}
+verify_tree "$current" "$active_manifest"
+verify_tree "$rollback" "$rollback_manifest"
 mv "$active_manifest" "$stage_manifest"
 mv "$current" "$stage"
 mv "$rollback" "$current"
@@ -166,10 +223,26 @@ rollback=$3
 active_manifest=$4
 rollback_manifest=$5
 restored_manifest=$6
+verify_tree() {
+  local directory=$1
+  local manifest=$2
+  local computed
+  [[ -d "$directory" && -f "$manifest" ]]
+  computed=$(mktemp)
+  (
+    cd "$directory"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+  ) >"$computed"
+  if ! cmp -s "$manifest" "$computed"; then
+    rm -f -- "$computed"
+    return 1
+  fi
+  rm -f -- "$computed"
+}
 [[ -d "$current" && ! -e "$stage" && -d "$rollback" ]]
-[[ -s "$active_manifest" && -s "$rollback_manifest" && ! -e "$restored_manifest" ]]
-(cd "$current" && sha256sum -c "$active_manifest" >/dev/null)
-(cd "$rollback" && sha256sum -c "$rollback_manifest" >/dev/null)
+[[ -f "$active_manifest" && -f "$rollback_manifest" && ! -e "$restored_manifest" ]]
+verify_tree "$current" "$active_manifest"
+verify_tree "$rollback" "$rollback_manifest"
 printf 'SKILLS_ROLLBACK_PREFLIGHT=PASS host=%s\n' "$(hostname)"
 REMOTE
 }
@@ -187,13 +260,29 @@ stage_manifest=$4
 active_manifest=$5
 rollback_manifest=$6
 restored_manifest=$7
-(cd "$current" && sha256sum -c "$active_manifest" >/dev/null)
-(cd "$rollback" && sha256sum -c "$rollback_manifest" >/dev/null)
+verify_tree() {
+  local directory=$1
+  local manifest=$2
+  local computed
+  [[ -d "$directory" && -f "$manifest" ]]
+  computed=$(mktemp)
+  (
+    cd "$directory"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+  ) >"$computed"
+  if ! cmp -s "$manifest" "$computed"; then
+    rm -f -- "$computed"
+    return 1
+  fi
+  rm -f -- "$computed"
+}
+verify_tree "$current" "$active_manifest"
+verify_tree "$rollback" "$rollback_manifest"
 mv "$active_manifest" "$stage_manifest"
 mv "$current" "$stage"
 mv "$rollback" "$current"
 mv "$rollback_manifest" "$restored_manifest"
-(cd "$current" && sha256sum -c "$restored_manifest" >/dev/null)
+verify_tree "$current" "$restored_manifest"
 printf 'SKILLS_ROLLBACK=PASS host=%s\n' "$(hostname)"
 REMOTE
 }

@@ -56,10 +56,6 @@ if grep -Eq 'REPLACE_[A-Z0-9_]+' "$site_values"; then
   echo "site values still contain REPLACE_* placeholders" >&2
   exit 1
 fi
-if ! grep -Eq 'dockerImage:[[:space:]]+[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$site_values"; then
-  echo "sandbox image in site values must be pinned by sha256 digest" >&2
-  exit 1
-fi
 if [[ -d "$output_dir" ]] && find "$output_dir" -mindepth 1 -print -quit | grep -q .; then
   echo "refusing to overwrite non-empty render directory: $output_dir" >&2
   exit 1

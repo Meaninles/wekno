@@ -66,6 +66,11 @@ def object_name(document: str) -> str | None:
     return scalar(metadata.group("body"), "name", 2) if metadata else None
 
 
+def object_namespace(document: str) -> str | None:
+    metadata = re.search(r"(?ms)^metadata:\s*\n(?P<body>(?:  [^\n]*\n?)*)", document)
+    return scalar(metadata.group("body"), "namespace", 2) if metadata else None
+
+
 def parse_documents(path: str) -> list[tuple[str, str, str]]:
     raw = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     if "REPLACE_" in raw:
@@ -130,6 +135,25 @@ def validate_static_workspace(documents: list[tuple[str, str, str]], errors: lis
         errors.append('static workspace Role must grant only get on the shared PVC')
     if 'resources: [pods, configmaps]' not in role:
         errors.append('workspace lifecycle ConfigMap permissions are missing')
+    expected_namespaces = {
+        ('ServiceAccount', 'weknora-agent-runtime'): 'weknora',
+        ('Deployment', 'weknora-agent-runtime'): 'weknora',
+        ('Role', 'weknora-agent-runtime'): 'weknora-agent-workspaces',
+        ('RoleBinding', 'weknora-agent-runtime'): 'weknora-agent-workspaces',
+        ('NetworkPolicy', 'workspace-isolation'): 'weknora-agent-workspaces',
+    }
+    objects = {(kind, name): doc for kind, name, doc in documents}
+    for identity, expected_namespace in expected_namespaces.items():
+        document = objects.get(identity)
+        if not document:
+            errors.append(f'missing required namespaced object {identity[0]}/{identity[1]}')
+            continue
+        actual_namespace = object_namespace(document)
+        if actual_namespace != expected_namespace:
+            errors.append(
+                f'{identity[0]}/{identity[1]} namespace={actual_namespace!r}, '
+                f'expected {expected_namespace!r}'
+            )
     policy = next((doc for kind, name, doc in documents
                    if kind == 'NetworkPolicy' and name == 'workspace-isolation'), '')
     if not policy:
@@ -191,6 +215,19 @@ def validate_workloads(
         unexpected = sorted(pdb_names & SUSPENDED_DEPLOYMENTS)
         if unexpected:
             errors.append(f"suspended deployments still have PDBs: {unexpected}")
+    else:
+        runtime_pdb = next(
+            (
+                document
+                for kind, name, document in documents
+                if kind == "PodDisruptionBudget" and name == "weknora-agent-runtime"
+            ),
+            "",
+        )
+        if not runtime_pdb:
+            errors.append("normal manifest is missing agent-runtime PodDisruptionBudget")
+        elif object_namespace(runtime_pdb) != "weknora":
+            errors.append("agent-runtime PodDisruptionBudget must be in namespace weknora")
 
     raw = "\n".join(document for _, _, document in documents)
     actual_paths = set(

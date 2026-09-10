@@ -20,6 +20,7 @@ REGISTRY/base):
   debian:12.12-slim
   python:3.10.18-bookworm
   python:3.11-slim
+  python:3.12-slim-bookworm
   node:22-alpine
   nginx:stable-alpine
 
@@ -27,7 +28,7 @@ Environment overrides:
   BUILD_CPUS=2
   BUILD_MEMORY=10g
   MIN_DOCKER_FREE_GIB=80
-  GOPROXY=https://goproxy.cn,direct
+  GOPROXY=https://goproxy.cn
   GOSUMDB=off
   GOPRIVATE=
   BASE_IMAGE_REGISTRY=REGISTRY/base
@@ -174,6 +175,20 @@ force_no_cache=${FORCE_NO_CACHE:-false}
 [[ "$base_image_registry" != *://* ]] || die "BASE_IMAGE_REGISTRY must not include a URL scheme"
 [[ "$force_no_cache" == true || "$force_no_cache" == false ]] || \
   die "FORCE_NO_CACHE must be true or false"
+[[ $(find "$source_dir/packages/uv" -maxdepth 1 -type f -name "uv-${uv_version}-*.whl" | wc -l) -eq 1 ]] || \
+  die "release package cache does not contain exactly one uv ${uv_version} wheel"
+
+grep -Fq 'FROM ${BASE_IMAGE_REGISTRY_ARG}/python:3.12-slim-bookworm' \
+  "$source_dir/custom/services/agent-runtime/Dockerfile" || \
+  die "agent runtime must use the configured base-image registry"
+grep -Fq 'FROM ${BASE_IMAGE_REGISTRY_ARG}/python:3.12-slim-bookworm' \
+  "$source_dir/custom/services/agent-runtime/sandbox/Dockerfile" || \
+  die "agent workspace must use the configured base-image registry"
+if grep -Eq '^FROM[[:space:]]+(ghcr\.io|docker\.io|python:)' \
+  "$source_dir/custom/services/agent-runtime/Dockerfile" \
+  "$source_dir/custom/services/agent-runtime/sandbox/Dockerfile"; then
+  die "agent Dockerfiles contain a direct external base image"
+fi
 
 install -d -m 0700 "$output_dir"
 log_file="$output_dir/build-release-images.log"
@@ -211,6 +226,7 @@ base_images=(
   debian:12.12-slim
   python:3.10.18-bookworm
   python:3.11-slim
+  python:3.12-slim-bookworm
   node:22-alpine
   nginx:stable-alpine
 )
@@ -322,10 +338,17 @@ if [[ "$finalize_existing" == true ]]; then
   done
 else
   run_build agent-runtime \
+    --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
+    --build-arg "PIP_INDEX_URL_ARG=$pip_index_url" \
+    --build-arg "UV_VERSION_ARG=$uv_version" \
     -f "$source_dir/custom/services/agent-runtime/Dockerfile" \
     -t "$agent_runtime_ref" "$source_dir"
 
   run_build agent-workspace \
+    --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
+    --build-arg "APT_MIRROR_ARG=$apt_mirror_host" \
+    --build-arg "PIP_INDEX_URL_ARG=$pip_index_url" \
+    --build-arg "NPM_REGISTRY_ARG=$npm_registry" \
     -f "$source_dir/custom/services/agent-runtime/sandbox/Dockerfile" \
     -t "$agent_workspace_ref" "$source_dir"
 
@@ -352,7 +375,7 @@ else
     --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
     --build-arg "MIGRATE_VERSION_ARG=$migrate_version" \
     --build-arg "GOPRIVATE_ARG=${GOPRIVATE:-}" \
-    --build-arg "GOPROXY_ARG=${GOPROXY:-https://goproxy.cn,direct}" \
+    --build-arg "GOPROXY_ARG=${GOPROXY:-https://goproxy.cn}" \
     --build-arg "GOSUMDB_ARG=${GOSUMDB:-off}" \
     --build-arg "APK_MIRROR_ARG=$apt_mirror_host" \
     --build-arg "PIP_INDEX_URL_ARG=$pip_index_url" \

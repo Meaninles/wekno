@@ -95,7 +95,7 @@ pip_index_url=${PIP_INDEX_URL:-https://mirrors.tencent.com/pypi/simple}
 npm_registry=${NPM_REGISTRY:-https://mirrors.tencent.com/npm}
 github_proxy=${GITHUB_PROXY:-https://ghfast.top/}
 playwright_download_host=${PLAYWRIGHT_DOWNLOAD_HOST:-https://npmmirror.com/mirrors/playwright}
-goproxy=${GOPROXY:-https://goproxy.cn,direct}
+goproxy=${GOPROXY:-https://goproxy.cn}
 uv_version=${UV_VERSION:-0.11.32}
 pip_version=${PIP_VERSION:-26.1.2}
 setuptools_version=${SETUPTOOLS_VERSION:-83.0.0}
@@ -156,6 +156,7 @@ base_images=(
   debian:12.12-slim
   python:3.10.18-bookworm
   python:3.11-slim
+  python:3.12-slim-bookworm
   node:22-alpine
   nginx:stable-alpine
 )

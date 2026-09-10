@@ -548,8 +548,9 @@
       "cpu_m": 2000,
       "memory_mib": 2048
     },
-    "workspace_pvcs_per_run": 2,
-    "workspace_storage_gib_per_pvc": 4,
-    "scheduling": "document-worker nodes; scheduler enforces requests, limits are not a reservation"
+    "workspace_shared_pvcs": 1,
+    "workspace_shared_storage_gib": 100,
+    "workspace_storage_allocation": "per-run subpaths; independent of worker concurrency; capacity is not a filesystem quota",
+    "scheduling": "workspace Pods on 10.14.201.2 via local PV affinity; scheduler enforces requests, limits are not a reservation"
   }
 }

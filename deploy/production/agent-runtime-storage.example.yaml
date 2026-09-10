@@ -1,0 +1,33 @@
+# Separate storage preparation manifest; NEVER include in workload prune/uninstall.
+# Existing production objects already exist: inspect and adopt; do not recreate.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: weknora-agent-runtime-pv
+spec:
+  capacity: {storage: 100Gi}
+  volumeMode: Filesystem
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: weknora-local
+  local:
+    path: /mnt/weknora-data/weknora-agent-runtime
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: ["10.14.201.2"]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-runtime-shared
+  namespace: weknora-agent-workspaces
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: weknora-local
+  volumeName: weknora-agent-runtime-pv
+  resources:
+    requests: {storage: 100Gi}

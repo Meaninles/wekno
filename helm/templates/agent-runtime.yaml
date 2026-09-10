@@ -4,6 +4,7 @@
 {{- if eq $workspaceNS .Release.Namespace }}
 {{- fail "agentRuntime.workspace.namespace must be dedicated to execution Pods" }}
 {{- end }}
+{{- $claim := required "agentRuntime.workspace.existingClaim is required (static PVC in workspace namespace)" .Values.agentRuntime.workspace.existingClaim }}
 {{- if not .Values.app.agentIntegration.enabled }}
 {{- fail "agentRuntime requires app.agentIntegration.enabled and its shared API key Secret" }}
 {{- end }}
@@ -26,8 +27,12 @@ metadata:
   namespace: {{ $workspaceNS }}
 rules:
   - apiGroups: [""]
-    resources: [pods, persistentvolumeclaims]
+    resources: [pods, configmaps]
     verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    resourceNames: [{{ $claim | quote }}]
+    verbs: [get]
   - apiGroups: [""]
     resources: [pods/exec]
     verbs: [get, create]
@@ -124,10 +129,10 @@ spec:
               value: {{ $workspaceNS | quote }}
             - name: AGENT_WORKSPACE_IMAGE
               value: {{ .Values.agentRuntime.workspace.image | quote }}
-            - name: AGENT_WORKSPACE_STORAGE_CLASS
-              value: {{ .Values.agentRuntime.workspace.storageClass | quote }}
-            - name: AGENT_WORKSPACE_STORAGE_SIZE
-              value: {{ .Values.agentRuntime.workspace.storageSize | quote }}
+            - name: AGENT_WORKSPACE_PVC_NAME
+              value: {{ $claim | quote }}
+            - name: AGENT_WORKSPACE_PV_NAME
+              value: {{ .Values.agentRuntime.workspace.existingVolume | quote }}
             - name: AGENT_WORKSPACE_IMAGE_PULL_SECRETS
               value: {{ join "," .Values.agentRuntime.workspace.imagePullSecrets | quote }}
             - name: AGENT_WORKSPACE_NODE_SELECTOR

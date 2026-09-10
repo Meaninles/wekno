@@ -779,8 +779,9 @@ agentRuntime:
   workspace:
     namespace: ""
     image: weknora-agent-workspace:local
-    storageClass: ""
-    storageSize: 4Gi
+    # Pre-created static PVC in the dedicated workspace namespace. Never deleted by runtime.
+    existingClaim: agent-runtime-shared
+    existingVolume: ""
     imagePullSecrets: []
     nodeSelector: {}
 

@@ -1,12 +1,11 @@
 """Kubernetes transport for the same SDK workspace and execution receipts.
 
 Only Pods in a dedicated workspace namespace are manageable by this worker.
-PVCs outlive worker/Pod replacement; terminal runs release them after delivery.
+One existing PVC holds isolated run subpaths across worker/Pod replacement.
 """
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from kubernetes_asyncio.stream import WsApiClient
 
 from .workspace import SandboxBackend
+from .static_workspace import bound_claim, claim_name, command, track, ROLE
 
 
 class PodExec:
@@ -98,12 +98,16 @@ class PodContainer:
                 await asyncio.sleep(.25)
 
 
-def pod_spec(payload, key):
+def pod_spec(payload, key, claim_uid):
     labels = {"weknora.agent.workspace": key, "weknora.agent.epoch": str(payload.owner_epoch),
               "weknora.agent.run": payload.run_id, "app.kubernetes.io/managed-by": "weknora-agent-runtime"}
-    volumes = [{"name": name, "persistentVolumeClaim": {"claimName": prefix+key}}
-               for name, prefix in (("workspace", "agent-workspace-"), ("receipts", "agent-receipts-"))]
-    mounts = [{"name":"workspace", "mountPath":"/workspace"}, {"name":"receipts", "mountPath":"/control"}]
+    import hashlib
+    if key != hashlib.sha256(payload.run_id.encode()).hexdigest()[:32] or not claim_uid:
+        raise ValueError('Invalid workspace identity')
+    labels[ROLE] = 'workspace'
+    volumes = [{"name": "runtime-storage", "persistentVolumeClaim": {"claimName": claim_name()}}]
+    mounts = [{"name":"runtime-storage", "mountPath":path, "subPath":prefix+'/'+key}
+              for path, prefix in (('/workspace', 'workspaces'), ('/control', 'receipts'))]
     return {"apiVersion":"v1", "kind":"Pod", "metadata":{"name":"agent-workspace-"+key, "labels":labels}, "spec":{
         "automountServiceAccountToken":False, "restartPolicy":"Never", "terminationGracePeriodSeconds":3,
         "activeDeadlineSeconds":int(os.environ.get("AGENT_WORKSPACE_MAX_SECONDS", "14400")),
@@ -111,9 +115,10 @@ def pod_spec(payload, key):
         "imagePullSecrets":[{"name":name} for name in os.environ.get("AGENT_WORKSPACE_IMAGE_PULL_SECRETS", "").split(",") if name],
         "nodeSelector":json.loads(os.environ.get("AGENT_WORKSPACE_NODE_SELECTOR", "{}")),
         "initContainers":[{"name":"permissions", "image":os.environ["AGENT_WORKSPACE_IMAGE"],
-            "command":["sh", "-c", "chown 1000:1000 /workspace && chmod 700 /workspace /control"], "volumeMounts":mounts,
+            "command":command('prepare', payload.run_id, key, claim_uid),
+            "volumeMounts":[{"name":"runtime-storage", "mountPath":"/runtime-root"}],
             "securityContext":{"runAsUser":0,"allowPrivilegeEscalation":False,"readOnlyRootFilesystem":True,
-                               "capabilities":{"drop":["ALL"],"add":["CHOWN","FOWNER"]}}}],
+                               "capabilities":{"drop":["ALL"],"add":["CHOWN","FOWNER","DAC_OVERRIDE"]}}}],
         "containers":[{"name":"workspace", "image":os.environ["AGENT_WORKSPACE_IMAGE"], "imagePullPolicy":"IfNotPresent",
             "command":["sleep","infinity"], "workingDir":"/workspace", "env":[{"name":"HOME","value":"/workspace"}],
             "securityContext":{"runAsUser":0,"allowPrivilegeEscalation":False,"readOnlyRootFilesystem":True,
@@ -137,27 +142,21 @@ class KubernetesBackend(SandboxBackend):
             config.load_incluster_config()
             self.api_client = client.ApiClient()
             self.api = client.CoreV1Api(self.api_client)
+            claim = await bound_claim(self.api, self.namespace)
+            await track(self.api, self.namespace, self.payload, self.key, claim)
             name = "agent-workspace-"+self.key
             try:
                 old = await self.api.read_namespaced_pod(name, self.namespace)
+                if (old.metadata.labels.get(ROLE) != 'workspace'
+                        or old.metadata.labels.get('weknora.agent.run') != self.payload.run_id):
+                    raise asyncio.CancelledError('Workspace is being reclaimed or belongs to another run')
                 if int(old.metadata.labels["weknora.agent.epoch"]) > self.payload.owner_epoch:
                     raise asyncio.CancelledError("Newer workspace owner exists")
                 await PodContainer(self.api,self.namespace,name,old.metadata.uid).delete()
             except ApiException as exc:
                 if exc.status != 404:
                     raise
-            spec = pod_spec(self.payload, self.key)
-            for prefix in ("agent-workspace-", "agent-receipts-"):
-                storage = {"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":os.environ.get("AGENT_WORKSPACE_STORAGE_SIZE", "4Gi")}}}
-                if os.environ.get("AGENT_WORKSPACE_STORAGE_CLASS"):
-                    storage["storageClassName"] = os.environ["AGENT_WORKSPACE_STORAGE_CLASS"]
-                try:
-                    await self.api.create_namespaced_persistent_volume_claim(self.namespace, {
-                        "apiVersion":"v1","kind":"PersistentVolumeClaim",
-                        "metadata":{"name":prefix+self.key,"labels":spec["metadata"]["labels"]},"spec":storage})
-                except ApiException as exc:
-                    if exc.status != 409:
-                        raise
+            spec = pod_spec(self.payload, self.key, claim.metadata.uid)
             await self.control.post("runs/heartbeat")
             try:
                 pod = await self.api.create_namespaced_pod(self.namespace, spec)
@@ -183,13 +182,10 @@ class KubernetesBackend(SandboxBackend):
             if self.container:
                 await self.container.delete()
                 self.container = None
-            if self.api:
-                with contextlib.suppress(Exception):
-                    status = await self.control.post("runs/status")
-                    if status.get("status") in ("completed","failed","cancelled","incomplete"):
-                        for prefix in ("agent-workspace-", "agent-receipts-"):
-                            await self.api.delete_namespaced_persistent_volume_claim(prefix+self.key,self.namespace)
+            # The durable storage record lets housekeeping reclaim terminal run
+            # directories even if this worker crashes after removing the Pod.
         finally:
             if self.api_client:
                 await self.api_client.close()
                 self.api_client = None
+                self.api = None

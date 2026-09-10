@@ -1,4 +1,5 @@
 import io
+import hashlib
 from zipfile import ZipFile
 
 import pytest
@@ -19,7 +20,10 @@ def test_office_delivery_rejects_incomplete_packages_and_sets_registered_mime():
 
 def test_kubernetes_workspace_has_private_volumes_and_no_application_credentials(monkeypatch):
     monkeypatch.setenv("AGENT_WORKSPACE_IMAGE","workspace:fixture")
-    spec=pod_spec(request(),"fixture")["spec"]
+    monkeypatch.setenv("AGENT_WORKSPACE_PVC_NAME","agent-runtime-shared")
+    payload = request()
+    key = hashlib.sha256(payload.run_id.encode()).hexdigest()[:32]
+    spec=pod_spec(payload,key,"claim-uid")["spec"]
     assert spec["automountServiceAccountToken"] is False
     assert all("hostPath" not in v for v in spec["volumes"])
     container=spec["containers"][0]

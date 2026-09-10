@@ -109,9 +109,33 @@ def validate_agent_callback(document: str, errors: list[str]) -> None:
         errors.append("weknora-app must use the load-balanced durable agent control endpoint")
 
 
+def validate_static_workspace(documents: list[tuple[str, str, str]], errors: list[str]) -> None:
+    runtime = next((doc for kind, name, doc in documents
+                    if kind == 'Deployment' and name == 'weknora-agent-runtime'), '')
+    for name, value in {
+        'AGENT_WORKSPACE_PVC_NAME': 'agent-runtime-shared',
+        'AGENT_WORKSPACE_PV_NAME': 'weknora-agent-runtime-pv',
+        'AGENT_WORKSPACE_NAMESPACE': 'weknora-agent-workspaces',
+        'AGENT_WORKSPACE_IMAGE_PULL_SECRETS': 'default-secret',
+    }.items():
+        if not has_env(runtime, name, value):
+            errors.append(f'static workspace requires {name}={value}')
+    if 'AGENT_WORKSPACE_STORAGE_SIZE' in runtime or 'AGENT_WORKSPACE_STORAGE_CLASS' in runtime:
+        errors.append('retired per-run PVC configuration remains in runtime')
+    if not has_env(runtime, 'AGENT_WORKSPACE_NODE_SELECTOR', r'{\"kubernetes.io/hostname\":\"10.14.201.2\"}'):
+        errors.append('static workspace must select local PV node 10.14.201.2')
+    role = next((doc for kind, name, doc in documents if kind == 'Role' and name == 'weknora-agent-runtime'), '')
+    expected = r'resources:\s*\[persistentvolumeclaims\]\s*\n\s*resourceNames:\s*\["agent-runtime-shared"\]\s*\n\s*verbs:\s*\[get\]'
+    if not re.search(expected, role):
+        errors.append('static workspace Role must grant only get on the shared PVC')
+    if 'resources: [pods, configmaps]' not in role:
+        errors.append('workspace lifecycle ConfigMap permissions are missing')
+
+
 def validate_workloads(
     documents: list[tuple[str, str, str]], mode: str, errors: list[str]
 ) -> None:
+    validate_static_workspace(documents, errors)
     kinds = {kind for kind, _, _ in documents}
     # Both workload sets stay dark. The reviewed cutoff Ingress is restored
     # only after platform, rebuild and business smoke verification succeeds.

@@ -20,18 +20,12 @@ async def sweep(client):
         return response.json().get("status") in ("completed","failed","cancelled","incomplete")
     if os.environ.get("AGENT_WORKSPACE_BACKEND","docker") == "kubernetes":
         from kubernetes_asyncio import client as k8s, config
-        from .kubernetes_workspace import PodContainer
+        from .static_workspace import sweep_static
         config.load_incluster_config()
         async with k8s.ApiClient() as transport:
             api=k8s.CoreV1Api(transport)
             ns=os.environ["AGENT_WORKSPACE_NAMESPACE"]
-            for pod in (await api.list_namespaced_pod(ns,label_selector=LABEL)).items:
-                if await terminal(pod.metadata.labels):
-                    await PodContainer(api,ns,pod.metadata.name,pod.metadata.uid).delete()
-            for volume in (await api.list_namespaced_persistent_volume_claim(ns,label_selector=LABEL)).items:
-                if await terminal(volume.metadata.labels):
-                    await api.delete_namespaced_persistent_volume_claim(volume.metadata.name,ns,
-                        body={"preconditions":{"uid":volume.metadata.uid}})
+            await sweep_static(api, ns, terminal)
     else:
         import aiodocker
         async with aiodocker.Docker() as docker:

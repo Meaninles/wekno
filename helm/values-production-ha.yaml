@@ -4,8 +4,8 @@
 # Prerequisites: immutable SWR images, node labels and role scratch paths,
 # private object storage, and the weknora-agent-internal apiKey secret.
 # Agent Runtime uses one AgentScope harness for all independent profiles.
-# Kubernetes workspaces require a usable StorageClass for per-run RWO PVCs;
-# configure agentRuntime.workspace.storageClass for the target cluster.
+# Kubernetes workspaces use one pre-bound static PVC with per-run subpaths;
+# configure agentRuntime.workspace.existingClaim/existingVolume for the cluster.
 # Workspace Pods have no model credentials and no external network access.
 # Local Docker verification does not certify the target cluster's storage,
 # scheduling or network-policy implementation.
@@ -574,11 +574,11 @@ agentRuntime:
   workspace:
     namespace: ""
     image: weknora-agent-workspace:local
-    storageClass: ""
-    storageSize: 4Gi
-    imagePullSecrets: []
+    existingClaim: agent-runtime-shared
+    existingVolume: weknora-agent-runtime-pv
+    imagePullSecrets: [default-secret]
     nodeSelector:
-      weknora.io/document-worker: "true"
+      kubernetes.io/hostname: "10.14.201.2"
 
 frontend:
   enabled: true

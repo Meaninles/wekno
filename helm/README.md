@@ -5,6 +5,11 @@
 
 Helm chart for deploying [WeKnora](https://github.com/Tencent/WeKnora) - an AI-powered Knowledge RAG Platform.
 
+Agent Runtime requires a pre-bound `agentRuntime.workspace.existingClaim` in its dedicated workspace namespace.
+`existingVolume` optionally verifies the PV name. It uses one PVC with per-run workspace/receipt subpaths;
+runtime RBAC cannot create/delete PVCs. Prepare storage separately from workload manifests. See
+[static storage and cleanup](../docs/custom/Agent运行时静态PVC与目录隔离.md).
+
 ## Overview
 
 WeKnora is an intelligent knowledge base platform that combines:

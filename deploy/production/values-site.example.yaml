@@ -25,6 +25,12 @@ agentRuntime:
     digest: REPLACE_AGENT_RUNTIME_DIGEST
     pullPolicy: IfNotPresent
   workspace:
+    namespace: weknora-agent-workspaces
+    existingClaim: agent-runtime-shared
+    existingVolume: weknora-agent-runtime-pv
+    imagePullSecrets: [default-secret]
+    nodeSelector:
+      kubernetes.io/hostname: "10.14.201.2"
     image: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-agent-workspace@REPLACE_AGENT_WORKSPACE_DIGEST
 
 frontend:

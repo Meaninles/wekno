@@ -109,6 +109,15 @@ def has_env(document: str, name: str, value: str) -> bool:
     ) is not None
 
 
+def env_value(document: str, name: str) -> str | None:
+    match = re.search(
+        rf'(?m)^\s*- name:\s*{re.escape(name)}\s*$\n'
+        rf'^\s+value:\s*"?([^\s"]+)"?\s*$',
+        document,
+    )
+    return match.group(1) if match else None
+
+
 def validate_agent_callback(document: str, errors: list[str]) -> None:
     if not has_env(document, "AGENT_RUNTIME_TOOL_CALLBACK_URL", EXPECTED_TOOL_CALLBACK_URL):
         errors.append("weknora-app must use the load-balanced durable agent control endpoint")
@@ -127,6 +136,12 @@ def validate_static_workspace(documents: list[tuple[str, str, str]], errors: lis
             errors.append(f'static workspace requires {name}={value}')
     if 'AGENT_WORKSPACE_STORAGE_SIZE' in runtime or 'AGENT_WORKSPACE_STORAGE_CLASS' in runtime:
         errors.append('retired per-run PVC configuration remains in runtime')
+    workspace_image = env_value(runtime, 'AGENT_WORKSPACE_IMAGE')
+    if not workspace_image or not IMAGE_RE.fullmatch(workspace_image):
+        errors.append(
+            'static workspace image must be present and pinned by sha256 digest: '
+            f'{workspace_image!r}'
+        )
     if not has_env(runtime, 'AGENT_WORKSPACE_NODE_SELECTOR', r'{\"kubernetes.io/hostname\":\"10.14.201.2\"}'):
         errors.append('static workspace must select local PV node 10.14.201.2')
     role = next((doc for kind, name, doc in documents if kind == 'Role' and name == 'weknora-agent-runtime'), '')

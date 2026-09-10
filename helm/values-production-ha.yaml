@@ -6,7 +6,8 @@
 # Agent Runtime uses one AgentScope harness for all independent profiles.
 # Kubernetes workspaces use one pre-bound static PVC with per-run subpaths;
 # configure agentRuntime.workspace.existingClaim/existingVolume for the cluster.
-# Workspace Pods have no model credentials and no external network access.
+# Workspace Pods have no model credentials and reject inbound connections, but
+# retain direct outbound network access for skills, downloads and external APIs.
 # Local Docker verification does not certify the target cluster's storage,
 # scheduling or network-policy implementation.
 

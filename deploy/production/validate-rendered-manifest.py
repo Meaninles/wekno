@@ -130,6 +130,17 @@ def validate_static_workspace(documents: list[tuple[str, str, str]], errors: lis
         errors.append('static workspace Role must grant only get on the shared PVC')
     if 'resources: [pods, configmaps]' not in role:
         errors.append('workspace lifecycle ConfigMap permissions are missing')
+    policy = next((doc for kind, name, doc in documents
+                   if kind == 'NetworkPolicy' and name == 'workspace-isolation'), '')
+    if not policy:
+        errors.append('workspace ingress isolation NetworkPolicy is missing')
+    else:
+        if not re.search(r'(?m)^  policyTypes: \[Ingress\]\s*$', policy):
+            errors.append('workspace NetworkPolicy must select ingress only')
+        if not re.search(r'(?m)^  ingress: \[\]\s*$', policy):
+            errors.append('workspace NetworkPolicy must deny all ingress')
+        if re.search(r'(?m)^  egress:', policy):
+            errors.append('workspace NetworkPolicy must leave egress unrestricted')
 
 
 def validate_workloads(

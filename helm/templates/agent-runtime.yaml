@@ -58,9 +58,11 @@ metadata:
   namespace: {{ $workspaceNS }}
 spec:
   podSelector: {}
-  policyTypes: [Ingress, Egress]
+  # Workspace commands and skills need direct outbound access (for example,
+  # GitHub and package registries). Keep the namespace closed to inbound
+  # connections without selecting Egress and accidentally denying the Internet.
+  policyTypes: [Ingress]
   ingress: []
-  egress: []
 ---
 apiVersion: apps/v1
 kind: Deployment

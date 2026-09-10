@@ -61,7 +61,8 @@ Linux 容器运行 `tests/test_static_workspace*.py` 验证真实权限、符号
 没有本地 Kubernetes 时不能用 Docker 测试宣称 CCE 挂载和网络策略验证通过。
 
 上线前必须在目标版本验证两个工作区 Pod 同时挂载、首次目录初始化、同运行恢复、
-清理只影响目标目录、SWR 拉取与 pods/exec。现有工作区 NetworkPolicy 禁止出入站，
+清理只影响目标目录、SWR 拉取与 pods/exec。工作区 NetworkPolicy 仅禁止入站连接；
+工作区保留直接出站能力，并须验证 DNS、HTTPS、GitHub、依赖下载源及所需外部 API。
 控制 API 查询在外部 Agent Runtime 完成，清理 Pod不主动联网。
 
 生产目前为旧 general-agent/document-processing-agent hostPath 架构。

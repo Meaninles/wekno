@@ -52,6 +52,10 @@ ENV GO_VERSION=${GO_VERSION_ARG}
 # Build the application with version info
 RUN --mount=type=cache,target=/go/pkg/mod make build-prod
 RUN --mount=type=cache,target=/go/pkg/mod cp -r /go/pkg/mod/github.com/yanyiwu/ /app/yanyiwu/
+# Git does not preserve the intentionally empty preloaded-skills directory.
+# Recreate it after compilation so release archives and ordinary checkouts have
+# identical runtime paths without invalidating the expensive Go build layers.
+RUN mkdir -p /app/skills/preloaded
 
 # Docker CLI extraction stage. The runtime only needs the client for the
 # host-socket sandbox, not containerd/runc/the Docker daemon.

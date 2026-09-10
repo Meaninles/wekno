@@ -195,6 +195,9 @@ grep -Fq \
   'COPY internal/custom/modules/usererrors/catalog.json /workspace/internal/custom/modules/usererrors/catalog.json' \
   "$source_dir/deploy/production/Dockerfile.frontend" || \
   die "production frontend build does not include the shared public-error catalog"
+grep -Fq 'RUN mkdir -p /app/skills/preloaded' \
+  "$source_dir/docker/Dockerfile.app" || \
+  die "app image does not restore the empty preloaded-skills runtime directory"
 
 install -d -m 0700 "$output_dir"
 log_file="$output_dir/build-release-images.log"

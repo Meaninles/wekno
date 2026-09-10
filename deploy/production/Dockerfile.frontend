@@ -1,0 +1,38 @@
+ARG BASE_IMAGE_REGISTRY_ARG=docker.io/library
+FROM ${BASE_IMAGE_REGISTRY_ARG}/node:22-alpine AS build
+
+# Preserve the repository layout for the shared public-error catalog while
+# excluding unrelated backend sources and runtime data from this context.
+WORKDIR /workspace/frontend
+
+ARG NPM_REGISTRY_ARG=https://mirrors.tencent.com/npm
+ARG NODE_OPTIONS_ARG=--max-old-space-size=6144
+ENV NODE_OPTIONS=${NODE_OPTIONS_ARG}
+COPY frontend/package*.json ./
+COPY frontend/packages ./packages
+RUN npm config set registry "$NPM_REGISTRY_ARG" && npm ci --prefer-offline
+
+COPY frontend/ ./
+COPY internal/custom/modules/usererrors/catalog.json /workspace/internal/custom/modules/usererrors/catalog.json
+RUN npm run build:mobile
+RUN npm run build
+
+FROM ${BASE_IMAGE_REGISTRY_ARG}/nginx:stable-alpine
+
+COPY --from=build /workspace/frontend/dist /usr/share/nginx/html
+COPY --from=build /workspace/frontend/dist-mobile /usr/share/nginx/html/mobile
+COPY frontend/nginx.mobile.conf /etc/nginx/templates/default.conf.template
+COPY frontend/docker-entrypoint.sh /docker-entrypoint.sh
+
+RUN sed -i '/application\/javascript/ s/js;/js mjs;/' /etc/nginx/mime.types \
+    && grep -Eq 'application/javascript[[:space:]]+js mjs;' /etc/nginx/mime.types \
+    && chmod +x /docker-entrypoint.sh
+
+ENV MAX_FILE_SIZE_MB=50
+ENV PROXY_MAX_BODY_SIZE_MB=80
+ENV PROXY_MAX_KNOWLEDGE_SOURCE_BODY_SIZE_MB=2304
+ENV PROXY_TIMEOUT_SECONDS=3600
+
+EXPOSE 80
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

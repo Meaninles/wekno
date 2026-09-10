@@ -115,7 +115,7 @@ done
 [[ "$release_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "invalid --tag"
 
 for command_name in docker python3 sha256sum find sort xargs awk sed grep diff \
-  stat df date tee nice ionice readlink install; do
+  stat df date tee nice ionice readlink install cp rm; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
 done
 
@@ -125,6 +125,8 @@ output_dir=$(readlink -m "$output_dir")
 [[ "$output_dir" != / && "$output_dir" != "$source_dir" ]] || die "unsafe output directory"
 [[ -f "$source_dir/.source-git-head" ]] || die "missing $source_dir/.source-git-head"
 [[ -f "$source_dir/docker/Dockerfile.app" ]] || die "source tree is incomplete"
+[[ -f "$source_dir/deploy/production/Dockerfile.frontend" ]] || \
+  die "production frontend Dockerfile is missing"
 [[ -f "$source_dir/packages/SHA256SUMS.release" ]] || die "release package manifest is missing"
 
 (cd "$source_dir/packages" && sha256sum -c SHA256SUMS.release)
@@ -189,6 +191,10 @@ if grep -Eq '^FROM[[:space:]]+(ghcr\.io|docker\.io|python:)' \
   "$source_dir/custom/services/agent-runtime/sandbox/Dockerfile"; then
   die "agent Dockerfiles contain a direct external base image"
 fi
+grep -Fq \
+  'COPY internal/custom/modules/usererrors/catalog.json /workspace/internal/custom/modules/usererrors/catalog.json' \
+  "$source_dir/deploy/production/Dockerfile.frontend" || \
+  die "production frontend build does not include the shared public-error catalog"
 
 install -d -m 0700 "$output_dir"
 log_file="$output_dir/build-release-images.log"
@@ -363,12 +369,24 @@ else
     -f "$source_dir/docker/Dockerfile.docreader" \
     -t "$docreader_ref" "$source_dir"
 
+  frontend_context="$output_dir/frontend-build-context"
+  [[ "$frontend_context" == "$output_dir/"* ]] || die "unsafe frontend build context"
+  rm -rf "$frontend_context"
+  install -d -m 0700 "$frontend_context/frontend"
+  cp -a "$source_dir/frontend/." "$frontend_context/frontend/"
+  install -d -m 0755 "$frontend_context/internal/custom/modules/usererrors"
+  cp -p "$source_dir/internal/custom/modules/usererrors/catalog.json" \
+    "$frontend_context/internal/custom/modules/usererrors/catalog.json"
+  cp -p "$source_dir/deploy/production/Dockerfile.frontend" \
+    "$frontend_context/Dockerfile"
+  printf 'FRONTEND_CONTEXT=PASS %s\n' "$frontend_context"
+
   run_build frontend-mobile \
     --build-arg "BASE_IMAGE_REGISTRY_ARG=$base_image_registry" \
     --build-arg "NPM_REGISTRY_ARG=$npm_registry" \
     --build-arg "NODE_OPTIONS_ARG=--max-old-space-size=$node_build_heap_mb" \
-    -f "$source_dir/frontend/Dockerfile.mobile" \
-    -t "$frontend_ref" "$source_dir/frontend"
+    -f "$frontend_context/Dockerfile" \
+    -t "$frontend_ref" "$frontend_context"
   docker tag "$frontend_ref" "$mobile_ref"
 
   run_build app \

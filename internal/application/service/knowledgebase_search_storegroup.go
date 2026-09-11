@@ -7,19 +7,20 @@ import (
 	"sort"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/retrievalfence"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
-// storeGroup is one fan-out unit of HybridSearch: a set of KB IDs that share
-// the same (VectorStore, owning tenant) pair.
+// storeGroup is one fan-out unit of HybridSearch.
 //
-// Partition key is (VectorStoreID, OwnerTenantID), not VectorStoreID alone,
-// because Organization-shared KBs (kb.TenantID != requestTenantID) need
-// their own group whose ownership lookup runs against kb.TenantID — the
-// store is owned by the source tenant, not the caller.
+// Bound stores are partitioned by (VectorStoreID, owning tenant). Unbound
+// environment-store KBs are intentionally coalesced into one group because
+// their engine is resolved from the request tenant's TenantInfo, not from
+// kb.TenantID. Scopes retains each KB's real owning tenant so this optimization
+// does not weaken the retrieval fence.
 //
 // BaseParams are immutable across iterations and goroutines. TopK is the
 // only mutable per-iteration value; paramsWithTopK builds a fresh
@@ -33,8 +34,9 @@ type storeGroup struct {
 	StoreID string
 
 	// OwnerTenantID is the tenant that owns the KBs and the store for this
-	// group. For Organization-shared KBs this differs from the request's
-	// tenant; the factory's StoreOwnedBy must be called with this value.
+	// group when StoreID is bound. For an unbound environment-store group it is
+	// the request tenant used to resolve the environment engine; use Scopes for
+	// the per-KB ownership boundary.
 	OwnerTenantID uint64
 
 	// KBIDs are the knowledge base IDs in this group. The caller MUST have
@@ -42,6 +44,11 @@ type storeGroup struct {
 	// is the HTTP handler / session layer, matching the pre-existing
 	// chat_pipeline pattern).
 	KBIDs []string
+
+	// Scopes carries the actual owning tenant for every KB in the group. It is
+	// separate from OwnerTenantID because an unbound group may contain KBs from
+	// multiple tenants.
+	Scopes []retrievalfence.Scope
 
 	// Engine is the resolved CompositeRetrieveEngine for this group.
 	// Reused across iterative FAQ retries — never re-resolved.
@@ -57,11 +64,10 @@ type storeGroup struct {
 	TopK int
 }
 
-// resolveStoreGroups partitions kbs by (VectorStoreID, KB.TenantID),
-// resolves the engine per group via the PR2 factory using the OWNING
-// tenant for ownership lookup, and builds the per-store base RetrieveParams
-// once. Returns groups in non-deterministic order (caller must not rely on
-// iteration order).
+// resolveStoreGroups partitions bound KBs by (VectorStoreID, KB.TenantID)
+// and all unbound KBs into one environment-store group. It resolves the
+// engine per group via the factory and builds the per-store base
+// RetrieveParams once. Returns groups in deterministic order by partition key.
 //
 // The primary KB supplies the embedding model and FAQ type for params; the
 // caller MUST invoke validateSameEmbeddingModel first to guarantee a
@@ -84,27 +90,16 @@ func (s *knowledgeBaseService) resolveStoreGroups(
 	params types.SearchParams,
 	matchCount int,
 ) ([]*storeGroup, error) {
-	type partitionKey struct {
-		storeID  string
-		tenantID uint64
-	}
-	buckets := make(map[partitionKey][]*types.KnowledgeBase)
-	for _, kb := range kbs {
-		sid := ""
-		if kb.HasVectorStore() {
-			sid = *kb.VectorStoreID
-		}
-		key := partitionKey{storeID: sid, tenantID: kb.TenantID}
-		buckets[key] = append(buckets[key], kb)
-	}
+	requestTenantID := types.MustTenantIDFromContext(ctx)
+	buckets := partitionKnowledgeBasesForSearch(kbs)
 
-	keys := make([]partitionKey, 0, len(buckets))
+	keys := make([]storeGroupPartitionKey, 0, len(buckets))
 	for key := range buckets {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].tenantID != keys[j].tenantID {
-			return keys[i].tenantID < keys[j].tenantID
+		if keys[i].ownerTenantID != keys[j].ownerTenantID {
+			return keys[i].ownerTenantID < keys[j].ownerTenantID
 		}
 		return keys[i].storeID < keys[j].storeID
 	})
@@ -118,10 +113,17 @@ func (s *knowledgeBaseService) resolveStoreGroups(
 			sid := key.storeID
 			storeIDPtr = &sid
 		}
+		// The unbound factory resolves the engine from TenantInfo in ctx. Keep
+		// the caller tenant for that path; bound stores still use the owning
+		// tenant for the ownership check.
+		factoryTenantID := key.ownerTenantID
+		if key.storeID == "" {
+			factoryTenantID = requestTenantID
+		}
 		engine, err := retriever.CreateRetrieveEngineForKB(
-			ctx, s.retrieveEngine, s.ownership, key.tenantID, storeIDPtr)
+			ctx, s.retrieveEngine, s.ownership, factoryTenantID, storeIDPtr)
 		if err != nil {
-			return nil, classifyFactoryError(ctx, err, key.tenantID, key.storeID)
+			return nil, classifyFactoryError(ctx, err, factoryTenantID, key.storeID)
 		}
 		baseParams, err := s.buildRetrievalParams(
 			ctx, engine, primary, groupKBs, params, matchCount)
@@ -132,16 +134,54 @@ func (s *knowledgeBaseService) resolveStoreGroups(
 		for i, kb := range groupKBs {
 			ids[i] = kb.ID
 		}
+		scopes := make([]retrievalfence.Scope, 0, len(groupKBs))
+		for _, kb := range groupKBs {
+			scopes = append(scopes, retrievalfence.Scope{
+				TenantID:        kb.TenantID,
+				KnowledgeBaseID: kb.ID,
+			})
+		}
 		groups = append(groups, &storeGroup{
 			StoreID:       key.storeID,
-			OwnerTenantID: key.tenantID,
+			OwnerTenantID: factoryTenantID,
 			KBIDs:         ids,
+			Scopes:        scopes,
 			Engine:        engine,
 			BaseParams:    baseParams,
 			TopK:          matchCount,
 		})
 	}
 	return groups, nil
+}
+
+// storeGroupPartitionKey is the engine-routing key for a search. A zero
+// key represents the shared environment-store path: all unbound KBs use the
+// request-scoped effective engines and can therefore be retrieved together.
+// Bound stores retain their owning tenant in the key so ownership validation
+// remains per store and cannot be bypassed by cross-tenant sharing.
+type storeGroupPartitionKey struct {
+	storeID       string
+	ownerTenantID uint64
+}
+
+// partitionKnowledgeBasesForSearch groups KBs without resolving engines or
+// touching the database. This makes the request-collapse rule explicit and
+// independently testable.
+func partitionKnowledgeBasesForSearch(
+	kbs []*types.KnowledgeBase,
+) map[storeGroupPartitionKey][]*types.KnowledgeBase {
+	buckets := make(map[storeGroupPartitionKey][]*types.KnowledgeBase)
+	for _, kb := range kbs {
+		key := storeGroupPartitionKey{}
+		if kb.HasVectorStore() {
+			key = storeGroupPartitionKey{
+				storeID:       *kb.VectorStoreID,
+				ownerTenantID: kb.TenantID,
+			}
+		}
+		buckets[key] = append(buckets[key], kb)
+	}
+	return buckets
 }
 
 // classifyFactoryError translates retriever sentinels into typed AppErrors

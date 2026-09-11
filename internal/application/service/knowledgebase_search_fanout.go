@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -52,10 +53,7 @@ func (s *knowledgeBaseService) retrieveFromStores(
 	normalizer retriever.ScoreNormalizer,
 ) ([]*types.RetrieveResult, error) {
 	return s.retrieveStoreGroups(ctx, groups, normalizer, func(ctx context.Context, group *storeGroup) ([]*types.RetrieveResult, error) {
-		scopes := make([]retrievalfence.Scope, 0, len(group.KBIDs))
-		for _, id := range group.KBIDs {
-			scopes = append(scopes, retrievalfence.Scope{TenantID: group.OwnerTenantID, KnowledgeBaseID: id})
-		}
+		scopes := groupScopes(group)
 		return retrievalfence.Retrieve(ctx, paramsWithTopK(group), scopes, group.Engine.Retrieve,
 			func(ctx context.Context, ids []string) ([]*types.Chunk, error) {
 				return s.chunkRepo.ListChunksByIDOnly(ctx, ids)
@@ -64,6 +62,26 @@ func (s *knowledgeBaseService) retrieveFromStores(
 				return s.kgRepo.GetKnowledgeBatch(ctx, tenantID, ids)
 			})
 	})
+}
+
+// groupScopes returns the per-KB authorization boundary. The fallback keeps
+// hand-built storeGroup values in tests and older internal callers safe while
+// resolved production groups always carry Scopes explicitly.
+func groupScopes(group *storeGroup) []retrievalfence.Scope {
+	if len(group.Scopes) > 0 {
+		return slices.Clone(group.Scopes)
+	}
+	scopes := make([]retrievalfence.Scope, 0, len(group.KBIDs))
+	for _, id := range group.KBIDs {
+		if group.OwnerTenantID == 0 || id == "" {
+			continue
+		}
+		scopes = append(scopes, retrievalfence.Scope{
+			TenantID:        group.OwnerTenantID,
+			KnowledgeBaseID: id,
+		})
+	}
+	return scopes
 }
 
 func (s *knowledgeBaseService) retrieveStoreGroups(ctx context.Context, groups []*storeGroup,

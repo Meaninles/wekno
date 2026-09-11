@@ -32,11 +32,12 @@ def atomic_json(path, value):
         os.close(descriptor)
 
 
-def as_user():
+def as_user(cwd):
     os.setgroups([])
     os.setgid(1000)
     os.setuid(1000)
     os.umask(0o077)
+    os.chdir(cwd)
 
 
 def main():
@@ -67,9 +68,10 @@ def main():
             command = request["command"]
             if isinstance(command, str):
                 command = ["/bin/bash", "-lc", command]
-            process = subprocess.Popen(command, cwd=request.get("cwd") or "/workspace",
+            cwd = request.get("cwd") or "/workspace"
+            process = subprocess.Popen(command, cwd=None,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-                                       preexec_fn=as_user, env={**os.environ,"HOME":"/workspace","TMPDIR":"/tmp"})
+                                       preexec_fn=lambda: as_user(cwd), env={**os.environ,"HOME":"/workspace","TMPDIR":"/tmp"})
             def drain(source, destination):
                 remaining = LIMIT
                 truncated = False

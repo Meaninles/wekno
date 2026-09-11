@@ -24,6 +24,7 @@ class PodExec:
         if user:
             self.command = ["python", "-c", "import os,sys; os.setgroups([]); os.setgid(1000); os.setuid(1000); os.execvp(sys.argv[1],sys.argv[1:])", *command]
         self.exit_code = None
+        self.socket_context = None
 
     def start(self):
         return self
@@ -31,10 +32,13 @@ class PodExec:
     async def __aenter__(self):
         self.transport = WsApiClient(self.container.api.api_client.configuration)
         try:
-            self.socket = await client.CoreV1Api(self.transport).connect_get_namespaced_pod_exec(
+            self.socket_context = await client.CoreV1Api(self.transport).connect_get_namespaced_pod_exec(
                 self.container.name, self.container.namespace, command=self.command, container="workspace",
                 stdout=True, stderr=True, stdin=self.stdin, tty=False, _preload_content=False)
+            self.socket = await self.socket_context.__aenter__()
         except BaseException:
+            if self.socket_context:
+                self.socket_context.close()
             await self.transport.close()
             raise
         return self
@@ -65,9 +69,12 @@ class PodExec:
     async def inspect(self):
         return {"ExitCode": self.exit_code}
 
-    async def __aexit__(self, *_):
-        await self.socket.close()
-        await self.transport.close()
+    async def __aexit__(self, exc_type, exc, traceback):
+        try:
+            if self.socket_context:
+                await self.socket_context.__aexit__(exc_type, exc, traceback)
+        finally:
+            await self.transport.close()
 
 
 class PodContainer:

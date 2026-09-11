@@ -495,7 +495,18 @@ func (s *obsFileService) GetFileURL(ctx context.Context, filePath string) (strin
 		return s.proxyDomain + "/" + strings.TrimPrefix(objectKey, "/"), nil
 	}
 
-	return fmt.Sprintf("%s/%s/%s", s.endpoint, s.bucketName, strings.TrimPrefix(objectKey, "/")), nil
+	presignClient := s3.NewPresignClient(s.client)
+	presignedReq, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(objectKey),
+	}, s3.WithPresignExpires(24*time.Hour))
+	if err != nil {
+		return "", fmt.Errorf("failed to generate OBS presigned URL: %w", err)
+	}
+	if strings.TrimSpace(presignedReq.URL) == "" {
+		return "", fmt.Errorf("OBS presigned URL is empty")
+	}
+	return presignedReq.URL, nil
 }
 
 // CopyFile copies an existing OBS object to a new knowledge-owned object using a

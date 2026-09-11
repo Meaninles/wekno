@@ -7,6 +7,7 @@ import json
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import math
+import os
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -19,6 +20,11 @@ from .control import Control, ControlError, ControlUnavailable
 from .reasoning import TaggedReasoningOpenAIChatModel
 
 finalizing_call = ContextVar("finalizing_call", default=False)
+
+
+def _insecure_tls_enabled() -> bool:
+    """Mirror the Go model transport's explicit production break-glass flag."""
+    return os.getenv("WEKNORA_LLM_INSECURE_TLS", "").strip().lower() == "true"
 
 
 class Admission:
@@ -168,7 +174,9 @@ class GovernedTransport(httpx.AsyncBaseTransport):
         self.control = control
         # Only retry connection establishment, before a request is sent. SDK
         # retries must not mistake a local admission denial for a network fault.
-        self.transport = transport or httpx.AsyncHTTPTransport(retries=2)
+        self.transport = transport or httpx.AsyncHTTPTransport(
+            retries=2, verify=not _insecure_tls_enabled()
+        )
         self.lease_factory = lease_factory
 
     async def handle_async_request(self, request):

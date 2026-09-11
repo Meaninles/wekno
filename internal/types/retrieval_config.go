@@ -50,7 +50,7 @@ func (c *RetrievalConfig) GetEffectiveEmbeddingTopK() int {
 	if c == nil || c.EmbeddingTopK <= 0 {
 		return 50
 	}
-	return c.EmbeddingTopK
+	return min(c.EmbeddingTopK, MaxRetrievalTopK)
 }
 
 // GetEffectiveVectorThreshold returns VectorThreshold with a fallback default.
@@ -74,7 +74,7 @@ func (c *RetrievalConfig) GetEffectiveRerankTopK() int {
 	if c == nil || c.RerankTopK <= 0 {
 		return 10
 	}
-	return c.RerankTopK
+	return min(c.RerankTopK, MaxRetrievalTopK)
 }
 
 // GetEffectiveRerankThreshold returns RerankThreshold with a fallback default.

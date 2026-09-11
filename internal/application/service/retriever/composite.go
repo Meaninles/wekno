@@ -35,6 +35,12 @@ func (c *CompositeRetrieveEngine) Retrieve(ctx context.Context,
 ) ([]*types.RetrieveResult, error) {
 	return concurrentRetrieve(ctx, retrieveParams,
 		func(ctx context.Context, param types.RetrieveParams, results *[]*types.RetrieveResult, mu *sync.Mutex) error {
+			// All concrete stores receive the same hard retrieval ceiling. The
+			// knowledge-base service already supplies 80/200, but this protects
+			// direct engine callers from bypassing that policy.
+			if param.TopK > types.MaxRetrievalTopK {
+				param.TopK = types.MaxRetrievalTopK
+			}
 			found := false
 			for _, engineInfo := range c.engineInfos {
 				if engineInfo == nil {

@@ -176,6 +176,10 @@ type SearchResult struct {
 	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
 }
 
+// MaxRetrievalTopK is the hard upper bound shared by store retrieval,
+// candidate pooling, and rerank/fusion for knowledge-base search.
+const MaxRetrievalTopK = 200
+
 // SearchParams represents the search parameters
 type SearchParams struct {
 	// CandidateCount belongs to retrieval, MatchCount to direct result APIs.

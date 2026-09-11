@@ -622,11 +622,11 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	if cfg.Conversation != nil {
-		if cfg.Conversation.EmbeddingTopK < 0 {
-			errs = append(errs, "conversation.embedding_top_k must be >= 0")
+		if cfg.Conversation.EmbeddingTopK < 0 || cfg.Conversation.EmbeddingTopK > types.MaxRetrievalTopK {
+			errs = append(errs, fmt.Sprintf("conversation.embedding_top_k must be between 0 and %d", types.MaxRetrievalTopK))
 		}
-		if cfg.Conversation.RerankTopK < 0 {
-			errs = append(errs, "conversation.rerank_top_k must be >= 0")
+		if cfg.Conversation.RerankTopK < 0 || cfg.Conversation.RerankTopK > types.MaxRetrievalTopK {
+			errs = append(errs, fmt.Sprintf("conversation.rerank_top_k must be between 0 and %d", types.MaxRetrievalTopK))
 		}
 		if cfg.Conversation.VectorThreshold < 0 || cfg.Conversation.VectorThreshold > 1 {
 			errs = append(errs, "conversation.vector_threshold must be between 0 and 1")

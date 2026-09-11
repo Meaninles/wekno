@@ -319,8 +319,8 @@ func (b RetrievalBudget) Validate() error {
 		name           string
 		value, maximum int
 	}{
-		{"candidate_count", b.CandidateCount, 500},
-		{"fusion_count", b.FusionCount, 500},
+		{"candidate_count", b.CandidateCount, MaxRetrievalTopK},
+		{"fusion_count", b.FusionCount, MaxRetrievalTopK},
 		{"evidence_tokens", b.EvidenceTokens, 64000},
 	} {
 		if field.value < 0 || field.value > field.maximum {

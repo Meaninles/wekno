@@ -859,7 +859,8 @@ func TestIterativeRetrieve_PropagatesTypedAppError(t *testing.T) {
 		{ID: "kb-bad", Type: types.KnowledgeBaseTypeFAQ, TenantID: 1},
 		{ID: "kb-bad-2", Type: types.KnowledgeBaseTypeFAQ, TenantID: 1},
 	}
-	results, err := s.iterativeRetrieveWithDeduplication(ctx, groups, kbs, 10, "q")
+	results, err := s.iterativeRetrieveWithDeduplication(
+		ctx, groups, kbs, 10, multiKnowledgeBaseCandidateTopK, "q")
 	require.Error(t, err)
 	assert.Nil(t, results, "results must be nil so HybridSearch returns a clean error response")
 	app, ok := apperrors.IsAppError(err)

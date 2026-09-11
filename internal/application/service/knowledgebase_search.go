@@ -12,6 +12,15 @@ import (
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
+// Candidate pool sizes sent to each store group. They are deliberately
+// independent of the requested final result count: a single-KB search keeps
+// the current 80-row behavior, while a multi-KB search gets a fixed 200-row
+// pool without multiplying by the number of KBs or falling back to 500.
+const (
+	singleKnowledgeBaseCandidateTopK = 80
+	multiKnowledgeBaseCandidateTopK  = types.MaxRetrievalTopK
+)
+
 // GetQueryEmbedding computes the query embedding using the embedding model
 // associated with the given knowledge base. Callers can pre-compute and reuse
 // the result across multiple KBs that share the same embedding model to avoid
@@ -146,16 +155,11 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		return nil, apperrors.NewNotFoundError("knowledge base not found")
 	}
 
-	// Over-retrieval (existing rule, preserved): 5x per-KB matchCount,
-	// floor of 50, capped at 500 across the whole search.
-	matchCount := params.CandidateCount
-	if matchCount <= 0 {
-		matchCount = max(params.MatchCount*5, 50)
-	}
-	matchCount *= len(searchKBIDs)
-	if matchCount > 500 {
-		matchCount = 500
-	}
+	// Keep the candidate pool fixed per store group. The previous rule
+	// multiplied candidates by the number of KBs and capped the result at 500,
+	// so a multi-KB fan-out could make every PostgreSQL vector query run with
+	// topK=500 even when the final answer only needed a handful of results.
+	matchCount := resolveSearchMatchCount(len(searchKBIDs))
 
 	// Compute the query embedding once before fan-out and propagate via
 	// params.QueryEmbedding. Without this, each storeGroup's
@@ -251,10 +255,7 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		return nil, err
 	}
 
-	outputLimit := params.MatchCount
-	if params.CandidateCount > 0 {
-		outputLimit = params.CandidateCount
-	}
+	outputLimit := resolveSearchOutputLimit(params)
 	if outputLimit > 0 && len(deduplicatedChunks) > outputLimit {
 		deduplicatedChunks = deduplicatedChunks[:outputLimit]
 	}
@@ -304,6 +305,27 @@ func totalHits(rrs []*types.RetrieveResult) int {
 		n += len(r.Results)
 	}
 	return n
+}
+
+// resolveSearchMatchCount returns the fixed candidate count used by every
+// store group. The requested TopK and configured candidate count are ignored by
+// this policy; only whether the search spans one or multiple KBs matters.
+func resolveSearchMatchCount(knowledgeBaseCount int) int {
+	if knowledgeBaseCount >= 2 {
+		return multiKnowledgeBaseCandidateTopK
+	}
+	return singleKnowledgeBaseCandidateTopK
+}
+
+func resolveSearchOutputLimit(params types.SearchParams) int {
+	limit := params.MatchCount
+	if params.CandidateCount > 0 {
+		limit = params.CandidateCount
+	}
+	if limit <= 0 || limit > types.MaxRetrievalTopK {
+		return types.MaxRetrievalTopK
+	}
+	return limit
 }
 
 // buildRetrievalParams constructs the vector and keyword retrieval parameters

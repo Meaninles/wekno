@@ -48,6 +48,7 @@ func (s *knowledgeBaseService) applyFAQPostProcessing(
 			groups,
 			kbs,
 			params.MatchCount,
+			matchCount,
 			params.QueryText,
 		)
 	}
@@ -80,13 +81,19 @@ func (s *knowledgeBaseService) applyFAQPostProcessing(
 func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Context,
 	groups []*storeGroup,
 	kbs []*types.KnowledgeBase,
-	matchCount int,
+	targetCount int,
+	candidateTopK int,
 	queryText string,
 ) ([]*types.IndexWithScore, error) {
-	maxIterations := 5
-	// Start with a larger TopK since we're called when first retrieval wasn't enough
-	// The first retrieval already used matchCount*3, so start from there
-	currentTopK := matchCount * 3
+	// FAQ re-fetches use the same fixed candidate pool as the initial search.
+	// The target matchCount remains the requested final result count, while
+	// currentTopK is the per-query candidate count (80 for one KB, 200 for
+	// multiple KBs). This prevents the old *3/doubling path from exceeding the
+	// policy and issuing another expensive vector query with a larger TopK.
+	currentTopK := candidateTopK
+	if currentTopK <= 0 {
+		currentTopK = singleKnowledgeBaseCandidateTopK
+	}
 	uniqueChunks := make(map[string]*types.IndexWithScore)
 	// Cache chunk data to avoid repeated DB queries across iterations
 	chunkDataCache := make(map[string]*types.Chunk)
@@ -94,7 +101,7 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 	filteredOutChunks := make(map[string]struct{})
 
 	queryTextLower := strings.ToLower(strings.TrimSpace(queryText))
-	for i := 0; i < maxIterations; i++ {
+	for i := 0; i < 1; i++ {
 		// Bump only the per-group TopK. BaseParams is immutable and read
 		// concurrently inside retrieveFromStores; paramsWithTopK rebuilds
 		// a fresh slice per call so no goroutine ever sees a half-mutated
@@ -192,11 +199,11 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 			i+1,
 			totalRetrieved,
 			len(uniqueChunks),
-			matchCount,
+			targetCount,
 		)
 
 		// Early stop: Check if we have enough unique chunks after deduplication and filtering
-		if len(uniqueChunks) >= matchCount {
+		if len(uniqueChunks) >= targetCount {
 			logger.Infof(ctx, "Found enough unique chunks after %d iterations", i+1)
 			break
 		}
@@ -207,8 +214,11 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 			break
 		}
 
-		// Increase TopK for next iteration
-		currentTopK *= 2
+		// The fixed candidate policy intentionally stops here. A second query
+		// with a larger TopK would violate the 80/200 bound; a second query with
+		// the same TopK would return the same candidates.
+		logger.Infof(ctx, "Fixed FAQ candidate limit reached (%d), stopping iteration", currentTopK)
+		break
 	}
 
 	// Convert map to slice and sort by score

@@ -303,6 +303,9 @@ func (g *pgRepository) Retrieve(ctx context.Context, params types.RetrieveParams
 func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	params types.RetrieveParams,
 ) ([]*types.RetrieveResult, error) {
+	if params.TopK > types.MaxRetrievalTopK {
+		params.TopK = types.MaxRetrievalTopK
+	}
 	logger.GetLogger(ctx).Infof("[Postgres] Keywords retrieval: query=%s, topK=%d", params.Query, params.TopK)
 	conds := make([]clause.Expression, 0)
 
@@ -415,6 +418,9 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	params types.RetrieveParams,
 ) ([]*types.RetrieveResult, error) {
+	if params.TopK > types.MaxRetrievalTopK {
+		params.TopK = types.MaxRetrievalTopK
+	}
 	logger.GetLogger(ctx).Infof("[Postgres] Vector retrieval: dim=%d, topK=%d, threshold=%.4f",
 		len(params.Embedding), params.TopK, params.Threshold)
 
@@ -518,8 +524,8 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	if expandedTopK < 100 {
 		expandedTopK = 100 // Minimum 100 candidates
 	}
-	if expandedTopK > 200 {
-		expandedTopK = 200 // Maximum 200 candidates (keeps HNSW efficient)
+	if expandedTopK > types.MaxRetrievalTopK {
+		expandedTopK = types.MaxRetrievalTopK // Maximum candidates (keeps HNSW efficient)
 	}
 	if expandedTopK < params.TopK {
 		expandedTopK = params.TopK // Ensure subquery limit is at least final limit

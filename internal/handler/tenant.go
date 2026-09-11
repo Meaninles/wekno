@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1421,12 +1422,16 @@ func (h *TenantHandler) updateTenantRetrievalConfigInternal(c *gin.Context) {
 		c.Error(errors.NewBadRequestError("rerank_threshold must be between -10 and 10"))
 		return
 	}
-	if cfg.EmbeddingTopK < 0 || cfg.EmbeddingTopK > 200 {
-		c.Error(errors.NewBadRequestError("embedding_top_k must be between 0 and 200"))
+	if cfg.EmbeddingTopK < 0 || cfg.EmbeddingTopK > types.MaxRetrievalTopK {
+		c.Error(errors.NewBadRequestError(fmt.Sprintf("embedding_top_k must be between 0 and %d", types.MaxRetrievalTopK)))
 		return
 	}
-	if cfg.RerankTopK < 0 || cfg.RerankTopK > 200 {
-		c.Error(errors.NewBadRequestError("rerank_top_k must be between 0 and 200"))
+	if cfg.RerankTopK < 0 || cfg.RerankTopK > types.MaxRetrievalTopK {
+		c.Error(errors.NewBadRequestError(fmt.Sprintf("rerank_top_k must be between 0 and %d", types.MaxRetrievalTopK)))
+		return
+	}
+	if err := cfg.RetrievalBudget.Validate(); err != nil {
+		c.Error(errors.NewBadRequestError(err.Error()))
 		return
 	}
 

@@ -23,14 +23,18 @@ func ResolveBudget(recall, final int, configured ...types.RetrievalBudget) Budge
 	if final <= 0 {
 		final = 5
 	}
-	budget := Budget{Candidates: min(256, max(64, recall*8)), Fusion: min(128, max(32, recall*4, final)), EvidenceTokens: 8192}
+	budget := Budget{
+		Candidates:     min(types.MaxRetrievalTopK, max(64, recall*8)),
+		Fusion:         min(types.MaxRetrievalTopK, max(32, recall*4, final)),
+		EvidenceTokens: 8192,
+	}
 	if len(configured) > 0 {
 		c := configured[0]
 		if c.CandidateCount > 0 {
-			budget.Candidates = min(500, c.CandidateCount)
+			budget.Candidates = min(types.MaxRetrievalTopK, c.CandidateCount)
 		}
 		if c.FusionCount > 0 {
-			budget.Fusion = min(500, c.FusionCount)
+			budget.Fusion = min(types.MaxRetrievalTopK, c.FusionCount)
 		}
 		if c.EvidenceTokens > 0 {
 			budget.EvidenceTokens = min(64000, c.EvidenceTokens)
@@ -158,12 +162,17 @@ type Scorer func(context.Context, string, []string) (map[int]float64, error)
 // Rank is the common native/pipeline/SDK retrieval ranking boundary. Scorers
 // report model relevance; query coverage and evidence budgets are owned here.
 func Rank(ctx context.Context, queries []string, in []*types.SearchResult, score Scorer, threshold float64, budget Budget) ([]*types.SearchResult, error) {
-	pool := Select(Deduplicate(in), budget.Fusion, 0)
+	// Keep this boundary defensive for callers that construct Budget directly
+	// instead of going through ResolveBudget. Zero means automatic, but the
+	// automatic path is still bounded by the same hard retrieval maximum.
+	fusionCount := boundedRetrievalCount(budget.Fusion)
+	evidenceCount := boundedRetrievalCount(budget.EvidenceCount)
+	pool := Select(Deduplicate(in), fusionCount, 0)
 	if len(pool) == 0 {
 		return nil, nil
 	}
 	if score == nil {
-		return Select(pool, budget.EvidenceCount, budget.EvidenceTokens), nil
+		return Select(pool, evidenceCount, budget.EvidenceTokens), nil
 	}
 	passages := make([]string, len(pool))
 	for i, r := range pool {
@@ -227,7 +236,14 @@ func Rank(ctx context.Context, queries []string, in []*types.SearchResult, score
 			eligible = append(eligible, r)
 		}
 	}
-	return Select(eligible, budget.EvidenceCount, budget.EvidenceTokens), nil
+	return Select(eligible, evidenceCount, budget.EvidenceTokens), nil
+}
+
+func boundedRetrievalCount(count int) int {
+	if count <= 0 {
+		return types.MaxRetrievalTopK
+	}
+	return min(count, types.MaxRetrievalTopK)
 }
 
 // Passage keeps source structure intact and labels auxiliary retrieval hints.

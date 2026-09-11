@@ -1210,11 +1210,11 @@
                     <template v-if="formData.config.retrieval_budget">
                       <div class="setting-row">
                         <div class="setting-info"><label>候选数量</label><p class="desc">每个检索查询的候选上限。0 使用自动预算。</p></div>
-                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.candidate_count" :min="0" :max="500" theme="column" /></div>
+                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.candidate_count" :min="0" :max="200" theme="column" /></div>
                       </div>
                       <div class="setting-row">
                         <div class="setting-info"><label>重排候选数量</label><p class="desc">去重后参与重排的证据上限。0 使用自动预算。</p></div>
-                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.fusion_count" :min="0" :max="500" theme="column" /></div>
+                        <div class="setting-control"><t-input-number v-model="formData.config.retrieval_budget.fusion_count" :min="0" :max="200" theme="column" /></div>
                       </div>
                       <div class="setting-row">
                         <div class="setting-info"><label>回答证据预算</label><p class="desc">包含正文和图片文字的估算 token 上限。0 使用自动预算。</p></div>

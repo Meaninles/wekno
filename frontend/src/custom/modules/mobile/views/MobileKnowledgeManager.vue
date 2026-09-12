@@ -545,7 +545,11 @@ const submitKnowledgeBaseEditor = async (form: { name: string; description: stri
       await chatResources.ensureModels();
       const built = buildQuickKnowledgeBasePayload(chatResources.allModels, form);
       if (!built.payload) {
-        const labels = built.missing.map((item) => item === "Embedding" ? "向量模型" : "问答模型");
+        const labels = built.missing.map((item) => {
+          if (item === "Embedding") return "向量模型";
+          if (item === "ASR") return "语音识别模型";
+          return "问答模型";
+        });
         throw new Error(`缺少可用的${labels.join("、")}，请先联系管理员完成模型配置`);
       }
       const result: any = await createKnowledgeBase(built.payload);

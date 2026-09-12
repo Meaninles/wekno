@@ -3774,6 +3774,7 @@ export default {
       embeddingRequired: "请选择 Embedding 模型",
       summaryRequired: "请选择 Summary 模型",
       multimodalInvalid: "多模态配置验证失败",
+      asrInvalid: "音频处理已开启，请选择 ASR 模型",
       createSuccess: "知识库创建成功",
       createFailed: "创建知识库失败",
       missingId: "缺少知识库 ID",

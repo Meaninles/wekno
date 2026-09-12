@@ -30,13 +30,34 @@ export interface QuickKnowledgeBasePayload {
 
 export interface QuickKnowledgeBaseBuildResult {
   payload?: QuickKnowledgeBasePayload;
-  missing: Array<"KnowledgeQA" | "Embedding">;
+  missing: Array<"KnowledgeQA" | "Embedding" | "ASR">;
 }
 
 function pickDefaultModel(models: readonly ModelConfig[], type: ModelConfig["type"]) {
   const candidates = models.filter(
     (model) => model.type === type && (type !== "KnowledgeQA" || model.workload_scope !== "derivative_only"),
   );
+  return candidates.find((model) => model.is_default) || candidates[0];
+}
+
+function normalizeModelName(value: unknown) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\/models\//, "")
+    .replace(/:latest$/, "")
+    .replace(/_/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-local$/, "");
+}
+
+function pickDefaultASRModel(models: readonly ModelConfig[]) {
+  const candidates = models.filter((model) => {
+    if (model.type !== "ASR") return false;
+    const names = [model.name, model.display_name].map(normalizeModelName);
+    return names.some((name) => name === "qwen2.5-omni-7b") ||
+      names.some((name) => name.includes("qwen2.5-omni-7b"));
+  });
   return candidates.find((model) => model.is_default) || candidates[0];
 }
 
@@ -47,9 +68,11 @@ export function buildQuickKnowledgeBasePayload(
   const chat = pickDefaultModel(models, "KnowledgeQA");
   const embedding = pickDefaultModel(models, "Embedding");
   const vlm = pickDefaultModel(models, "VLLM");
+  const asr = pickDefaultASRModel(models);
   const missing: QuickKnowledgeBaseBuildResult["missing"] = [];
   if (!chat?.id) missing.push("KnowledgeQA");
   if (!embedding?.id) missing.push("Embedding");
+  if (!asr?.id) missing.push("ASR");
   if (missing.length) return { missing };
 
   return {
@@ -77,8 +100,8 @@ export function buildQuickKnowledgeBasePayload(
         model_id: vlm?.id || "",
       },
       asr_config: {
-        enabled: false,
-        model_id: "",
+        enabled: true,
+        model_id: String(asr!.id),
         language: "",
       },
       indexing_strategy: {

@@ -132,6 +132,9 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 	// accounts; private attachment ownership is stored separately.
 	kb.CreatorID, _ = types.AccountUserIDFromContext(ctx)
 	kb.EnsureDefaults()
+	if err := applyKnowledgeBaseCreationDefaults(ctx, kb); err != nil {
+		return nil, err
+	}
 	applyTenantDefaultStorageProvider(ctx, kb)
 
 	// Fold empty-string vector_store_id into nil so this path and the

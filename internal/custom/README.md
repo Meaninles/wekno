@@ -24,6 +24,7 @@
 | `enrichmentoutcome` / `terminalrepair` | 衍生结果收敛和终态修复 |
 | `knowledgeworkflowfilter` | 完整工作流状态筛选 |
 | `knowledgefolders` | 文件夹、筛选祖先树、持久递归删除、整库任务统计、移动和导入 |
+| `kbdefaults` | 统一知识库创建默认值：默认模型、分块、多模态和 Qwen2.5-Omni-7B 音频处理 |
 | `documentpreview` | 大文件预览策略、分片图片授权和移动端原文能力 |
 | `mobiledocument` | 移动端短时签名下载与企业微信原生文件响应 |
 | `knowledgepurge` / `wikidelete` | 删除时清理关系库、对象、图谱和 Wiki |

@@ -130,6 +130,8 @@ func (s *Service) ensureKB(ctx context.Context, session *types.Session, agent *t
 	if agent != nil {
 		kb.VLMConfig = types.VLMConfig{Enabled: agent.Config.VLMModelID != "", ModelID: agent.Config.VLMModelID}
 		kb.ASRConfig = types.ASRConfig{Enabled: agent.Config.AudioUploadEnabled, ModelID: agent.Config.ASRModelID}
+		kb.VLMConfigProvided = true
+		kb.ASRConfigProvided = true
 	}
 	return s.kbs.CreateKnowledgeBase(ctx, &kb)
 }

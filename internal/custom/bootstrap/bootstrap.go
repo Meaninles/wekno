@@ -38,6 +38,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 	"github.com/Tencent/WeKnora/internal/custom/modules/impreview"
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbdefaults"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
@@ -194,6 +195,7 @@ func NewHandlers(
 		kbShareService,
 		taskEnqueuer,
 	)
+	kbDefaultsService := kbdefaults.NewService(modelService)
 	mobileArtifactRepository := mobiledocument.NewArtifactRepository(
 		db,
 		agentRuntimeService.ArtifactStore(),
@@ -413,6 +415,7 @@ func NewHandlers(
 	appservice.RegisterChatModelUsageGuard(derivativeControlService.GuardChatModel)
 	appservice.RegisterModelMutationGuard(derivativeControlService.GuardModelMutation)
 	appservice.RegisterKnowledgeBaseModelPolicy(derivativeControlService.ValidateKnowledgeBase)
+	appservice.RegisterKnowledgeBaseCreationDefaults(kbDefaultsService.Apply)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	handler.RegisterMessageClientEnricher(agentRuntimeService.EnrichMessageArtifacts)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
@@ -1052,5 +1055,12 @@ func RegisterRoutes(
 		answerFeedbackRoutes.PUT("/messages/:session_id/:message_id", handlers.AnswerFeedback.SetMessageFeedback)
 		answerFeedbackRoutes.POST("/messages/:session_id/:message_id", handlers.AnswerFeedback.SetMessageFeedback)
 		answerFeedbackRoutes.GET("/messages", handlers.AnswerFeedback.ListMessageFeedback)
+		if handlers.AnswerFeedback != nil && viewer != nil {
+			analyticsRoutes := answerFeedbackRoutes.Group("", viewer)
+			analyticsRoutes.GET("/analytics", handlers.AnswerFeedback.ListAnalytics)
+			analyticsRoutes.GET("/analytics/groups", handlers.AnswerFeedback.ListAnalyticsGroups)
+			analyticsRoutes.GET("/analytics/options", handlers.AnswerFeedback.ListAnalyticsOptions)
+			analyticsRoutes.GET("/analytics/:feedback_id", handlers.AnswerFeedback.GetAnalyticsDetail)
+		}
 	}
 }

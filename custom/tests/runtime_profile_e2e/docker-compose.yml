@@ -344,7 +344,7 @@ services:
       timeout: 3s
       retries: 24
       start_period: 15s
-    restart: "no"
+    restart: unless-stopped
 
   runtime-mcp-2:
     image: ${WEKNORA_MCP_IMAGE:-weknora-mcp-policy:local}
@@ -379,7 +379,7 @@ services:
       timeout: 3s
       retries: 24
       start_period: 15s
-    restart: "no"
+    restart: unless-stopped
 
   runtime-mcp-entry:
     image: haproxy:3.2-alpine
@@ -403,7 +403,7 @@ services:
       timeout: 3s
       retries: 12
       start_period: 10s
-    restart: "no"
+    restart: unless-stopped
 
 networks:
   weknora-dev:

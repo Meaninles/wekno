@@ -78,11 +78,48 @@ def _any_object(description: str) -> dict[str, Any]:
     return {"type": "object", "description": description, "additionalProperties": True}
 
 
+_TOOL_TITLES: dict[str, str] = {
+    "create_tenant": "创建租户",
+    "list_tenants": "租户列表",
+    "create_knowledge_base": "创建知识库",
+    "list_knowledge_bases": "知识库列表",
+    "get_knowledge_base": "查看知识库",
+    "update_knowledge_base": "更新知识库",
+    "delete_knowledge_base": "删除知识库",
+    "hybrid_search": "混合检索",
+    "create_knowledge_from_content": "写入文本知识",
+    "create_knowledge_from_file": "上传文件知识",
+    "create_knowledge_from_url": "从网址写入知识",
+    "ingest_status": "查看导入状态",
+    "list_knowledge": "文档列表",
+    "get_knowledge": "查看文档",
+    "download_knowledge": "下载文档",
+    "delete_knowledge": "删除文档",
+    "create_model": "创建模型配置",
+    "list_models": "模型列表",
+    "get_model": "查看模型配置",
+    "create_session": "创建会话",
+    "get_session": "查看会话",
+    "list_sessions": "会话列表",
+    "delete_session": "删除会话",
+    "chat": "知识库问答",
+    "agent_chat": "智能体对话",
+    "list_agents": "智能体列表",
+    "get_agent": "查看智能体",
+    "list_chunks": "分块列表",
+    "delete_chunk": "删除分块",
+    "wiki_search": "Wiki 搜索",
+    "wiki_read_page": "读取 Wiki 页面",
+    "wiki_index_view": "Wiki 索引",
+}
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
     description: str
     input_schema: dict[str, Any]
+    title: str | None = None
     read_only: bool = False
     destructive: bool = False
     idempotent: bool = False
@@ -91,6 +128,7 @@ class ToolSpec:
     def as_mcp_tool(self) -> types.Tool:
         return types.Tool(
             name=self.name,
+            title=self.title or _TOOL_TITLES.get(self.name),
             description=self.description,
             inputSchema=self.input_schema,
             annotations=types.ToolAnnotations(

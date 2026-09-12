@@ -31,6 +31,7 @@ class ToolCatalogueTests(unittest.TestCase):
     def test_every_tool_has_complete_mcp_metadata(self):
         for spec in TOOL_SPECS:
             tool = spec.as_mcp_tool()
+            self.assertTrue(tool.title, spec.name)
             self.assertTrue(tool.description, spec.name)
             self.assertEqual(tool.inputSchema.get("type"), "object", spec.name)
             properties = tool.inputSchema.get("properties", {})

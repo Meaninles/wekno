@@ -4,7 +4,7 @@
 
 ## 能力
 
-- Streamable HTTP：`/mcp`
+- Streamable HTTP：`/mcp` 和 `/mcp/`（两者等价，不依赖重定向）
 - stdio：可用同一个镜像以 `MCP_TRANSPORT=stdio` 启动
 - 健康检查：`/healthz`
 - 32 个工具，工具定义和输入 schema 位于 `app/tools.py`
@@ -39,7 +39,7 @@
   "mcpServers": {
     "weknora-local": {
       "type": "http",
-      "url": "http://127.0.0.1:8000/mcp",
+      "url": "http://127.0.0.1:8000/mcp/",
       "headers": {
         "X-API-Key": "填写当前租户 API Key"
       }
@@ -49,6 +49,10 @@
 ```
 
 不要把 API Key 写进服务镜像、Compose 文件或 Git。生产环境只需要把 URL 换成生产 MCP 入口，并在生产机器挂载生产白名单；本次实现不修改生产部署。
+
+工具名称保持稳定的英文标识，便于 MCP 客户端调用；每个工具同时提供中文标题和中文描述，支持客户端在工具列表中显示中文。客户端若不显示 MCP `title` 字段，仍会显示协议要求的英文工具名，这不影响调用。
+
+服务初始化响应还会提供通用的 WeKnora 使用说明；工具发现仍使用标准 MCP `tools/list`，不依赖额外的特殊能力工具。
 
 ## 本地启动
 
@@ -85,11 +89,10 @@ docker compose -p weknora-runtime-profile-e2e -f custom/tests/runtime_profile_e2
 ```powershell
 $env:WEKNORA_E2E_TENANT_API_KEY = "当前租户 API Key"
 python custom/tests/mcp_policy_e2e/protocol_probe.py `
-  --url http://127.0.0.1:8000/mcp `
+  --url http://127.0.0.1:8000/mcp/ `
   --api-key-env WEKNORA_E2E_TENANT_API_KEY `
   --expect-tool list_knowledge_bases `
   --call-list-knowledge-bases
 ```
 
 `WEKNORA_E2E_TENANT_API_KEY` 只存在于当前 PowerShell 进程，不要把它写入文件或命令历史。
-

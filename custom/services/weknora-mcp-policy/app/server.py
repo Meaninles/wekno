@@ -33,6 +33,18 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "weknora-mcp-policy"
 SERVER_VERSION = "0.1.0"
 
+MCP_INSTRUCTIONS = """这是 WeKnora 的统一 MCP 服务，提供知识库、文档、检索、智能体、模型、会话和 Wiki 能力。
+
+通用使用规则：
+1. 用户意图涉及 WeKnora、知识库、文档、知识检索、智能体、模型、会话或 Wiki 时，优先使用本 MCP 服务的原生工具。
+2. 使用标准的 tools/list 发现当前已开放的工具；如果客户端采用延迟加载，先使用客户端提供的 MCP 工具发现机制。
+3. 根据工具名称、标题、描述和输入 Schema 选择最匹配的工具；不要猜测工具名。
+4. 不要通过本地文件系统、源码、端口扫描、Bash、curl、Python 或猜测 REST API 替代 MCP 工具调用。
+5. 空列表或空结果是有效的业务结果，不代表 MCP 连接失败；只有工具返回 isError=true 才应报告工具执行失败。
+6. 只有用户明确要求对话、写入、更新或删除时，才调用有相应副作用的工具；调用前应核对必填参数。
+7. 如果当前会话没有看到本服务或工具，应报告 MCP 尚未连接，不要自行推断本地部署状态。
+"""
+
 
 def _header(scope: dict[str, Any], name: str) -> str:
     wanted = name.casefold().encode("latin-1")
@@ -94,6 +106,25 @@ class RequestAuthContextMiddleware:
             reset_request_context(token)
 
 
+class CanonicalMcpPathMiddleware:
+    """Accept both /mcp and /mcp/ without relying on a 307 redirect.
+
+    Some MCP clients follow the redirect, while lightweight fallbacks and
+    connector probes may treat a redirect as an empty response.  Rewriting
+    the scope keeps both spellings on the same Streamable HTTP handler.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            scope["raw_path"] = b"/mcp/"
+        await self.app(scope, receive, send)
+
+
 def build_registry() -> ToolRegistry:
     base_url = os.getenv("WEKNORA_BASE_URL", "http://localhost:8080/api/v1").rstrip("/")
     policy_path = Path(default_policy_path())
@@ -102,7 +133,10 @@ def build_registry() -> ToolRegistry:
 
 
 def build_mcp_server(registry: ToolRegistry) -> Server:
-    server = Server(SERVER_NAME, version=SERVER_VERSION)
+    # Pass instructions to the Server itself as well as stdio's explicit
+    # InitializationOptions.  Streamable HTTP uses Server.initialize directly
+    # and does not call _init_options().
+    server = Server(SERVER_NAME, version=SERVER_VERSION, instructions=MCP_INSTRUCTIONS)
 
     @server.list_tools()
     async def handle_list_tools():
@@ -119,6 +153,7 @@ def _init_options(server: Server) -> InitializationOptions:
     return InitializationOptions(
         server_name=SERVER_NAME,
         server_version=SERVER_VERSION,
+        instructions=MCP_INSTRUCTIONS,
         capabilities=server.get_capabilities(
             notification_options=NotificationOptions(),
             experimental_capabilities={},
@@ -176,6 +211,7 @@ async def run_http(host: str, port: int) -> None:
         ],
         lifespan=lifespan,
     )
+    starlette_app = CanonicalMcpPathMiddleware(starlette_app)
     starlette_app = RequestAuthContextMiddleware(starlette_app)
 
     logger.info("Starting %s HTTP server on %s:%d", SERVER_NAME, host, port)

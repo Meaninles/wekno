@@ -21,6 +21,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/utils"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/hibiken/asynq"
 )
 
@@ -371,11 +372,22 @@ func (h *KnowledgeBaseHandler) CreateKnowledgeBase(c *gin.Context) {
 
 	// Parse request body
 	var req types.KnowledgeBase
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		logger.Error(ctx, "Failed to parse request parameters", err)
 		c.Error(apperrors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
 		return
 	}
+	// The value structs cannot distinguish an omitted JSON object from an
+	// explicit `{enabled:false}` object after unmarshalling. Keep only the
+	// presence bit so creation defaults can honor an explicit disable request.
+	var rawBody map[string]json.RawMessage
+	if err := c.ShouldBindBodyWith(&rawBody, binding.JSON); err != nil {
+		logger.Error(ctx, "Failed to inspect knowledge base request parameters", err)
+		c.Error(apperrors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
+		return
+	}
+	req.VLMConfigProvided = jsonObjectProvided(rawBody, "vlm_config")
+	req.ASRConfigProvided = jsonObjectProvided(rawBody, "asr_config")
 	if req.Type == types.KnowledgeBaseTypeWiki || req.IndexingStrategy.WikiEnabled {
 		if err := guardCustomWikiSelection(c); err != nil {
 			if appErr, ok := apperrors.IsAppError(err); ok {
@@ -423,6 +435,15 @@ func (h *KnowledgeBaseHandler) CreateKnowledgeBase(c *gin.Context) {
 		"success": true,
 		"data":    buildKBResponse(kb, h.resolveKBStoreView(ctx, kb, callerTenantID), nil),
 	})
+}
+
+func jsonObjectProvided(body map[string]json.RawMessage, key string) bool {
+	value, ok := body[key]
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(value))
+	return trimmed != "" && trimmed != "null"
 }
 
 // validateAndGetKnowledgeBase validates request parameters and retrieves the knowledge base

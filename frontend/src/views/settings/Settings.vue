@@ -62,7 +62,7 @@
             <div class="settings-content">
               <div class="content-wrapper" :class="{
                 'content-wrapper--wide': currentSection === 'members',
-                'content-wrapper--full': ['system-global', 'custom-capacity-control', 'custom-config-center', 'custom-iam-sync', 'custom-wiki-access', 'custom-admin-governance'].includes(currentSection),
+                'content-wrapper--full': ['system-global', 'custom-capacity-control', 'custom-config-center', 'custom-iam-sync', 'custom-wiki-access', 'custom-admin-governance', 'custom-answer-feedback'].includes(currentSection),
               }">
                 <!-- 角色不允许访问当前 section（deep-link 进来 / 跨租户切换后角色降级）—— 优先于具体 section 渲染。
                      正常导航走 navItems filter 不会到这里，但 watch(navItems) 的 fallback 会在角色降级
@@ -145,6 +145,10 @@
                     <SystemAdminGovernance />
                   </div>
 
+                  <div v-if="currentSection === 'custom-answer-feedback'" class="section">
+                    <FeedbackAnalyticsSettings />
+                  </div>
+
                   <!-- 用户信息（账户基础信息：ID / 用户名 / 邮箱 / 注册时间）。
                      从 ApiInfo.vue 拆出来，原页面挂的是 owner-only 入口，
                      用户的基本信息不该跟 owner 权限绑定。 -->
@@ -207,6 +211,7 @@ import IAMSyncSettings from '@/custom/modules/iam/IAMSyncSettings.vue'
 import WikiAccessSettings from '@/custom/modules/wikiAccess/WikiAccessSettings.vue'
 import SystemAdminGovernance from '@/custom/modules/admin/SystemAdminGovernance.vue'
 import CapacityControlSettings from '@/custom/modules/capacity-control/CapacityControlSettings.vue'
+import FeedbackAnalyticsSettings from '@/custom/modules/answerfeedback/FeedbackAnalyticsSettings.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -261,6 +266,7 @@ const SECTION_MIN_ROLE: Record<string, RoleKey> = {
   tenant: 'viewer',
   members: 'viewer',
   api: 'owner',
+  'custom-answer-feedback': 'viewer',
 }
 
 const SYSTEM_ADMIN_SECTIONS = new Set(['system-global', 'custom-capacity-control', 'custom-config-center', 'custom-iam-sync', 'custom-wiki-access', 'custom-admin-governance'])
@@ -301,6 +307,7 @@ const navItems = computed(() => {
     { key: 'custom-iam-sync', icon: 'usergroup', label: '组织人员同步' },
     { key: 'custom-wiki-access', icon: 'book-open', label: 'Wiki 权限' },
     { key: 'custom-admin-governance', icon: 'secured', label: '空间与用户权限' },
+    { key: 'custom-answer-feedback', icon: 'chart-bubble', label: '反馈数据' },
     { key: 'userprofile', icon: 'user', label: t('userProfile.title') },
     { key: 'tenant', icon: 'user-circle', label: t('settings.tenantInfo') },
     { key: 'members', icon: 'usergroup', label: t('tenantMember.title') },
@@ -331,7 +338,7 @@ const navGroups = computed<NavGroup[]>(() => {
     {
       key: 'workspace',
       label: t('settings.navGroups.workspace'),
-      items: pickItems(['tenant', 'members', 'chathistory']),
+      items: pickItems(['tenant', 'members', 'chathistory', 'custom-answer-feedback']),
     },
     {
       key: 'models_runtime',

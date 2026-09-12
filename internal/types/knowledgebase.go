@@ -78,6 +78,11 @@ type KnowledgeBase struct {
 	VLMConfig VLMConfig `yaml:"vlm_config"              json:"vlm_config"              gorm:"type:json"`
 	// ASR config (Automatic Speech Recognition)
 	ASRConfig ASRConfig `yaml:"asr_config"              json:"asr_config"              gorm:"type:json"`
+	// VLMConfigProvided and ASRConfigProvided are request-presence markers.
+	// They are not persisted or exposed; they let creation defaults distinguish
+	// an omitted config from an explicit disabled config.
+	VLMConfigProvided bool `yaml:"-" json:"-" gorm:"-"`
+	ASRConfigProvided bool `yaml:"-" json:"-" gorm:"-"`
 	// Storage provider config (new): only stores provider selection; credentials from tenant StorageEngineConfig
 	StorageProviderConfig *StorageProviderConfig `yaml:"storage_provider_config" json:"storage_provider_config"  gorm:"column:storage_provider_config;type:jsonb"`
 	// Deprecated: legacy COS config column. Kept for backward compatibility with old data.

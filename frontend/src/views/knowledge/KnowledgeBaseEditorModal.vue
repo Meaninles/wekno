@@ -594,6 +594,25 @@ const pickDefaultModel = (type: ModelConfig['type']) => {
   return list.find((m) => m.is_default) || list[0]
 }
 
+const normalizeModelName = (value: unknown) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/^\/models\//, '')
+  .replace(/:latest$/, '')
+  .replace(/_/g, '-')
+  .replace(/\s+/g, '-')
+  .replace(/-local$/, '')
+
+const pickDefaultASRModel = () => {
+  const candidates = allModels.value.filter((model) => {
+    if (model.type !== 'ASR') return false
+    const names = [model.name, model.display_name].map(normalizeModelName)
+    return names.some((name) => name === 'qwen2.5-omni-7b') ||
+      names.some((name) => name.includes('qwen2.5-omni-7b'))
+  })
+  return candidates.find((model) => model.is_default) || candidates[0]
+}
+
 const applyDefaultModelsIfEmpty = () => {
   if (!formData.value || props.mode !== 'create') return
   const chat = pickDefaultModel('KnowledgeQA')
@@ -612,6 +631,13 @@ const applyDefaultModelsIfEmpty = () => {
   ) {
     formData.value.multimodalConfig.vllmModelId = vllm.id
   }
+  if (formData.value.type === 'document') {
+    formData.value.asrConfig.enabled = true
+    const asr = pickDefaultASRModel()
+    if (!formData.value.asrConfig.modelId && asr?.id) {
+      formData.value.asrConfig.modelId = asr.id
+    }
+  }
 }
 
 watch(
@@ -622,6 +648,8 @@ watch(
       if (props.mode === 'create') {
         formData.value.multimodalConfig.enabled = false
         formData.value.multimodalConfig.vllmModelId = ''
+        formData.value.asrConfig.enabled = false
+        formData.value.asrConfig.modelId = ''
       }
       if (!formData.value.faqConfig) {
         formData.value.faqConfig = { indexMode: 'question_only', questionIndexMode: 'separate' }
@@ -632,6 +660,7 @@ watch(
     } else if (oldType === 'faq') {
       if (props.mode === 'create') {
         formData.value.multimodalConfig.enabled = true
+        formData.value.asrConfig.enabled = true
         applyDefaultModelsIfEmpty()
       }
       if (currentSection.value === 'faq') {
@@ -679,7 +708,7 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
       vllmModelId: ''
     },
     asrConfig: {
-      enabled: false,
+      enabled: type === 'document',
       modelId: '',
       language: ''
     },
@@ -1058,6 +1087,12 @@ const validateForm = (): boolean => {
   if (formData.value.multimodalConfig.enabled && !formData.value.multimodalConfig.vllmModelId) {
     MessagePlugin.warning(t('knowledgeEditor.messages.multimodalInvalid'))
     currentSection.value = 'multimodal'
+    return false
+  }
+
+  if (formData.value.type === 'document' && formData.value.asrConfig.enabled && !formData.value.asrConfig.modelId) {
+    MessagePlugin.warning(t('knowledgeEditor.messages.asrInvalid'))
+    currentSection.value = 'asr'
     return false
   }
 

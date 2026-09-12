@@ -3042,6 +3042,8 @@ func (s *Service) ToggleChannel(channelID string, tenantID uint64) (*IMChannel, 
 // checkDuplicateBot queries the bot_identity index to see if another active channel
 // already uses the same bot. This is an O(1) index lookup, not a full table scan.
 // The DB unique index on bot_identity serves as an additional safety net.
+// Channels left behind by a soft-deleted custom agent are stale bindings: reclaim
+// them here so the partial unique index no longer blocks a new binding.
 // excludeID is the channel's own ID (for updates); pass "" for new channels.
 func (s *Service) checkDuplicateBot(channel *IMChannel, excludeID string) error {
 	// Compute bot_identity the same way the BeforeSave hook will
@@ -3061,7 +3063,49 @@ func (s *Service) checkDuplicateBot(channel *IMChannel, excludeID string) error 
 		}
 		return fmt.Errorf("check duplicate bot: %w", err)
 	}
+
+	activeOwner, err := s.isChannelAgentActive(&existing)
+	if err != nil {
+		return fmt.Errorf("check channel agent: %w", err)
+	}
+	if !activeOwner {
+		// Delete through the normal soft-delete path so the partial unique index
+		// releases the stale bot_identity. StopChannel also handles a stale
+		// adapter if an older record was left enabled.
+		s.StopChannel(existing.ID)
+		result := s.db.Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", existing.ID, existing.TenantID).
+			Delete(&IMChannel{})
+		if result.Error != nil {
+			return fmt.Errorf("reclaim deleted-agent channel: %w", result.Error)
+		}
+		logger.Infof(context.Background(), "[IM] Reclaimed stale channel %s for deleted agent %s", existing.ID, existing.AgentID)
+		return nil
+	}
+
 	return fmt.Errorf("duplicate_bot: this bot is already bound to channel %q (%s); each bot can only be connected to one channel", existing.Name, existing.ID)
+}
+
+// isChannelAgentActive reports whether a channel is still owned by an active
+// custom agent or by one of the built-in agents. Built-in agents are not
+// persisted in custom_agents in every deployment, so they must be recognized
+// from the registry IDs as well as the database.
+func (s *Service) isChannelAgentActive(channel *IMChannel) (bool, error) {
+	if types.IsBuiltinAgentID(channel.AgentID) {
+		return true, nil
+	}
+	for _, builtinID := range types.GetBuiltinAgentIDs() {
+		if channel.AgentID == builtinID {
+			return true, nil
+		}
+	}
+
+	var count int64
+	if err := s.db.Model(&types.CustomAgent{}).
+		Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", channel.AgentID, channel.TenantID).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // ── File message handling ──────────────────────────────────────────────

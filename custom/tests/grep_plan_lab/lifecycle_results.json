@@ -1,0 +1,78 @@
+[
+  {
+    "case": "insert_100",
+    "count": 100,
+    "passed": true
+  },
+  {
+    "case": "unpublish_in_writer",
+    "count": 0,
+    "passed": true
+  },
+  {
+    "case": "reader_sees_previous_committed_version",
+    "passed": true
+  },
+  {
+    "case": "reader_sees_unpublish_after_commit",
+    "passed": true
+  },
+  {
+    "case": "republish",
+    "count": 100,
+    "passed": true
+  },
+  {
+    "case": "title_update",
+    "passed": true
+  },
+  {
+    "case": "disable",
+    "count": 0,
+    "passed": true
+  },
+  {
+    "case": "enable",
+    "count": 100,
+    "passed": true
+  },
+  {
+    "case": "soft_delete",
+    "count": 0,
+    "passed": true
+  },
+  {
+    "case": "restore",
+    "count": 100,
+    "passed": true
+  },
+  {
+    "case": "summary",
+    "count": 0,
+    "passed": true
+  },
+  {
+    "case": "physical_text",
+    "count": 100,
+    "passed": true
+  },
+  {
+    "case": "content_update",
+    "passed": true
+  },
+  {
+    "case": "physical_delete",
+    "count": 0,
+    "passed": true
+  },
+  {
+    "case": "rollback_restores_committed_unpublished_state",
+    "count": 0,
+    "passed": true
+  },
+  {
+    "case": "large_document_title_write",
+    "active_chunks": 31583,
+    "ms": 488.7987010006327
+  }
+]

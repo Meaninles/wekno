@@ -1,5 +1,10 @@
 # WeKnora Helm Chart
 
+The PostgreSQL grep projection requires the one-shot migration role to complete before serving replicas start.
+It installs synchronous triggers and backfills under source-table write locks; budget disk space and a maintenance window.
+No new database/service or Helm setting is required. See [grep projection](../docs/custom/GrepChunks同步检索投影.md).
+This code change has only been applied locally, not deployed to production.
+
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/weknora)](https://artifacthub.io/packages/helm/weknora/weknora)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 

@@ -42,6 +42,7 @@ Embed SDK 同时保留 `window.WeKnora`，并提供 `window.ZhiHui` 品牌别名
 | 文档处理 | PDF、Word、Excel、PPT、网页、文本、图片、音频等；拆分、OCR、VLM、ASR |
 | 索引和衍生 | chunk、向量、关键词、摘要、问题生成、实体关系图谱、Wiki 页面 |
 | 检索问答 | 向量/关键词混合检索、Rerank、FAQ 优先、图谱、Wiki、来源引用 |
+| 精确文本定位 | [grep 同步检索投影](docs/custom/GrepChunks同步检索投影.md)，保留正文/标题正则及权限，减少无效切片扫描 |
 | 智能体 | 快速问答、简单对话、智能推理、Wiki、数据、表格、通用、文档处理 |
 | 企业治理 | 多租户、RBAC、共享空间、SSO、组织同步、默认配置、审计、凭据加密 |
 | 工具与数据 | MCP、技能、Web 搜索、MySQL/PostgreSQL 只读分析、定时任务 |

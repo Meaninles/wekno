@@ -20,6 +20,7 @@
 | `workloadbudget` | 问题、图谱和下游任务工作量上限 |
 | `pipelineobs` | 文档阶段进度与运行观测 |
 | `processingtrace` | V2 逻辑业务 span 唯一存储、稳定逻辑键与尝试分配 |
+| `grepsearch` | PostgreSQL 同事务有效切片检索投影、批量触发器、正则候选与一致快照回源；不按问题类型分流 |
 | `enrichmentoutcome` / `terminalrepair` | 衍生结果收敛和终态修复 |
 | `knowledgeworkflowfilter` | 完整工作流状态筛选 |
 | `knowledgefolders` | 文件夹、筛选祖先树、持久递归删除、整库任务统计、移动和导入 |

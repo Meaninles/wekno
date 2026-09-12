@@ -1,0 +1,753 @@
+{
+  "edges": [
+    {
+      "case": "title_only",
+      "count": 500,
+      "identical_ordered_ids": true
+    },
+    {
+      "case": "body_only",
+      "count": 500,
+      "identical_ordered_ids": true
+    },
+    {
+      "case": "both",
+      "count": 500,
+      "identical_ordered_ids": true
+    },
+    {
+      "case": "unauthorized",
+      "count": 0,
+      "identical_ordered_ids": true
+    }
+  ],
+  "stress": [
+    {
+      "variant": "baseline",
+      "grep_concurrency": 4,
+      "vector_concurrency": 2,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 189.002128001448,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 160.80319699904067,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 125.2799590001814,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 191.82446999911917,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 215.02081300059217,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 225.64139799942495,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 188.21408999792766,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 125.54602999807685,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 112.96445500192931,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 99.72765099882963,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "short",
+          "ms": 184.39164599840296,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 144.22662599827163,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 158.82793299897457,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 171.34998199981055,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 222.79476800031262,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 228.84294399773353,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 142.64800999808358,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 114.47132499961299,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 126.30066400015494,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 168.52539100000286,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "single",
+          "ms": 213.81667899913737,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 162.64824899917585,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 212.53637399786385,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 237.98450600224896,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 196.43266500133905,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 130.68656500036013,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 139.0465460026462,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 117.62526800157502,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 190.55499699970824,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 167.65485100040678,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "broad",
+          "ms": 224.60227199917426,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 158.6670199976652,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 206.80820099732955,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 240.07157400046708,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 189.98977099909098,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 111.8654060010158,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 150.7849819972762,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 201.20578299975023,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 170.9650029988552,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 107.01138299918966,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        }
+      ],
+      "vector_times": [
+        [
+          111.63312999997288,
+          120.70358100027079,
+          93.4285249968525,
+          96.01214000213076,
+          107.92892400058918,
+          105.83784700065735,
+          109.54379900067579,
+          106.82247600198025,
+          103.6412300018128,
+          96.40800000124727,
+          105.42621199783753,
+          118.8314229984826,
+          84.70406599735725,
+          87.63290000206325,
+          97.83136500118417,
+          117.42525899899192,
+          111.99711100198328,
+          85.27539199712919
+        ],
+        [
+          111.74213999765925,
+          122.30361299953074,
+          98.79917000216665,
+          93.25531099966611,
+          103.57216400007019,
+          106.29368900117697,
+          109.53810199862346,
+          107.88472399872262,
+          101.31782399912481,
+          99.41833699849667,
+          102.74759000094491,
+          93.39166199788451,
+          93.07294800237287,
+          98.11947800335474,
+          105.11769799995818,
+          118.70261700096307,
+          115.23095899974578
+        ]
+      ]
+    },
+    {
+      "variant": "projection",
+      "grep_concurrency": 4,
+      "vector_concurrency": 2,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 138.77153399880626,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 93.8989850001235,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 51.99977299707825,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 87.14187700024922,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 120.21898700186284,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 135.49888399938936,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 132.2565360023873,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 99.61774600014905,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 36.116648003371665,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 41.566296997189056,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "short",
+          "ms": 104.1123510003672,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 66.40883100044448,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 91.12275900042732,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 116.93833699973766,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 134.76885099953506,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 122.25588000001153,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 96.51030500026536,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 38.753168999392074,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 43.57698899912066,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 130.35554900125135,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "single",
+          "ms": 83.77722400109633,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 93.89148600166664,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 115.48056999890832,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 136.0610089977854,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 124.17446700055734,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 83.40030700128409,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 37.53271299865446,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 46.545224999135826,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 143.56335200136527,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 98.76040800008923,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "broad",
+          "ms": 99.331732999417,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 115.76368299938622,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 134.80085199989844,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 122.57119500281988,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 87.4411910008348,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 37.338504000217654,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 41.84100999918883,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 138.86043700040318,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 100.65229400061071,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 57.277314001112245,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        }
+      ],
+      "vector_times": [
+        [
+          96.16648900191649,
+          81.83603499855963,
+          77.1748219995061,
+          78.02446099958615,
+          82.16814999832422,
+          80.81608900101855,
+          83.06008999716141,
+          81.95524100301554,
+          98.44539299956523,
+          81.73583000098006,
+          78.05326300149318,
+          79.32351999988896
+        ],
+        [
+          91.7951900009939,
+          77.73924800130771,
+          78.16266699956032,
+          79.20981500137714,
+          79.36842300114222,
+          77.19422300215228,
+          78.10796500052675,
+          76.96541199766216,
+          91.14875899831532,
+          86.76716000263696,
+          77.07041700268746,
+          82.58126900182106
+        ]
+      ]
+    },
+    {
+      "variant": "projection_per_scope",
+      "grep_concurrency": 4,
+      "vector_concurrency": 2,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 138.33691399850068,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 94.30310400057351,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 58.335361998615554,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 88.72745000189752,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 142.78541700332426,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 158.72744499938563,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 131.69811099942308,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 94.22149999954854,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 9.814048000407638,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 10.940999000013107,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "short",
+          "ms": 108.62445699967793,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 72.79092200042214,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 86.40704400022514,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 115.55097300151829,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 175.8561259994167,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 138.58002499910071,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 97.02882800047519,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 22.61423199888668,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 9.936053000274114,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 124.18936799804214,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "single",
+          "ms": 69.97039300040342,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        },
+        {
+          "case": "broad",
+          "ms": 97.66325700184098,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 119.69636300273123,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 135.54018599825213,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 165.32434500186355,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 90.67873799722292,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 24.036697002884466,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 15.607612000167137,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 126.1764580012823,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 89.20227199996589,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "broad",
+          "ms": 101.1883190003573,
+          "hash": "4ab33d1ac3ca178e962e3d873b481d354a7ba4ec419c35d9ee301cfc6dc6e099"
+        },
+        {
+          "case": "rare",
+          "ms": 117.85657899963553,
+          "hash": "a71e510b45d96de32ca105250abc5b6cfe2f3096e92fc1b20fdeb9cf2e4926a7"
+        },
+        {
+          "case": "empty",
+          "ms": 132.31813899983536,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "regex",
+          "ms": 126.15295800060267,
+          "hash": "f4a3a15fdb0fdee454dc7fb7909c980b63cca65acbb5db834de9167f13af01eb"
+        },
+        {
+          "case": "onechar",
+          "ms": 122.88390899993828,
+          "hash": "f408eca0e43de68d4a320337aea9a9b5263a23311cb8252ff53a00d886c0f6d7"
+        },
+        {
+          "case": "matchall",
+          "ms": 9.923753001203295,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "optional",
+          "ms": 11.391820000426378,
+          "hash": "5b6699d8305cf4705082a2b25b797f408a3d81ec93a094dfa31781d5a20ef1d6"
+        },
+        {
+          "case": "contract",
+          "ms": 124.26577099904534,
+          "hash": "44239f43ce06904ae863ce19c9123bbadd3745fec07c5d8bd36362ff4d5dab5f"
+        },
+        {
+          "case": "short",
+          "ms": 93.06574700167403,
+          "hash": "a33f21c3180918ee5f751983ebc30ed1b02a872142a8c5b85b7d3296b09e4405"
+        },
+        {
+          "case": "single",
+          "ms": 60.893579000548925,
+          "hash": "d8ff08e322adb650d43a614f1ae817b360d3bbfed84cbca98194799c69e02112"
+        }
+      ],
+      "vector_times": [
+        [
+          86.22413499688264,
+          91.64348299964331,
+          78.74339400223107,
+          76.51459200133104,
+          80.09275500080548,
+          91.2559649987088,
+          113.10246200082474,
+          79.47782699920936,
+          77.98065899987705,
+          81.15930399799254,
+          78.18316799966851,
+          77.67614499971387
+        ],
+        [
+          84.42675299738767,
+          105.34480799833545,
+          79.76173999850289,
+          78.01906099848566,
+          79.03830700161052,
+          117.98468500273884,
+          102.69638699901407,
+          81.49461900029564,
+          77.28872799998499,
+          78.90160100214416,
+          79.0696090007259,
+          79.7703400021419
+        ]
+      ]
+    }
+  ],
+  "vectors": [
+    10000,
+    80920576
+  ],
+  "stress_identical_ordered_ids": true
+}

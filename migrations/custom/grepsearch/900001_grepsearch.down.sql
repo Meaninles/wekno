@@ -1,0 +1,16 @@
+BEGIN;
+LOCK TABLE knowledges, chunks IN SHARE ROW EXCLUSIVE MODE;
+DROP TRIGGER IF EXISTS custom_grepsearch_chunks_insert ON chunks;
+DROP TRIGGER IF EXISTS custom_grepsearch_chunks_update ON chunks;
+DROP TRIGGER IF EXISTS custom_grepsearch_chunks_delete ON chunks;
+DROP TRIGGER IF EXISTS custom_grepsearch_chunks_truncate ON chunks;
+DROP TRIGGER IF EXISTS custom_grepsearch_knowledges_insert ON knowledges;
+DROP TRIGGER IF EXISTS custom_grepsearch_knowledges_update ON knowledges;
+DROP TRIGGER IF EXISTS custom_grepsearch_knowledges_delete ON knowledges;
+DROP TRIGGER IF EXISTS custom_grepsearch_knowledges_truncate ON knowledges;
+DROP FUNCTION IF EXISTS custom_grepsearch_sync_chunks();
+DROP FUNCTION IF EXISTS custom_grepsearch_sync_knowledges();
+DROP FUNCTION IF EXISTS custom_grepsearch_truncate();
+DROP FUNCTION IF EXISTS custom_grepsearch_lock_docs(text[]);
+DROP TABLE IF EXISTS custom_grepsearch_chunks, custom_grepsearch_state;
+COMMIT;

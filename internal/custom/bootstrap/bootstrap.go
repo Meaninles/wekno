@@ -34,6 +34,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/grepsearch"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 	"github.com/Tencent/WeKnora/internal/custom/modules/impreview"
@@ -246,6 +247,9 @@ func NewHandlers(
 		if err := knowledgeaux.Migrate(ctx, db); err != nil {
 			return nil, err
 		}
+		if err := grepsearch.Migrate(ctx, db); err != nil {
+			return nil, err
+		}
 		if err := splitManager.ApplyMigrations(ctx); err != nil {
 			return nil, err
 		}
@@ -327,6 +331,9 @@ func NewHandlers(
 	} else {
 		logger.Infof(ctx,
 			"[custom bootstrap] schema/data migrations and existing-user backfills disabled; maintenance replica must have completed them")
+	}
+	if err := grepsearch.Validate(ctx, db); err != nil {
+		return nil, err
 	}
 	if err := skillHubService.ValidateProfessionalStorage(ctx); err != nil {
 		return nil, err

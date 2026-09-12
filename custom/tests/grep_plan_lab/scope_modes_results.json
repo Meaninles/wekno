@@ -1,0 +1,177 @@
+{
+  "scopes": [
+    {
+      "scope": "tag",
+      "counts": [
+        500,
+        500
+      ],
+      "identical_ordered_ids": true
+    },
+    {
+      "scope": "file",
+      "counts": [
+        500,
+        500
+      ],
+      "identical_ordered_ids": true
+    },
+    {
+      "scope": "mixed",
+      "counts": [
+        500,
+        500
+      ],
+      "identical_ordered_ids": true
+    }
+  ],
+  "modes": [
+    {
+      "mode": "force_custom_plan",
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 129.04435800010106
+        },
+        {
+          "case": "short",
+          "ms": 94.51745299884351
+        },
+        {
+          "case": "single",
+          "ms": 60.07065499943565
+        },
+        {
+          "case": "broad",
+          "ms": 92.41187599764089
+        },
+        {
+          "case": "rare",
+          "ms": 117.88462000185973
+        },
+        {
+          "case": "empty",
+          "ms": 136.10085200343747
+        },
+        {
+          "case": "regex",
+          "ms": 122.48110699874815
+        },
+        {
+          "case": "onechar",
+          "ms": 94.95389000221621
+        },
+        {
+          "case": "matchall",
+          "ms": 36.567177001415985
+        },
+        {
+          "case": "optional",
+          "ms": 40.9909490008431
+        }
+      ],
+      "plan_counts": [
+        0,
+        10
+      ]
+    },
+    {
+      "mode": "force_generic_plan",
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 128.450108000834
+        },
+        {
+          "case": "short",
+          "ms": 93.8737989999936
+        },
+        {
+          "case": "single",
+          "ms": 58.617032002075575
+        },
+        {
+          "case": "broad",
+          "ms": 86.57908500026679
+        },
+        {
+          "case": "rare",
+          "ms": 111.94812000030652
+        },
+        {
+          "case": "empty",
+          "ms": 138.64656599980663
+        },
+        {
+          "case": "regex",
+          "ms": 124.50547700063908
+        },
+        {
+          "case": "onechar",
+          "ms": 88.80017200135626
+        },
+        {
+          "case": "matchall",
+          "ms": 37.461952000739984
+        },
+        {
+          "case": "optional",
+          "ms": 40.82983599801082
+        }
+      ],
+      "plan_counts": [
+        10,
+        0
+      ]
+    },
+    {
+      "mode": "auto",
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 128.31949799874565
+        },
+        {
+          "case": "short",
+          "ms": 91.59340699989116
+        },
+        {
+          "case": "single",
+          "ms": 56.40964700069162
+        },
+        {
+          "case": "broad",
+          "ms": 88.73156699701212
+        },
+        {
+          "case": "rare",
+          "ms": 115.53542200272204
+        },
+        {
+          "case": "empty",
+          "ms": 138.1216219997441
+        },
+        {
+          "case": "regex",
+          "ms": 124.6074859991495
+        },
+        {
+          "case": "onechar",
+          "ms": 91.9163340004161
+        },
+        {
+          "case": "matchall",
+          "ms": 38.1910140022228
+        },
+        {
+          "case": "optional",
+          "ms": 42.03053699893644
+        }
+      ],
+      "plan_counts": [
+        5,
+        5
+      ]
+    }
+  ]
+}

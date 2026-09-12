@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
+	"github.com/Tencent/WeKnora/internal/custom/modules/grepsearch"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
@@ -20,7 +21,7 @@ import (
 
 var grepChunksTool = BaseTool{
 	name: ToolGrepChunks,
-	description: `Search knowledge base chunk content with a single POSIX regular expression, applied directly in the database (PostgreSQL ~* / MySQL/SQLite REGEXP, case-insensitive). Behaves like ` + "`grep -E -i`" + `.
+	description: `Search knowledge base chunk content with a single POSIX regular expression, applied directly in PostgreSQL (~*, case-insensitive). Behaves like ` + "`grep -E -i`" + `.
 Invoke only when the current request needs knowledge-base evidence. Do not use
 it for conversation-state updates, source quoting, or reformatting answerable
 solely from user-authored dialogue, and honor an explicit no-retrieval boundary.
@@ -147,7 +148,7 @@ func splitTopLevelRegexAlternatives(query string) []string {
 
 // GrepChunksTool performs regex pattern matching across knowledge base chunks.
 // PostgreSQL: uses the case-insensitive POSIX operator ~*.
-// MySQL/SQLite: falls back to REGEXP.
+// Searches the synchronously maintained active-chunk projection.
 //
 // The tool tracks previously-returned chunk IDs per-instance (one instance per
 // agent session) so that a subsequent search hitting the same chunk can be
@@ -291,7 +292,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			"query":                   query,
 			"count":                   len(chunkResults),
 			"search_targets":          t.searchTargets,
-			"candidate_limit_reached": len(results) >= 500,
+			"candidate_limit_reached": len(results) >= grepsearch.CandidateLimit,
 			"queries":                 queries, // legacy alias for older frontends
 			"patterns":                queries, // legacy alias for older frontends
 			"chunk_results":           chunkResults,
@@ -502,98 +503,18 @@ func (t *GrepChunksTool) searchChunks(
 	tagTargets []*types.SearchTarget,
 	kbTenantMap map[string]uint64,
 ) ([]chunkWithTitle, error) {
-	if len(kbIDs) == 0 && len(knowledgeIDs) == 0 && len(tagTargets) == 0 {
-		logger.Warnf(ctx, "[Tool][GrepChunks] No kbIDs, knowledgeIDs, or tag scopes specified, returning empty results")
-		return nil, nil
-	}
-
-	regexOp := t.regexOperatorForDialect()
-
-	query := t.db.WithContext(ctx).Table("chunks").
-		Select("chunks.id, chunks.content, chunks.chunk_index, chunks.knowledge_id, "+
-			"chunks.knowledge_base_id, chunks.chunk_type, chunks.metadata, chunks.source_locator, chunks.created_at, "+
-			"knowledges.title as knowledge_title").
-		Joins("JOIN knowledges ON chunks.knowledge_id = knowledges.id").
-		Where("chunks.is_enabled = ?", true).
-		// grep_chunks promises literal, claim-bearing source text. Generated
-		// summaries remain semantic-search locators, but are not exact text from
-		// the document and therefore must not compete with their physical parent
-		// or intermittently create uncitable grep results.
-		Where("chunks.chunk_type <> ?", types.ChunkTypeSummary).
-		Where("chunks.deleted_at IS NULL").
-		Where("knowledges.deleted_at IS NULL").Where("knowledges.publication_state = ?", "published")
-
-	// Combine specific knowledge IDs, tag scopes, and full-KB scopes with OR so
-	// that mixing @KB with @tag/@file searches BOTH, mirroring knowledge_search's
-	// concurrent fan-out instead of dropping one side.
 	scopeSQL, scopeArgs := scopeClause(kbIDs, knowledgeIDs, tagTargets, kbTenantMap)
 	if scopeSQL == "" {
-		logger.Warnf(ctx, "[Tool][GrepChunks] No valid scope (kb-tenant pairs / knowledge IDs)")
 		return nil, nil
 	}
-	logger.Infof(ctx, "[Tool][GrepChunks] Scope: %d knowledge IDs, %d tag scopes, %d KBs",
-		len(knowledgeIDs), len(tagTargets), len(kbIDs))
-	query = query.Where(scopeSQL, scopeArgs...)
-
-	// For MySQL/SQLite REGEXP case-insensitivity we rely on the column's default
-	// collation (utf8mb4_general_ci etc.) OR the driver's REGEXP implementation,
-	// which mirrors what wiki_search already ships in this codebase.
-	var regexConditions []string
-	var regexArgs []interface{}
-	for _, q := range queries {
-		// Match the regex against either the chunk body OR the owning
-		// knowledge's title, so a doc whose title matches (e.g. titled
-		// "图片素材") surfaces even when its body rarely repeats the term.
-		regexConditions = append(regexConditions,
-			fmt.Sprintf("(chunks.content %s ? OR knowledges.title %s ?)", regexOp, regexOp))
-		regexArgs = append(regexArgs, q, q)
-	}
-	query = query.Where("("+strings.Join(regexConditions, " OR ")+")", regexArgs...)
-
-	const maxFetchLimit = 500
-
-	var results []chunkWithTitle
-	if err := query.Order("chunks.created_at DESC").Limit(maxFetchLimit).Find(&results).Error; err != nil {
-		logger.Errorf(ctx, "[Tool][GrepChunks] Failed to fetch results: %v", err)
+	rows, err := grepsearch.Search(ctx, t.db, scopeSQL, scopeArgs, queries)
+	if err != nil {
 		return nil, err
 	}
-
-	if len(results) > 0 {
-		knowledgeIDSet := make(map[string]struct{})
-		for _, r := range results {
-			if r.KnowledgeID != "" {
-				knowledgeIDSet[r.KnowledgeID] = struct{}{}
-			}
-		}
-		uniqueKnowledgeIDs := make([]string, 0, len(knowledgeIDSet))
-		for kid := range knowledgeIDSet {
-			uniqueKnowledgeIDs = append(uniqueKnowledgeIDs, kid)
-		}
-
-		type countRow struct {
-			KnowledgeID string `gorm:"column:knowledge_id"`
-			Count       int    `gorm:"column:cnt"`
-		}
-		var counts []countRow
-		if err := t.db.WithContext(ctx).Table("chunks").
-			Select("knowledge_id, COUNT(*) AS cnt").
-			Where("knowledge_id IN ?", uniqueKnowledgeIDs).
-			Where("is_enabled = ?", true).
-			Where("deleted_at IS NULL").
-			Group("knowledge_id").
-			Find(&counts).Error; err != nil {
-			logger.Warnf(ctx, "[Tool][GrepChunks] Failed to fetch chunk counts, skipping: %v", err)
-		} else {
-			countMap := make(map[string]int, len(counts))
-			for _, c := range counts {
-				countMap[c.KnowledgeID] = c.Count
-			}
-			for i := range results {
-				results[i].TotalChunkCount = countMap[results[i].KnowledgeID]
-			}
-		}
+	results := make([]chunkWithTitle, len(rows))
+	for i, row := range rows {
+		results[i] = chunkWithTitle{Chunk: row.Chunk, KnowledgeTitle: row.KnowledgeTitle, TotalChunkCount: row.TotalChunkCount}
 	}
-
 	return results, nil
 }
 

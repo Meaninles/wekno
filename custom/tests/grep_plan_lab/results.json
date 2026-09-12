@@ -1,0 +1,4571 @@
+{
+  "fixture": "300k bounded local chunks; synthetic tenant/KB/status distribution; existing local PostgreSQL, separate schema",
+  "serial": [
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "contract",
+      "times_ms": [
+        220.628,
+        210.069,
+        208.183
+      ],
+      "reads": [
+        22041,
+        22168,
+        22154
+      ],
+      "hits": [
+        820,
+        686,
+        700
+      ],
+      "plans_ms": [
+        0.641,
+        0.02,
+        0.02
+      ],
+      "count": 58,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "short",
+      "times_ms": [
+        180.51,
+        178.208,
+        185.87
+      ],
+      "reads": [
+        22150,
+        22156,
+        22151
+      ],
+      "hits": [
+        704,
+        698,
+        703
+      ],
+      "plans_ms": [
+        0.021,
+        0.022,
+        0.021
+      ],
+      "count": 80,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "single",
+      "times_ms": [
+        11.392,
+        10.223,
+        9.606
+      ],
+      "reads": [
+        556,
+        0,
+        0
+      ],
+      "hits": [
+        705,
+        1261,
+        1261
+      ],
+      "plans_ms": [
+        0.021,
+        0.021,
+        0.018
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "broad",
+      "times_ms": [
+        179.577,
+        168.888,
+        167.293
+      ],
+      "reads": [
+        20954,
+        20946,
+        21599
+      ],
+      "hits": [
+        1900,
+        1908,
+        1255
+      ],
+      "plans_ms": [
+        0.028,
+        0.019,
+        0.02
+      ],
+      "count": 500,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "rare",
+      "times_ms": [
+        191.605,
+        226.994,
+        190.879
+      ],
+      "reads": [
+        22150,
+        22153,
+        22153
+      ],
+      "hits": [
+        704,
+        701,
+        701
+      ],
+      "plans_ms": [
+        0.028,
+        0.019,
+        0.022
+      ],
+      "count": 15,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "empty",
+      "times_ms": [
+        217.781,
+        217.175,
+        214.968
+      ],
+      "reads": [
+        22152,
+        22156,
+        22152
+      ],
+      "hits": [
+        702,
+        698,
+        702
+      ],
+      "plans_ms": [
+        0.019,
+        0.02,
+        0.018
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "regex",
+      "times_ms": [
+        203.698,
+        194.768,
+        203.059
+      ],
+      "reads": [
+        22142,
+        22164,
+        22154
+      ],
+      "hits": [
+        712,
+        690,
+        700
+      ],
+      "plans_ms": [
+        0.022,
+        0.019,
+        0.023
+      ],
+      "count": 167,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "baseline",
+      "mode": "force_generic_plan",
+      "case": "onechar",
+      "times_ms": [
+        181.355,
+        184.544,
+        176.201
+      ],
+      "reads": [
+        22155,
+        22158,
+        22160
+      ],
+      "hits": [
+        699,
+        696,
+        694
+      ],
+      "plans_ms": [
+        0.027,
+        0.024,
+        0.038
+      ],
+      "count": 34,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "contract",
+      "times_ms": [
+        201.804,
+        219.095,
+        202.538
+      ],
+      "reads": [
+        22143,
+        22159,
+        22156
+      ],
+      "hits": [
+        711,
+        695,
+        698
+      ],
+      "plans_ms": [
+        0.896,
+        0.771,
+        0.856
+      ],
+      "count": 58,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "short",
+      "times_ms": [
+        174.447,
+        171.135,
+        179.257
+      ],
+      "reads": [
+        22159,
+        22146,
+        22153
+      ],
+      "hits": [
+        695,
+        708,
+        701
+      ],
+      "plans_ms": [
+        10.368,
+        0.723,
+        0.667
+      ],
+      "count": 80,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "single",
+      "times_ms": [
+        6.942,
+        5.067,
+        5.009
+      ],
+      "reads": [
+        627,
+        0,
+        0
+      ],
+      "hits": [
+        1433,
+        2060,
+        2060
+      ],
+      "plans_ms": [
+        0.976,
+        0.713,
+        0.667
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "broad",
+      "times_ms": [
+        166.735,
+        166.717,
+        176.077
+      ],
+      "reads": [
+        20351,
+        20364,
+        21735
+      ],
+      "hits": [
+        2503,
+        2490,
+        1119
+      ],
+      "plans_ms": [
+        0.666,
+        0.659,
+        0.969
+      ],
+      "count": 500,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "rare",
+      "times_ms": [
+        190.297,
+        186.159,
+        194.555
+      ],
+      "reads": [
+        22157,
+        22145,
+        22155
+      ],
+      "hits": [
+        697,
+        709,
+        699
+      ],
+      "plans_ms": [
+        0.772,
+        0.75,
+        0.727
+      ],
+      "count": 15,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "empty",
+      "times_ms": [
+        207.04,
+        210.007,
+        219.336
+      ],
+      "reads": [
+        22138,
+        22163,
+        22159
+      ],
+      "hits": [
+        716,
+        691,
+        695
+      ],
+      "plans_ms": [
+        0.907,
+        1.659,
+        0.863
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "regex",
+      "times_ms": [
+        222.643,
+        198.14,
+        214.856
+      ],
+      "reads": [
+        22160,
+        22152,
+        22149
+      ],
+      "hits": [
+        694,
+        702,
+        705
+      ],
+      "plans_ms": [
+        0.843,
+        0.83,
+        0.851
+      ],
+      "count": 167,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "custom",
+      "mode": "force_custom_plan",
+      "case": "onechar",
+      "times_ms": [
+        167.619,
+        172.316,
+        166.836
+      ],
+      "reads": [
+        22140,
+        22159,
+        22146
+      ],
+      "hits": [
+        714,
+        695,
+        708
+      ],
+      "plans_ms": [
+        0.649,
+        0.669,
+        0.59
+      ],
+      "count": 34,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "contract",
+      "times_ms": [
+        223.853,
+        223.249,
+        223.943
+      ],
+      "reads": [
+        22165,
+        22140,
+        22160
+      ],
+      "hits": [
+        689,
+        714,
+        694
+      ],
+      "plans_ms": [
+        0.607,
+        0.555,
+        0.592
+      ],
+      "count": 58,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "short",
+      "times_ms": [
+        205.663,
+        197.9,
+        195.424
+      ],
+      "reads": [
+        22144,
+        22157,
+        22157
+      ],
+      "hits": [
+        710,
+        697,
+        697
+      ],
+      "plans_ms": [
+        0.749,
+        0.481,
+        0.527
+      ],
+      "count": 80,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "single",
+      "times_ms": [
+        7.471,
+        5.422,
+        5.003
+      ],
+      "reads": [
+        626,
+        0,
+        0
+      ],
+      "hits": [
+        1434,
+        2060,
+        2060
+      ],
+      "plans_ms": [
+        0.583,
+        0.588,
+        0.5
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "broad",
+      "times_ms": [
+        234.136,
+        186.055,
+        191.739
+      ],
+      "reads": [
+        20364,
+        20358,
+        21731
+      ],
+      "hits": [
+        2490,
+        2496,
+        1123
+      ],
+      "plans_ms": [
+        0.656,
+        0.486,
+        0.573
+      ],
+      "count": 500,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "rare",
+      "times_ms": [
+        218.005,
+        278.627,
+        260.626
+      ],
+      "reads": [
+        22143,
+        22155,
+        22162
+      ],
+      "hits": [
+        711,
+        699,
+        692
+      ],
+      "plans_ms": [
+        0.583,
+        0.545,
+        0.679
+      ],
+      "count": 15,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "empty",
+      "times_ms": [
+        227.261,
+        234.399,
+        233.974
+      ],
+      "reads": [
+        22166,
+        22145,
+        22156
+      ],
+      "hits": [
+        688,
+        709,
+        698
+      ],
+      "plans_ms": [
+        0.602,
+        0.597,
+        0.682
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "regex",
+      "times_ms": [
+        221.824,
+        218.154,
+        219.054
+      ],
+      "reads": [
+        22139,
+        22158,
+        22145
+      ],
+      "hits": [
+        715,
+        696,
+        709
+      ],
+      "plans_ms": [
+        1.021,
+        0.652,
+        0.609
+      ],
+      "count": 167,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_fence",
+      "mode": "force_custom_plan",
+      "case": "onechar",
+      "times_ms": [
+        187.797,
+        185.256,
+        189.269
+      ],
+      "reads": [
+        22144,
+        22154,
+        22145
+      ],
+      "hits": [
+        710,
+        700,
+        709
+      ],
+      "plans_ms": [
+        0.63,
+        0.516,
+        0.491
+      ],
+      "count": 34,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "contract",
+      "times_ms": [
+        199.161,
+        221.245,
+        189.977
+      ],
+      "reads": [
+        21710,
+        22133,
+        22135
+      ],
+      "hits": [
+        1134,
+        711,
+        709
+      ],
+      "plans_ms": [
+        0.931,
+        1.005,
+        0.881
+      ],
+      "count": 58,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "short",
+      "times_ms": [
+        170.289,
+        169.221,
+        162.469
+      ],
+      "reads": [
+        22138,
+        22136,
+        22158
+      ],
+      "hits": [
+        706,
+        708,
+        686
+      ],
+      "plans_ms": [
+        1.051,
+        0.699,
+        0.939
+      ],
+      "count": 80,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "single",
+      "times_ms": [
+        4.562,
+        5.262,
+        3.867
+      ],
+      "reads": [
+        236,
+        0,
+        0
+      ],
+      "hits": [
+        707,
+        943,
+        943
+      ],
+      "plans_ms": [
+        0.883,
+        1.147,
+        1.095
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "broad",
+      "times_ms": [
+        158.308,
+        153.192,
+        152.213
+      ],
+      "reads": [
+        21258,
+        21257,
+        21918
+      ],
+      "hits": [
+        1586,
+        1587,
+        926
+      ],
+      "plans_ms": [
+        0.699,
+        1.121,
+        0.695
+      ],
+      "count": 500,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "rare",
+      "times_ms": [
+        176.772,
+        179.531,
+        181.451
+      ],
+      "reads": [
+        22136,
+        22137,
+        22165
+      ],
+      "hits": [
+        708,
+        707,
+        679
+      ],
+      "plans_ms": [
+        0.944,
+        0.757,
+        0.947
+      ],
+      "count": 15,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "empty",
+      "times_ms": [
+        196.692,
+        199.015,
+        200.817
+      ],
+      "reads": [
+        22158,
+        22133,
+        22140
+      ],
+      "hits": [
+        686,
+        711,
+        704
+      ],
+      "plans_ms": [
+        0.996,
+        0.947,
+        0.918
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "regex",
+      "times_ms": [
+        191.72,
+        184.41,
+        183.101
+      ],
+      "reads": [
+        22143,
+        22140,
+        22152
+      ],
+      "hits": [
+        701,
+        704,
+        692
+      ],
+      "plans_ms": [
+        0.892,
+        0.838,
+        1.27
+      ],
+      "count": 167,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "scope_index",
+      "mode": "force_custom_plan",
+      "case": "onechar",
+      "times_ms": [
+        158.178,
+        157.892,
+        171.189
+      ],
+      "reads": [
+        22151,
+        22139,
+        22144
+      ],
+      "hits": [
+        693,
+        705,
+        700
+      ],
+      "plans_ms": [
+        0.773,
+        1.04,
+        0.709
+      ],
+      "count": 34,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "contract",
+      "times_ms": [
+        209.313,
+        209.197,
+        206.837
+      ],
+      "reads": [
+        22149,
+        22145,
+        22161
+      ],
+      "hits": [
+        695,
+        699,
+        683
+      ],
+      "plans_ms": [
+        1.232,
+        0.947,
+        0.918
+      ],
+      "count": 58,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "short",
+      "times_ms": [
+        165.917,
+        166.0,
+        163.564
+      ],
+      "reads": [
+        22146,
+        22150,
+        22144
+      ],
+      "hits": [
+        698,
+        694,
+        700
+      ],
+      "plans_ms": [
+        1.049,
+        0.761,
+        0.769
+      ],
+      "count": 80,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "single",
+      "times_ms": [
+        4.876,
+        4.081,
+        3.877
+      ],
+      "reads": [
+        236,
+        0,
+        0
+      ],
+      "hits": [
+        707,
+        943,
+        943
+      ],
+      "plans_ms": [
+        0.997,
+        1.087,
+        0.762
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "broad",
+      "times_ms": [
+        161.058,
+        153.831,
+        156.053
+      ],
+      "reads": [
+        21255,
+        21265,
+        21923
+      ],
+      "hits": [
+        1589,
+        1579,
+        921
+      ],
+      "plans_ms": [
+        0.737,
+        0.754,
+        0.829
+      ],
+      "count": 500,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "rare",
+      "times_ms": [
+        216.857,
+        185.04,
+        178.853
+      ],
+      "reads": [
+        22151,
+        22158,
+        22138
+      ],
+      "hits": [
+        693,
+        686,
+        706
+      ],
+      "plans_ms": [
+        0.862,
+        0.902,
+        0.819
+      ],
+      "count": 15,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "empty",
+      "times_ms": [
+        216.776,
+        200.758,
+        201.601
+      ],
+      "reads": [
+        22151,
+        22144,
+        22158
+      ],
+      "hits": [
+        693,
+        700,
+        686
+      ],
+      "plans_ms": [
+        1.073,
+        1.005,
+        1.274
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "regex",
+      "times_ms": [
+        188.49,
+        188.295,
+        189.557
+      ],
+      "reads": [
+        22156,
+        22159,
+        22135
+      ],
+      "hits": [
+        688,
+        685,
+        709
+      ],
+      "plans_ms": [
+        0.942,
+        0.918,
+        0.952
+      ],
+      "count": 167,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "indexes_only",
+      "mode": "force_custom_plan",
+      "case": "onechar",
+      "times_ms": [
+        161.393,
+        156.864,
+        157.889
+      ],
+      "reads": [
+        22135,
+        22152,
+        22163
+      ],
+      "hits": [
+        709,
+        692,
+        681
+      ],
+      "plans_ms": [
+        1.57,
+        0.786,
+        0.733
+      ],
+      "count": 34,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "contract",
+      "times_ms": [
+        177.68,
+        174.186,
+        179.577
+      ],
+      "reads": [
+        22156,
+        22118,
+        22100
+      ],
+      "hits": [
+        727,
+        765,
+        783
+      ],
+      "plans_ms": [
+        1.073,
+        1.206,
+        1.08
+      ],
+      "count": 58,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "short",
+      "times_ms": [
+        162.123,
+        156.45,
+        163.079
+      ],
+      "reads": [
+        22112,
+        22140,
+        22157
+      ],
+      "hits": [
+        786,
+        758,
+        741
+      ],
+      "plans_ms": [
+        1.714,
+        0.801,
+        0.808
+      ],
+      "count": 80,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "single",
+      "times_ms": [
+        5.457,
+        4.686,
+        4.611
+      ],
+      "reads": [
+        197,
+        0,
+        0
+      ],
+      "hits": [
+        1595,
+        1792,
+        1792
+      ],
+      "plans_ms": [
+        0.897,
+        0.826,
+        0.824
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "broad",
+      "times_ms": [
+        201.715,
+        202.316,
+        224.023
+      ],
+      "reads": [
+        42258,
+        43515,
+        43938
+      ],
+      "hits": [
+        8946,
+        7689,
+        7266
+      ],
+      "plans_ms": [
+        0.848,
+        0.867,
+        0.991
+      ],
+      "count": 500,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "rare",
+      "times_ms": [
+        165.412,
+        166.102,
+        162.229
+      ],
+      "reads": [
+        22132,
+        22147,
+        22122
+      ],
+      "hits": [
+        758,
+        743,
+        768
+      ],
+      "plans_ms": [
+        0.938,
+        1.041,
+        0.821
+      ],
+      "count": 15,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "empty",
+      "times_ms": [
+        1.871,
+        1.456,
+        1.881
+      ],
+      "reads": [
+        21,
+        0,
+        0
+      ],
+      "hits": [
+        56,
+        77,
+        77
+      ],
+      "plans_ms": [
+        1.045,
+        1.288,
+        1.444
+      ],
+      "count": 0,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "regex",
+      "times_ms": [
+        173.683,
+        167.413,
+        169.576
+      ],
+      "reads": [
+        22180,
+        22088,
+        22149
+      ],
+      "hits": [
+        1247,
+        1339,
+        1278
+      ],
+      "plans_ms": [
+        1.115,
+        0.929,
+        0.858
+      ],
+      "count": 167,
+      "same_ordered_ids": true
+    },
+    {
+      "variant": "unified_union",
+      "mode": "force_custom_plan",
+      "case": "onechar",
+      "times_ms": [
+        144.762,
+        142.474,
+        142.387
+      ],
+      "reads": [
+        22066,
+        22147,
+        22157
+      ],
+      "hits": [
+        887,
+        806,
+        796
+      ],
+      "plans_ms": [
+        1.208,
+        0.791,
+        0.988
+      ],
+      "count": 34,
+      "same_ordered_ids": true
+    }
+  ],
+  "concurrent": [
+    {
+      "variant": "indexes_only",
+      "concurrency": 2,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 207.148,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 191.635,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 6.843,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 170.913,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 208.54,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 5.618,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 187.908,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 172.141,
+          "same_ordered_ids": true
+        }
+      ]
+    },
+    {
+      "variant": "indexes_only",
+      "concurrency": 4,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 223.898,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 200.315,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 7.433,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 181.623,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 224.333,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 8.407,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 190.102,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 183.269,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 9.465,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 242.29,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 161.024,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "empty",
+          "ms": 192.532,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 247.063,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 169.21,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "empty",
+          "ms": 188.493,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "regex",
+          "ms": 183.241,
+          "same_ordered_ids": true
+        }
+      ]
+    },
+    {
+      "variant": "unified_union",
+      "concurrency": 2,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 202.937,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 180.307,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 6.927,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 208.025,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 203.66,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 6.679,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 226.943,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 175.092,
+          "same_ordered_ids": true
+        }
+      ]
+    },
+    {
+      "variant": "unified_union",
+      "concurrency": 4,
+      "samples": [
+        {
+          "case": "contract",
+          "ms": 213.573,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 131.092,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 11.593,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 251.596,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "short",
+          "ms": 215.906,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 6.21,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 177.841,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 157.969,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "single",
+          "ms": 10.585,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 347.196,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 198.165,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "empty",
+          "ms": 4.385,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "broad",
+          "ms": 356.745,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "rare",
+          "ms": 200.113,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "empty",
+          "ms": 5.487,
+          "same_ordered_ids": true
+        },
+        {
+          "case": "regex",
+          "ms": 166.601,
+          "same_ordered_ids": true
+        }
+      ]
+    }
+  ],
+  "size_before": [
+    300000,
+    610836480
+  ],
+  "scope_index_build_s": 0.47959544700279366,
+  "trgm_build_s": 12.832946768998227,
+  "index_bytes": [
+    [
+      "_typmod_cache_pkey",
+      8192
+    ],
+    [
+      "_typmod_cache_typmod_key",
+      8192
+    ],
+    [
+      "addr_pkey",
+      8192
+    ],
+    [
+      "addrfeat_pkey",
+      8192
+    ],
+    [
+      "agent_shares_pkey",
+      16384
+    ],
+    [
+      "audit_logs_pkey",
+      16384
+    ],
+    [
+      "auth_tokens_pkey",
+      155648
+    ],
+    [
+      "bg_pkey",
+      8192
+    ],
+    [
+      "chunks_body_trgm",
+      96788480
+    ],
+    [
+      "chunks_knowledge_enabled",
+      2613248
+    ],
+    [
+      "chunks_live_scope",
+      9756672
+    ],
+    [
+      "chunks_pkey",
+      108060672
+    ],
+    [
+      "chunks_pkey",
+      35438592
+    ],
+    [
+      "chunks_scope",
+      2113536
+    ],
+    [
+      "county_lookup_name_idx",
+      8192
+    ],
+    [
+      "county_lookup_pkey",
+      8192
+    ],
+    [
+      "county_lookup_state_idx",
+      8192
+    ],
+    [
+      "countysub_lookup_name_idx",
+      8192
+    ],
+    [
+      "countysub_lookup_pkey",
+      8192
+    ],
+    [
+      "countysub_lookup_state_idx",
+      8192
+    ],
+    [
+      "cousub_pkey",
+      8192
+    ],
+    [
+      "custom_agent_model_requests_pkey",
+      172032
+    ],
+    [
+      "custom_agent_profile_cutovers_pkey",
+      16384
+    ],
+    [
+      "custom_agent_run_events_pkey",
+      15228928
+    ],
+    [
+      "custom_agent_runs_pkey",
+      57344
+    ],
+    [
+      "custom_agent_tool_calls_pkey",
+      245760
+    ],
+    [
+      "custom_agents_pkey",
+      245760
+    ],
+    [
+      "custom_answer_feedbacks_pkey",
+      16384
+    ],
+    [
+      "custom_answer_run_snapshots_pkey",
+      344064
+    ],
+    [
+      "custom_auth_login_attempts_pkey",
+      16384
+    ],
+    [
+      "custom_browser_agent_context_snapshots_pkey",
+      16384
+    ],
+    [
+      "custom_browser_agent_runtime_sessions_pkey",
+      16384
+    ],
+    [
+      "custom_browser_agent_scenarios_pkey",
+      16384
+    ],
+    [
+      "custom_browser_agent_system_profiles_pkey",
+      16384
+    ],
+    [
+      "custom_builtin_agent_chat_visibility_pkey",
+      16384
+    ],
+    [
+      "custom_builtin_agent_model_policies_pkey",
+      16384
+    ],
+    [
+      "custom_chat_original_uploads_pkey",
+      16384
+    ],
+    [
+      "custom_chatshare_artifact_links_pkey",
+      16384
+    ],
+    [
+      "custom_chatshare_links_pkey",
+      16384
+    ],
+    [
+      "custom_chatshare_messages_pkey",
+      16384
+    ],
+    [
+      "custom_chatshare_resources_pkey",
+      16384
+    ],
+    [
+      "custom_claude_runtime_blobs_pkey",
+      16384
+    ],
+    [
+      "custom_claude_runtime_conversation_memories_pkey",
+      16384
+    ],
+    [
+      "custom_claude_runtime_object_fingerprints_pkey",
+      16384
+    ],
+    [
+      "custom_claude_runtime_run_leases_pkey",
+      16384
+    ],
+    [
+      "custom_claude_runtime_session_entries_pkey",
+      172032
+    ],
+    [
+      "custom_claude_runtime_sessions_pkey",
+      16384
+    ],
+    [
+      "custom_claude_runtime_workspace_files_pkey",
+      16384
+    ],
+    [
+      "custom_config_default_grants_pkey",
+      16384
+    ],
+    [
+      "custom_config_managed_copies_pkey",
+      286720
+    ],
+    [
+      "custom_config_user_grants_pkey",
+      16384
+    ],
+    [
+      "custom_content_cache_entries_pkey",
+      335446016
+    ],
+    [
+      "custom_content_cache_refs_pkey",
+      3006464
+    ],
+    [
+      "custom_db_agent_bindings_pkey",
+      16384
+    ],
+    [
+      "custom_db_query_audits_pkey",
+      57344
+    ],
+    [
+      "custom_db_source_columns_pkey",
+      131072
+    ],
+    [
+      "custom_db_source_shares_pkey",
+      16384
+    ],
+    [
+      "custom_db_source_tables_pkey",
+      32768
+    ],
+    [
+      "custom_db_sources_pkey",
+      16384
+    ],
+    [
+      "custom_db_table_relations_pkey",
+      8192
+    ],
+    [
+      "custom_dependency_capabilities_pkey",
+      16384
+    ],
+    [
+      "custom_derivative_control_configs_pkey",
+      16384
+    ],
+    [
+      "custom_derivative_model_assignments_pkey",
+      16384
+    ],
+    [
+      "custom_derivative_provider_calls_pkey",
+      196608
+    ],
+    [
+      "custom_derivative_results_pkey",
+      155648
+    ],
+    [
+      "custom_derivative_work_items_pkey",
+      786432
+    ],
+    [
+      "custom_document_processing_exports_pkey",
+      40960
+    ],
+    [
+      "custom_document_queue_instances_pkey",
+      16384
+    ],
+    [
+      "custom_document_queue_schedule_groups_pkey",
+      16384
+    ],
+    [
+      "custom_document_queue_workflows_pkey",
+      516096
+    ],
+    [
+      "custom_document_split_parts_pkey",
+      57344
+    ],
+    [
+      "custom_document_split_plans_pkey",
+      16384
+    ],
+    [
+      "custom_enrichment_outcomes_pkey",
+      1826816
+    ],
+    [
+      "custom_general_agent_artifacts_pkey",
+      40960
+    ],
+    [
+      "custom_generated_question_claims_pkey",
+      12926976
+    ],
+    [
+      "custom_iam_organizations_pkey",
+      548864
+    ],
+    [
+      "custom_iam_pending_space_member_grants_pkey",
+      16384
+    ],
+    [
+      "custom_iam_sync_runs_pkey",
+      16384
+    ],
+    [
+      "custom_iam_sync_settings_pkey",
+      16384
+    ],
+    [
+      "custom_iam_sync_skipped_records_pkey",
+      16384
+    ],
+    [
+      "custom_iam_users_pkey",
+      5439488
+    ],
+    [
+      "custom_kbmanager_inputs_pkey",
+      8192
+    ],
+    [
+      "custom_kbmanager_operations_pkey",
+      16384
+    ],
+    [
+      "custom_knowledge_folder_closure_pkey",
+      131072
+    ],
+    [
+      "custom_knowledge_folder_delete_items_pkey",
+      16384
+    ],
+    [
+      "custom_knowledge_folder_delete_operations_pkey",
+      16384
+    ],
+    [
+      "custom_knowledge_folder_stats_pkey",
+      49152
+    ],
+    [
+      "custom_knowledge_folders_pkey",
+      81920
+    ],
+    [
+      "custom_model_admission_audits_pkey",
+      32768
+    ],
+    [
+      "custom_model_admission_templates_pkey",
+      16384
+    ],
+    [
+      "custom_model_gateway_pools_pkey",
+      8192
+    ],
+    [
+      "custom_model_quota_pools_pkey",
+      8192
+    ],
+    [
+      "custom_model_resource_bindings_pkey",
+      393216
+    ],
+    [
+      "custom_model_resource_pools_pkey",
+      40960
+    ],
+    [
+      "custom_model_scheduler_policies_pkey",
+      16384
+    ],
+    [
+      "custom_processing_spans_v2_pkey",
+      4120576
+    ],
+    [
+      "custom_professional_skills_pkey",
+      16384
+    ],
+    [
+      "custom_runtime_instances_pkey",
+      155648
+    ],
+    [
+      "custom_scheduled_chat_runs_pkey",
+      16384
+    ],
+    [
+      "custom_scheduled_chat_tasks_pkey",
+      16384
+    ],
+    [
+      "custom_session_read_states_pkey",
+      57344
+    ],
+    [
+      "custom_skill_org_shares_pkey",
+      16384
+    ],
+    [
+      "custom_skill_user_shares_pkey",
+      16384
+    ],
+    [
+      "custom_skills_pkey",
+      16384
+    ],
+    [
+      "custom_wiki_ingest_leases_pkey",
+      16384
+    ],
+    [
+      "custom_wiki_user_permissions_pkey",
+      16384
+    ],
+    [
+      "data_sources_pkey",
+      16384
+    ],
+    [
+      "direction_lookup_abbrev_idx",
+      16384
+    ],
+    [
+      "direction_lookup_pkey",
+      16384
+    ],
+    [
+      "edges_pkey",
+      8192
+    ],
+    [
+      "embed_channels_pkey",
+      16384
+    ],
+    [
+      "embeddings_2048_go3_hnsw_m32_idx",
+      16384
+    ],
+    [
+      "embeddings_2048_pkey",
+      8192
+    ],
+    [
+      "embeddings_3584_enabled_idx",
+      8192
+    ],
+    [
+      "embeddings_3584_go3_hnsw_m32_idx",
+      16384
+    ],
+    [
+      "embeddings_3584_kb_idx",
+      8192
+    ],
+    [
+      "embeddings_3584_pkey",
+      8192
+    ],
+    [
+      "embeddings_embedding_idx_1024",
+      1484922880
+    ],
+    [
+      "embeddings_embedding_idx_3584",
+      3552903168
+    ],
+    [
+      "embeddings_embedding_idx_798",
+      16384
+    ],
+    [
+      "embeddings_pkey",
+      34316288
+    ],
+    [
+      "embeddings_search_idx",
+      417554432
+    ],
+    [
+      "embeddings_unique_source",
+      81936384
+    ],
+    [
+      "faces_pkey",
+      8192
+    ],
+    [
+      "featnames_pkey",
+      8192
+    ],
+    [
+      "geocode_settings_default_pkey",
+      16384
+    ],
+    [
+      "geocode_settings_pkey",
+      8192
+    ],
+    [
+      "idx_addrfeat_geom_gist",
+      8192
+    ],
+    [
+      "idx_addrfeat_tlid",
+      8192
+    ],
+    [
+      "idx_addrfeat_zipl",
+      8192
+    ],
+    [
+      "idx_addrfeat_zipr",
+      8192
+    ],
+    [
+      "idx_agent_shares_agent_id",
+      16384
+    ],
+    [
+      "idx_agent_shares_agent_org",
+      16384
+    ],
+    [
+      "idx_agent_shares_deleted_at",
+      16384
+    ],
+    [
+      "idx_agent_shares_org_id",
+      16384
+    ],
+    [
+      "idx_agent_shares_source_tenant",
+      16384
+    ],
+    [
+      "idx_audit_logs_actor",
+      16384
+    ],
+    [
+      "idx_audit_logs_created_at",
+      16384
+    ],
+    [
+      "idx_audit_logs_tenant_action",
+      16384
+    ],
+    [
+      "idx_audit_logs_tenant_id_desc",
+      16384
+    ],
+    [
+      "idx_auth_tokens_expires_at",
+      73728
+    ],
+    [
+      "idx_auth_tokens_token",
+      892928
+    ],
+    [
+      "idx_auth_tokens_token_type",
+      32768
+    ],
+    [
+      "idx_auth_tokens_user_id",
+      57344
+    ],
+    [
+      "idx_channel_lookup",
+      16384
+    ],
+    [
+      "idx_channel_thread_lookup",
+      8192
+    ],
+    [
+      "idx_chat_source_session",
+      16384
+    ],
+    [
+      "idx_chatshare_artifact_link_artifact",
+      16384
+    ],
+    [
+      "idx_chatshare_resource",
+      16384
+    ],
+    [
+      "idx_chunks_chunk_type",
+      19169280
+    ],
+    [
+      "idx_chunks_content_hash",
+      18743296
+    ],
+    [
+      "idx_chunks_content_trgm_active",
+      188055552
+    ],
+    [
+      "idx_chunks_kb_tenant",
+      25427968
+    ],
+    [
+      "idx_chunks_knowledge_enabled",
+      25313280
+    ],
+    [
+      "idx_chunks_live_knowledge_id",
+      498229248
+    ],
+    [
+      "idx_chunks_live_split_logical_order",
+      286498816
+    ],
+    [
+      "idx_chunks_live_split_logical_type",
+      303964160
+    ],
+    [
+      "idx_chunks_parent_id",
+      23117824
+    ],
+    [
+      "idx_chunks_seq_id",
+      76021760
+    ],
+    [
+      "idx_chunks_split_generation",
+      30793728
+    ],
+    [
+      "idx_chunks_split_logical_order",
+      330465280
+    ],
+    [
+      "idx_chunks_split_logical_type",
+      356884480
+    ],
+    [
+      "idx_chunks_tag",
+      19243008
+    ],
+    [
+      "idx_chunks_tenant_kg",
+      29327360
+    ],
+    [
+      "idx_custom_agent_model_requests_run_id",
+      57344
+    ],
+    [
+      "idx_custom_agent_runs_lease_until",
+      32768
+    ],
+    [
+      "idx_custom_agent_runs_message_id",
+      57344
+    ],
+    [
+      "idx_custom_agent_runs_session_id",
+      32768
+    ],
+    [
+      "idx_custom_agent_runs_status",
+      16384
+    ],
+    [
+      "idx_custom_agent_runs_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_agents_deleted_at",
+      90112
+    ],
+    [
+      "idx_custom_agents_is_builtin",
+      65536
+    ],
+    [
+      "idx_custom_agents_tenant_id",
+      65536
+    ],
+    [
+      "idx_custom_answer_feedback_actor_msg",
+      16384
+    ],
+    [
+      "idx_custom_answer_feedbacks_assistant_message_id",
+      16384
+    ],
+    [
+      "idx_custom_answer_feedbacks_channel",
+      16384
+    ],
+    [
+      "idx_custom_answer_feedbacks_request_id",
+      16384
+    ],
+    [
+      "idx_custom_answer_feedbacks_session_id",
+      16384
+    ],
+    [
+      "idx_custom_answer_feedbacks_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_answer_feedbacks_user_id",
+      16384
+    ],
+    [
+      "idx_custom_answer_run_snapshots_agent_id",
+      90112
+    ],
+    [
+      "idx_custom_answer_run_snapshots_agent_mode",
+      65536
+    ],
+    [
+      "idx_custom_answer_run_snapshots_agent_tenant_id",
+      98304
+    ],
+    [
+      "idx_custom_answer_run_snapshots_agent_type",
+      90112
+    ],
+    [
+      "idx_custom_answer_run_snapshots_assistant_message_id",
+      327680
+    ],
+    [
+      "idx_custom_answer_run_snapshots_channel",
+      65536
+    ],
+    [
+      "idx_custom_answer_run_snapshots_collected_at",
+      131072
+    ],
+    [
+      "idx_custom_answer_run_snapshots_model_id",
+      98304
+    ],
+    [
+      "idx_custom_answer_run_snapshots_request_id",
+      360448
+    ],
+    [
+      "idx_custom_answer_run_snapshots_session_id",
+      196608
+    ],
+    [
+      "idx_custom_answer_run_snapshots_tenant_id",
+      90112
+    ],
+    [
+      "idx_custom_answer_run_snapshots_user_id",
+      90112
+    ],
+    [
+      "idx_custom_answer_run_snapshots_user_message_id",
+      360448
+    ],
+    [
+      "idx_custom_auth_login_attempts_locked_until",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_expires_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_scenario_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_session_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_source",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_context_snapshots_user_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_connection_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_device_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_expires_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_host_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_idle_deadline_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_last_heartbeat_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_scenario_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_session_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_status",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_runtime_sessions_user_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_scenarios_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_scenarios_created_by",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_scenarios_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_scenarios_profile_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_scenarios_status",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_scenarios_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_system_profiles_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_system_profiles_created_by",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_system_profiles_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_system_profiles_exploration_status",
+      16384
+    ],
+    [
+      "idx_custom_browser_agent_system_profiles_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_browser_profile_agent_key",
+      16384
+    ],
+    [
+      "idx_custom_browser_runtime_connection",
+      40960
+    ],
+    [
+      "idx_custom_chat_original_uploads_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_chat_original_uploads_owner_id",
+      16384
+    ],
+    [
+      "idx_custom_chat_original_uploads_session_id",
+      16384
+    ],
+    [
+      "idx_custom_chat_original_uploads_state",
+      16384
+    ],
+    [
+      "idx_custom_chat_original_uploads_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_artifact_links_created_by_user_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_artifact_links_message_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_artifact_links_session_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_artifact_links_status",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_artifact_links_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_artifact_links_token_hash",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_created_by_user_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_session_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_source_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_source_user_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_status",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_links_token_hash",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_messages_original_message_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_messages_seq",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_messages_session_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_messages_share_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_resources_original_message_id",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_resources_resource_type",
+      16384
+    ],
+    [
+      "idx_custom_chatshare_resources_share_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_blobs_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_blobs_object_key",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_blobs_tenant_sha",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_conversation_memories_key",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_object_fingerprints_object_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_object_fingerprints_sha256",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_object_fingerprints_status",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_run_leases_expires_at",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_run_leases_run_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_run_leases_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_run_leases_user_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_session_entries_created_at",
+      32768
+    ],
+    [
+      "idx_custom_claude_runtime_session_entries_dedup_v2",
+      999424
+    ],
+    [
+      "idx_custom_claude_runtime_session_entries_deleted_at",
+      40960
+    ],
+    [
+      "idx_custom_claude_runtime_session_entries_order_v2",
+      950272
+    ],
+    [
+      "idx_custom_claude_runtime_session_entries_runtime_session_id",
+      40960
+    ],
+    [
+      "idx_custom_claude_runtime_session_entries_tenant_id",
+      32768
+    ],
+    [
+      "idx_custom_claude_runtime_sessions_claude_session_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_sessions_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_sessions_unique",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_sessions_user_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_sessions_workspace_id",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_workspace_files_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_workspace_files_path",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_workspace_files_sha256",
+      16384
+    ],
+    [
+      "idx_custom_claude_runtime_workspace_files_workspace_id",
+      16384
+    ],
+    [
+      "idx_custom_config_default_grants_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_config_default_grants_enabled",
+      16384
+    ],
+    [
+      "idx_custom_config_managed_copies_deleted_at",
+      40960
+    ],
+    [
+      "idx_custom_config_managed_copies_status",
+      40960
+    ],
+    [
+      "idx_custom_config_user_grants_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_config_user_grants_enabled",
+      16384
+    ],
+    [
+      "idx_custom_content_cache_gc",
+      56180736
+    ],
+    [
+      "idx_custom_content_cache_refs_generation",
+      352256
+    ],
+    [
+      "idx_custom_db_agent_bindings_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_db_agent_bindings_enabled",
+      16384
+    ],
+    [
+      "idx_custom_db_agent_bindings_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_db_agent_source",
+      16384
+    ],
+    [
+      "idx_custom_db_col_ref",
+      122880
+    ],
+    [
+      "idx_custom_db_query_audits_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_db_query_audits_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_db_query_audits_source_id",
+      16384
+    ],
+    [
+      "idx_custom_db_query_audits_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_db_query_audits_user_id",
+      16384
+    ],
+    [
+      "idx_custom_db_source_columns_deleted_at",
+      32768
+    ],
+    [
+      "idx_custom_db_source_columns_source_id",
+      32768
+    ],
+    [
+      "idx_custom_db_source_columns_table_id",
+      49152
+    ],
+    [
+      "idx_custom_db_source_columns_tenant_id",
+      32768
+    ],
+    [
+      "idx_custom_db_source_shares_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_db_source_shares_organization_id",
+      16384
+    ],
+    [
+      "idx_custom_db_source_shares_source_id",
+      16384
+    ],
+    [
+      "idx_custom_db_source_shares_source_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_db_source_tables_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_db_source_tables_enabled",
+      16384
+    ],
+    [
+      "idx_custom_db_source_tables_source_id",
+      16384
+    ],
+    [
+      "idx_custom_db_source_tables_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_db_source_tables_virtual_name",
+      40960
+    ],
+    [
+      "idx_custom_db_sources_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_db_sources_status",
+      16384
+    ],
+    [
+      "idx_custom_db_sources_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_db_sources_type",
+      16384
+    ],
+    [
+      "idx_custom_db_table_ref",
+      40960
+    ],
+    [
+      "idx_custom_db_table_relations_deleted_at",
+      8192
+    ],
+    [
+      "idx_custom_db_table_relations_from_table_id",
+      8192
+    ],
+    [
+      "idx_custom_db_table_relations_source_id",
+      8192
+    ],
+    [
+      "idx_custom_db_table_relations_tenant_id",
+      8192
+    ],
+    [
+      "idx_custom_db_table_relations_to_table_id",
+      8192
+    ],
+    [
+      "idx_custom_default_grant",
+      16384
+    ],
+    [
+      "idx_custom_dependency_capabilities_incident_id",
+      16384
+    ],
+    [
+      "idx_custom_dependency_capabilities_state",
+      16384
+    ],
+    [
+      "idx_custom_derivative_model_assignments_model_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_derivative_provider_calls_generation",
+      573440
+    ],
+    [
+      "idx_custom_derivative_provider_calls_provider_request_key",
+      630784
+    ],
+    [
+      "idx_custom_derivative_provider_calls_replay",
+      884736
+    ],
+    [
+      "idx_custom_derivative_provider_calls_work_item_id",
+      188416
+    ],
+    [
+      "idx_custom_derivative_results_expires_at",
+      122880
+    ],
+    [
+      "idx_custom_derivative_results_provider_request_key",
+      319488
+    ],
+    [
+      "idx_custom_derivative_results_work_item_id",
+      172032
+    ],
+    [
+      "idx_custom_derivative_work_items_provider_request_key",
+      1204224
+    ],
+    [
+      "idx_custom_document_processing_exports_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_document_processing_exports_run_id",
+      40960
+    ],
+    [
+      "idx_custom_document_processing_exports_source_knowledge_base_id",
+      16384
+    ],
+    [
+      "idx_custom_document_processing_exports_source_knowledge_id",
+      16384
+    ],
+    [
+      "idx_custom_document_processing_exports_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_document_processing_exports_user_id",
+      16384
+    ],
+    [
+      "idx_custom_document_queue_external_wait",
+      4038656
+    ],
+    [
+      "idx_custom_document_queue_group_state",
+      1155072
+    ],
+    [
+      "idx_custom_document_queue_instance_health",
+      57344
+    ],
+    [
+      "idx_custom_document_queue_lease",
+      401408
+    ],
+    [
+      "idx_custom_document_queue_owner",
+      385024
+    ],
+    [
+      "idx_custom_document_queue_schedule_last_admitted",
+      16384
+    ],
+    [
+      "idx_custom_document_queue_waiting",
+      663552
+    ],
+    [
+      "idx_custom_document_split_generation",
+      16384
+    ],
+    [
+      "idx_custom_document_split_part",
+      65536
+    ],
+    [
+      "idx_custom_document_split_part_failure_budget",
+      81920
+    ],
+    [
+      "idx_custom_document_split_part_knowledge",
+      40960
+    ],
+    [
+      "idx_custom_document_split_part_lease",
+      73728
+    ],
+    [
+      "idx_custom_document_split_part_owner_boot",
+      81920
+    ],
+    [
+      "idx_custom_document_split_part_state",
+      73728
+    ],
+    [
+      "idx_custom_document_split_parts_dispatch_recovery",
+      81920
+    ],
+    [
+      "idx_custom_document_split_parts_failure_budget",
+      73728
+    ],
+    [
+      "idx_custom_document_split_plan_knowledge",
+      16384
+    ],
+    [
+      "idx_custom_document_split_plan_state",
+      32768
+    ],
+    [
+      "idx_custom_document_workflow_generation",
+      786432
+    ],
+    [
+      "idx_custom_document_workflow_span_compaction_pending",
+      204800
+    ],
+    [
+      "idx_custom_enrichment_outcomes_generation",
+      630784
+    ],
+    [
+      "idx_custom_folder_delete_scope",
+      16384
+    ],
+    [
+      "idx_custom_general_agent_artifacts_assistant_message_id",
+      16384
+    ],
+    [
+      "idx_custom_general_agent_artifacts_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_general_agent_artifacts_file_token",
+      40960
+    ],
+    [
+      "idx_custom_general_agent_artifacts_message_id",
+      40960
+    ],
+    [
+      "idx_custom_general_agent_artifacts_run_id",
+      40960
+    ],
+    [
+      "idx_custom_general_agent_artifacts_session_id",
+      32768
+    ],
+    [
+      "idx_custom_general_agent_artifacts_storage_state",
+      16384
+    ],
+    [
+      "idx_custom_general_agent_artifacts_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_general_agent_artifacts_user_id",
+      16384
+    ],
+    [
+      "idx_custom_generated_question_claims_generation",
+      876544
+    ],
+    [
+      "idx_custom_iam_organizations_code",
+      401408
+    ],
+    [
+      "idx_custom_iam_organizations_deleted_at",
+      278528
+    ],
+    [
+      "idx_custom_iam_organizations_disabled",
+      311296
+    ],
+    [
+      "idx_custom_iam_organizations_external_business_id",
+      524288
+    ],
+    [
+      "idx_custom_iam_organizations_external_id",
+      401408
+    ],
+    [
+      "idx_custom_iam_organizations_parent_external_id",
+      188416
+    ],
+    [
+      "idx_custom_iam_pending_space_member",
+      16384
+    ],
+    [
+      "idx_custom_iam_pending_space_member_grants_iam_external_user_id",
+      16384
+    ],
+    [
+      "idx_custom_iam_pending_space_member_grants_redeemed_at",
+      16384
+    ],
+    [
+      "idx_custom_iam_pending_space_member_grants_redeemed_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_iam_pending_space_member_grants_redeemed_user_id",
+      16384
+    ],
+    [
+      "idx_custom_iam_sync_runs_scope_org_id",
+      16384
+    ],
+    [
+      "idx_custom_iam_sync_runs_status",
+      16384
+    ],
+    [
+      "idx_custom_iam_sync_skipped_run_offset",
+      16384
+    ],
+    [
+      "idx_custom_iam_users_access_enabled",
+      753664
+    ],
+    [
+      "idx_custom_iam_users_deleted_at",
+      729088
+    ],
+    [
+      "idx_custom_iam_users_disabled",
+      671744
+    ],
+    [
+      "idx_custom_iam_users_external_account_id",
+      3031040
+    ],
+    [
+      "idx_custom_iam_users_external_id",
+      2916352
+    ],
+    [
+      "idx_custom_iam_users_organization_external_id",
+      1163264
+    ],
+    [
+      "idx_custom_iam_users_username",
+      2924544
+    ],
+    [
+      "idx_custom_iam_users_we_knora_user_id",
+      704512
+    ],
+    [
+      "idx_custom_kbmanager_operations_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_agent_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_caller_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_idempotency_key",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_knowledge_base_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_lease_until",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_new_knowledge_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_old_knowledge_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_run_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_session_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_source_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_state",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_type",
+      16384
+    ],
+    [
+      "idx_custom_kbmanager_operations_user_id",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folder_closure_ancestor_id",
+      40960
+    ],
+    [
+      "idx_custom_knowledge_folder_closure_depth",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folder_closure_descendant_id",
+      49152
+    ],
+    [
+      "idx_custom_knowledge_folder_closure_scope",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folder_delete_items_knowledge_id",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folder_delete_operations_root_folder_id",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folder_delete_operations_status",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folder_scope",
+      40960
+    ],
+    [
+      "idx_custom_knowledge_folder_sibling",
+      57344
+    ],
+    [
+      "idx_custom_knowledge_folder_stats_scope",
+      32768
+    ],
+    [
+      "idx_custom_knowledge_folders_delete_operation_id",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folders_delete_status",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folders_depth",
+      16384
+    ],
+    [
+      "idx_custom_knowledge_folders_path",
+      49152
+    ],
+    [
+      "idx_custom_knowledge_folders_sort_order",
+      16384
+    ],
+    [
+      "idx_custom_managed_copy",
+      540672
+    ],
+    [
+      "idx_custom_model_admission_audits_action",
+      16384
+    ],
+    [
+      "idx_custom_model_admission_audits_created_at",
+      32768
+    ],
+    [
+      "idx_custom_model_admission_audits_resource_id",
+      16384
+    ],
+    [
+      "idx_custom_model_resource_bindings_resource_pool_id",
+      57344
+    ],
+    [
+      "idx_custom_model_resource_bindings_route_fingerprint",
+      65536
+    ],
+    [
+      "idx_custom_model_resource_pools_resource_kind",
+      40960
+    ],
+    [
+      "idx_custom_model_resource_pools_state",
+      32768
+    ],
+    [
+      "idx_custom_processing_spans_v2_span_id",
+      1875968
+    ],
+    [
+      "idx_custom_processing_spans_v2_status",
+      524288
+    ],
+    [
+      "idx_custom_processing_spans_v2_updated_at",
+      13516800
+    ],
+    [
+      "idx_custom_professional_skill_name",
+      16384
+    ],
+    [
+      "idx_custom_professional_skills_creator_id",
+      16384
+    ],
+    [
+      "idx_custom_professional_skills_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_professional_skills_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_runtime_instances_boot_id",
+      180224
+    ],
+    [
+      "idx_custom_runtime_instances_last_heartbeat_at",
+      835584
+    ],
+    [
+      "idx_custom_runtime_instances_live",
+      294912
+    ],
+    [
+      "idx_custom_runtime_instances_role",
+      49152
+    ],
+    [
+      "idx_custom_runtime_instances_state",
+      57344
+    ],
+    [
+      "idx_custom_scheduled_chat_one_running",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_run_dedup",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_run_as_user_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_scheduled_at",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_session_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_status",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_task_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_runs_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_agent_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_created_by",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_enabled",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_last_session_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_next_run_at",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_run_as_user_id",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_schedule_type",
+      16384
+    ],
+    [
+      "idx_custom_scheduled_chat_tasks_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_session_read_actor",
+      131072
+    ],
+    [
+      "idx_custom_session_read_states_read_at",
+      40960
+    ],
+    [
+      "idx_custom_session_read_states_session_id",
+      57344
+    ],
+    [
+      "idx_custom_session_read_states_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_session_read_states_user_id",
+      16384
+    ],
+    [
+      "idx_custom_skill_global_name",
+      16384
+    ],
+    [
+      "idx_custom_skill_org_share",
+      16384
+    ],
+    [
+      "idx_custom_skill_org_shares_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_skill_org_shares_organization_id",
+      16384
+    ],
+    [
+      "idx_custom_skill_org_shares_skill_id",
+      16384
+    ],
+    [
+      "idx_custom_skill_org_shares_source_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_skill_tenant_name",
+      16384
+    ],
+    [
+      "idx_custom_skill_user_share",
+      16384
+    ],
+    [
+      "idx_custom_skill_user_shares_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_skill_user_shares_skill_id",
+      16384
+    ],
+    [
+      "idx_custom_skill_user_shares_source_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_skill_user_shares_target_user_id",
+      16384
+    ],
+    [
+      "idx_custom_skills_creator_id",
+      16384
+    ],
+    [
+      "idx_custom_skills_deleted_at",
+      16384
+    ],
+    [
+      "idx_custom_skills_enabled",
+      16384
+    ],
+    [
+      "idx_custom_skills_tenant_id",
+      16384
+    ],
+    [
+      "idx_custom_user_grant",
+      16384
+    ],
+    [
+      "idx_data_sources_deleted_at",
+      16384
+    ],
+    [
+      "idx_data_sources_knowledge_base_id",
+      16384
+    ],
+    [
+      "idx_data_sources_status",
+      16384
+    ],
+    [
+      "idx_data_sources_tenant_id",
+      16384
+    ],
+    [
+      "idx_data_sources_type",
+      16384
+    ],
+    [
+      "idx_derivative_dispatch_lease",
+      1933312
+    ],
+    [
+      "idx_derivative_due",
+      12050432
+    ],
+    [
+      "idx_derivative_generation",
+      729088
+    ],
+    [
+      "idx_derivative_lease",
+      2629632
+    ],
+    [
+      "idx_derivative_pool_active_window",
+      2375680
+    ],
+    [
+      "idx_derivative_pool_due",
+      9617408
+    ],
+    [
+      "idx_derivative_scope",
+      999424
+    ],
+    [
+      "idx_edges_tlid",
+      8192
+    ],
+    [
+      "idx_embed_channels_agent",
+      16384
+    ],
+    [
+      "idx_embed_channels_deleted",
+      8192
+    ],
+    [
+      "idx_embed_channels_publish_token",
+      16384
+    ],
+    [
+      "idx_embed_channels_tenant",
+      16384
+    ],
+    [
+      "idx_embeddings_chunk_id",
+      24436736
+    ],
+    [
+      "idx_embeddings_is_enabled",
+      11100160
+    ],
+    [
+      "idx_embeddings_knowledge_base_id",
+      13254656
+    ],
+    [
+      "idx_embeddings_tag_id",
+      9904128
+    ],
+    [
+      "idx_generated_question_claim_slot",
+      10444800
+    ],
+    [
+      "idx_im_channel_deleted",
+      8192
+    ],
+    [
+      "idx_im_channel_session",
+      16384
+    ],
+    [
+      "idx_im_channel_sessions_channel",
+      16384
+    ],
+    [
+      "idx_im_channel_tenant",
+      16384
+    ],
+    [
+      "idx_im_channels_agent",
+      16384
+    ],
+    [
+      "idx_im_channels_bot_identity",
+      16384
+    ],
+    [
+      "idx_im_channels_deleted",
+      8192
+    ],
+    [
+      "idx_im_channels_tenant",
+      16384
+    ],
+    [
+      "idx_kb_shares_deleted_at",
+      16384
+    ],
+    [
+      "idx_kb_shares_kb_id",
+      16384
+    ],
+    [
+      "idx_kb_shares_kb_org",
+      16384
+    ],
+    [
+      "idx_kb_shares_org_id",
+      16384
+    ],
+    [
+      "idx_kb_shares_source_tenant",
+      16384
+    ],
+    [
+      "idx_knowledge_bases_tenant_creator",
+      16384
+    ],
+    [
+      "idx_knowledge_bases_tenant_id",
+      16384
+    ],
+    [
+      "idx_knowledge_bases_tenant_vector_store",
+      16384
+    ],
+    [
+      "idx_knowledge_fanout_completion_generation",
+      540672
+    ],
+    [
+      "idx_knowledge_publication",
+      122880
+    ],
+    [
+      "idx_knowledge_tags_kb",
+      16384
+    ],
+    [
+      "idx_knowledge_tags_kb_name",
+      16384
+    ],
+    [
+      "idx_knowledge_tags_seq_id",
+      16384
+    ],
+    [
+      "idx_knowledges_base_id",
+      425984
+    ],
+    [
+      "idx_knowledges_core_retrieval",
+      581632
+    ],
+    [
+      "idx_knowledges_enable_status",
+      245760
+    ],
+    [
+      "idx_knowledges_file_name_trgm_active",
+      7544832
+    ],
+    [
+      "idx_knowledges_folder_scope",
+      1425408
+    ],
+    [
+      "idx_knowledges_parse_status",
+      286720
+    ],
+    [
+      "idx_knowledges_processing_generation",
+      1646592
+    ],
+    [
+      "idx_knowledges_processing_workflow",
+      598016
+    ],
+    [
+      "idx_knowledges_summary_status",
+      360448
+    ],
+    [
+      "idx_knowledges_tenant_id",
+      327680
+    ],
+    [
+      "idx_knowledges_tenant_kb_created_active",
+      442368
+    ],
+    [
+      "idx_knowledges_title_trgm_active",
+      7479296
+    ],
+    [
+      "idx_ktr_knowledge",
+      16384
+    ],
+    [
+      "idx_ktr_tag",
+      16384
+    ],
+    [
+      "idx_mcp_oauth_clients_service_id",
+      8192
+    ],
+    [
+      "idx_mcp_oauth_clients_tenant_svc",
+      8192
+    ],
+    [
+      "idx_mcp_oauth_tokens_principal",
+      8192
+    ],
+    [
+      "idx_mcp_oauth_tokens_service_id",
+      8192
+    ],
+    [
+      "idx_mcp_oauth_tokens_tenant_principal_svc",
+      8192
+    ],
+    [
+      "idx_mcp_oauth_tokens_user_id",
+      8192
+    ],
+    [
+      "idx_mcp_services_deleted_at",
+      16384
+    ],
+    [
+      "idx_mcp_services_enabled",
+      16384
+    ],
+    [
+      "idx_mcp_services_is_builtin",
+      16384
+    ],
+    [
+      "idx_mcp_services_tenant_id",
+      16384
+    ],
+    [
+      "idx_mcp_tool_approvals_service_id",
+      8192
+    ],
+    [
+      "idx_mcp_tool_approvals_tenant_svc_tool",
+      8192
+    ],
+    [
+      "idx_messages_agent_steps",
+      19259392
+    ],
+    [
+      "idx_messages_knowledge_id",
+      163840
+    ],
+    [
+      "idx_messages_session_id",
+      385024
+    ],
+    [
+      "idx_models_is_builtin",
+      90112
+    ],
+    [
+      "idx_models_managed_by_yaml",
+      90112
+    ],
+    [
+      "idx_models_source",
+      90112
+    ],
+    [
+      "idx_models_type",
+      90112
+    ],
+    [
+      "idx_org_join_requests_org_id",
+      16384
+    ],
+    [
+      "idx_org_join_requests_org_user_pending",
+      16384
+    ],
+    [
+      "idx_org_join_requests_status",
+      16384
+    ],
+    [
+      "idx_org_join_requests_type",
+      16384
+    ],
+    [
+      "idx_org_join_requests_user_id",
+      16384
+    ],
+    [
+      "idx_org_members_org_user_pre_plan3",
+      8192
+    ],
+    [
+      "idx_org_members_role_pre_plan3",
+      8192
+    ],
+    [
+      "idx_org_members_tenant_id_pre_plan3",
+      8192
+    ],
+    [
+      "idx_org_members_user_id_pre_plan3",
+      8192
+    ],
+    [
+      "idx_org_tenant_members_by_tenant",
+      16384
+    ],
+    [
+      "idx_org_tenant_members_role",
+      16384
+    ],
+    [
+      "idx_org_tenant_members_unique",
+      40960
+    ],
+    [
+      "idx_organizations_deleted_at",
+      16384
+    ],
+    [
+      "idx_organizations_invite_code",
+      16384
+    ],
+    [
+      "idx_organizations_owner_id",
+      16384
+    ],
+    [
+      "idx_organizations_owner_tenant",
+      16384
+    ],
+    [
+      "idx_sessions_agent_config",
+      573440
+    ],
+    [
+      "idx_sessions_agent_id",
+      73728
+    ],
+    [
+      "idx_sessions_context_config",
+      65536
+    ],
+    [
+      "idx_sessions_tenant_id",
+      73728
+    ],
+    [
+      "idx_sessions_tenant_user_pin",
+      835584
+    ],
+    [
+      "idx_sync_logs_data_source_id",
+      16384
+    ],
+    [
+      "idx_sync_logs_started_at",
+      16384
+    ],
+    [
+      "idx_sync_logs_status",
+      16384
+    ],
+    [
+      "idx_sync_logs_tenant_id",
+      16384
+    ],
+    [
+      "idx_system_settings_category",
+      16384
+    ],
+    [
+      "idx_task_dead_letters_scope",
+      1138688
+    ],
+    [
+      "idx_task_dead_letters_task_type",
+      565248
+    ],
+    [
+      "idx_task_dead_letters_tenant",
+      442368
+    ],
+    [
+      "idx_task_pending_ops_aux_owned_scan",
+      139264
+    ],
+    [
+      "idx_task_pending_ops_scope",
+      1449984
+    ],
+    [
+      "idx_task_pending_ops_scope_op_dedup",
+      2498560
+    ],
+    [
+      "idx_task_pending_ops_tenant",
+      253952
+    ],
+    [
+      "idx_task_pending_ops_wiki_commit_ready",
+      540672
+    ],
+    [
+      "idx_task_pending_ops_wiki_due_rotation",
+      1122304
+    ],
+    [
+      "idx_task_pending_ops_wiki_map_dispatch_due",
+      204800
+    ],
+    [
+      "idx_task_pending_ops_wiki_map_dispatch_pool",
+      73728
+    ],
+    [
+      "idx_task_pending_ops_wiki_map_due",
+      327680
+    ],
+    [
+      "idx_task_pending_ops_wiki_map_pending",
+      57344
+    ],
+    [
+      "idx_task_pending_ops_wiki_retry_rotation",
+      983040
+    ],
+    [
+      "idx_tenant_disabled_shared_agents_tenant_id",
+      8192
+    ],
+    [
+      "idx_tenant_invitations_invitee",
+      16384
+    ],
+    [
+      "idx_tenant_invitations_tenant",
+      16384
+    ],
+    [
+      "idx_tenant_invitations_token",
+      8192
+    ],
+    [
+      "idx_tenant_invitations_unique_pending",
+      16384
+    ],
+    [
+      "idx_tenant_members_tenant_role",
+      16384
+    ],
+    [
+      "idx_tenant_members_user",
+      40960
+    ],
+    [
+      "idx_tenant_members_user_tenant_unique",
+      40960
+    ],
+    [
+      "idx_tenants_agent_config",
+      24576
+    ],
+    [
+      "idx_tenants_api_key",
+      90112
+    ],
+    [
+      "idx_tenants_deleted_at",
+      16384
+    ],
+    [
+      "idx_tenants_status",
+      16384
+    ],
+    [
+      "idx_tiger_addr_tlid_statefp",
+      8192
+    ],
+    [
+      "idx_tiger_addr_zip",
+      8192
+    ],
+    [
+      "idx_tiger_county",
+      8192
+    ],
+    [
+      "idx_tiger_edges_countyfp",
+      8192
+    ],
+    [
+      "idx_tiger_edges_the_geom_gist",
+      8192
+    ],
+    [
+      "idx_tiger_faces_countyfp",
+      8192
+    ],
+    [
+      "idx_tiger_faces_tfid",
+      8192
+    ],
+    [
+      "idx_tiger_featnames_lname",
+      8192
+    ],
+    [
+      "idx_tiger_featnames_snd_name",
+      8192
+    ],
+    [
+      "idx_tiger_featnames_tlid_statefp",
+      8192
+    ],
+    [
+      "idx_tiger_state_the_geom_gist",
+      8192
+    ],
+    [
+      "idx_user_kb_pins_user_tenant_pinned_at",
+      8192
+    ],
+    [
+      "idx_user_resource_favorites_tenant_id",
+      16384
+    ],
+    [
+      "idx_user_resource_favorites_user_tenant_type_created_at",
+      16384
+    ],
+    [
+      "idx_users_deleted_at",
+      16384
+    ],
+    [
+      "idx_users_is_system_admin",
+      16384
+    ],
+    [
+      "idx_users_tenant_id",
+      16384
+    ],
+    [
+      "idx_users_username",
+      40960
+    ],
+    [
+      "idx_vector_stores_deleted_at",
+      8192
+    ],
+    [
+      "idx_vector_stores_engine_type",
+      8192
+    ],
+    [
+      "idx_vector_stores_name_tenant",
+      8192
+    ],
+    [
+      "idx_vector_stores_tenant_id",
+      8192
+    ],
+    [
+      "idx_web_search_providers_deleted_at",
+      16384
+    ],
+    [
+      "idx_web_search_providers_provider",
+      16384
+    ],
+    [
+      "idx_web_search_providers_tenant_id",
+      32768
+    ],
+    [
+      "idx_wiki_folders_deleted_at",
+      229376
+    ],
+    [
+      "idx_wiki_folders_parent",
+      409600
+    ],
+    [
+      "idx_wiki_folders_parent_name",
+      3817472
+    ],
+    [
+      "idx_wiki_log_entries_kb_id_desc",
+      475136
+    ],
+    [
+      "idx_wiki_log_entries_tenant_id",
+      65536
+    ],
+    [
+      "idx_wiki_page_issues_knowledge_base_id",
+      8192
+    ],
+    [
+      "idx_wiki_page_issues_slug",
+      8192
+    ],
+    [
+      "idx_wiki_page_issues_status",
+      8192
+    ],
+    [
+      "idx_wiki_page_issues_tenant_id",
+      8192
+    ],
+    [
+      "idx_wiki_pages_deleted_at",
+      131072
+    ],
+    [
+      "idx_wiki_pages_folder",
+      483328
+    ],
+    [
+      "idx_wiki_pages_folder_id",
+      311296
+    ],
+    [
+      "idx_wiki_pages_fulltext",
+      47497216
+    ],
+    [
+      "idx_wiki_pages_kb_id",
+      180224
+    ],
+    [
+      "idx_wiki_pages_kb_slug",
+      1327104
+    ],
+    [
+      "idx_wiki_pages_page_type",
+      188416
+    ],
+    [
+      "idx_wiki_pages_parent_slug",
+      180224
+    ],
+    [
+      "idx_wiki_pages_source_refs",
+      614400
+    ],
+    [
+      "idx_wiki_pages_source_refs_text",
+      5464064
+    ],
+    [
+      "idx_wiki_pages_tenant_id",
+      139264
+    ],
+    [
+      "idx_wiki_pages_title_trgm",
+      1884160
+    ],
+    [
+      "idx_wiki_pages_tree",
+      2334720
+    ],
+    [
+      "im_channel_sessions_pkey",
+      16384
+    ],
+    [
+      "im_channels_pkey",
+      16384
+    ],
+    [
+      "kb_shares_pkey",
+      16384
+    ],
+    [
+      "kbmanager_active_replacement",
+      8192
+    ],
+    [
+      "knowledge_bases_pkey",
+      40960
+    ],
+    [
+      "knowledge_fanout_completions_pkey",
+      2375680
+    ],
+    [
+      "knowledge_tag_relations_pkey",
+      16384
+    ],
+    [
+      "knowledge_tags_pkey",
+      16384
+    ],
+    [
+      "knowledges_pkey",
+      163840
+    ],
+    [
+      "knowledges_pkey",
+      630784
+    ],
+    [
+      "knowledges_title_trgm",
+      573440
+    ],
+    [
+      "layer_pkey",
+      8192
+    ],
+    [
+      "layer_schema_name_table_name_feature_column_key",
+      8192
+    ],
+    [
+      "loader_lookuptables_pkey",
+      16384
+    ],
+    [
+      "loader_platform_pkey",
+      16384
+    ],
+    [
+      "loader_variables_pkey",
+      16384
+    ],
+    [
+      "mcp_oauth_clients_pkey",
+      8192
+    ],
+    [
+      "mcp_oauth_tokens_pkey",
+      8192
+    ],
+    [
+      "mcp_services_pkey",
+      16384
+    ],
+    [
+      "mcp_tool_approvals_pkey",
+      8192
+    ],
+    [
+      "messages_pkey",
+      1064960
+    ],
+    [
+      "models_pkey",
+      499712
+    ],
+    [
+      "organization_join_requests_pkey",
+      16384
+    ],
+    [
+      "organization_members_pkey",
+      8192
+    ],
+    [
+      "organization_tenant_members_pkey",
+      40960
+    ],
+    [
+      "organizations_pkey",
+      16384
+    ],
+    [
+      "pagc_gaz_pkey",
+      40960
+    ],
+    [
+      "pagc_lex_pkey",
+      114688
+    ],
+    [
+      "pagc_rules_pkey",
+      221184
+    ],
+    [
+      "pg_ivm_immv_pkey",
+      8192
+    ],
+    [
+      "pk_tabblock20",
+      8192
+    ],
+    [
+      "pk_tiger_county",
+      8192
+    ],
+    [
+      "pk_tiger_state",
+      8192
+    ],
+    [
+      "pk_tiger_zcta5_zcta5ce",
+      8192
+    ],
+    [
+      "place_lookup_name_idx",
+      8192
+    ],
+    [
+      "place_lookup_pkey",
+      8192
+    ],
+    [
+      "place_lookup_state_idx",
+      8192
+    ],
+    [
+      "place_pkey",
+      8192
+    ],
+    [
+      "schema_migrations_pkey",
+      16384
+    ],
+    [
+      "secondary_unit_lookup_abbrev_idx",
+      16384
+    ],
+    [
+      "secondary_unit_lookup_pkey",
+      16384
+    ],
+    [
+      "sessions_pkey",
+      319488
+    ],
+    [
+      "spatial_ref_sys_pkey",
+      212992
+    ],
+    [
+      "state_lookup_abbrev_key",
+      16384
+    ],
+    [
+      "state_lookup_name_key",
+      16384
+    ],
+    [
+      "state_lookup_pkey",
+      16384
+    ],
+    [
+      "state_lookup_statefp_key",
+      16384
+    ],
+    [
+      "street_type_lookup_abbrev_idx",
+      32768
+    ],
+    [
+      "street_type_lookup_pkey",
+      40960
+    ],
+    [
+      "sync_logs_pkey",
+      16384
+    ],
+    [
+      "system_settings_key_key",
+      16384
+    ],
+    [
+      "system_settings_pkey",
+      16384
+    ],
+    [
+      "tabblock_pkey",
+      8192
+    ],
+    [
+      "task_dead_letters_pkey",
+      188416
+    ],
+    [
+      "task_pending_ops_pkey",
+      589824
+    ],
+    [
+      "tenant_disabled_shared_agents_pkey",
+      8192
+    ],
+    [
+      "tenant_invitations_pkey",
+      16384
+    ],
+    [
+      "tenant_members_pkey",
+      16384
+    ],
+    [
+      "tenants_pkey",
+      32768
+    ],
+    [
+      "tige_cousub_the_geom_gist",
+      8192
+    ],
+    [
+      "tiger_faces_the_geom_gist",
+      8192
+    ],
+    [
+      "tiger_place_the_geom_gist",
+      8192
+    ],
+    [
+      "topology_name_key",
+      8192
+    ],
+    [
+      "topology_pkey",
+      8192
+    ],
+    [
+      "tract_pkey",
+      8192
+    ],
+    [
+      "uidx_county_gid",
+      8192
+    ],
+    [
+      "uidx_cousub_gid",
+      8192
+    ],
+    [
+      "uidx_tiger_place_gid",
+      8192
+    ],
+    [
+      "uidx_tiger_state_gid",
+      8192
+    ],
+    [
+      "uidx_tiger_state_stusps",
+      8192
+    ],
+    [
+      "uq_custom_derivative_provider_call",
+      737280
+    ],
+    [
+      "uq_custom_general_agent_artifact_delivery",
+      65536
+    ],
+    [
+      "uq_custom_generated_question_claims_slot",
+      10461184
+    ],
+    [
+      "uq_derivative_item",
+      1433600
+    ],
+    [
+      "uq_org_join_requests_pending_per_tenant",
+      16384
+    ],
+    [
+      "uq_task_pending_ops_knowledge_aux_owned",
+      1974272
+    ],
+    [
+      "uq_task_pending_ops_wiki_ingest",
+      237568
+    ],
+    [
+      "uq_task_pending_ops_wiki_retract",
+      770048
+    ],
+    [
+      "uq_wiki_log_entries_source_op_id",
+      188416
+    ],
+    [
+      "user_kb_pins_pkey",
+      8192
+    ],
+    [
+      "user_resource_favorites_pkey",
+      16384
+    ],
+    [
+      "users_pkey",
+      40960
+    ],
+    [
+      "users_username_key",
+      40960
+    ],
+    [
+      "vector_stores_pkey",
+      8192
+    ],
+    [
+      "web_search_providers_pkey",
+      49152
+    ],
+    [
+      "wiki_folders_pkey",
+      1916928
+    ],
+    [
+      "wiki_log_entries_pkey",
+      106496
+    ],
+    [
+      "wiki_page_issues_pkey",
+      8192
+    ],
+    [
+      "wiki_pages_pkey",
+      655360
+    ],
+    [
+      "zip_lookup_base_pkey",
+      8192
+    ],
+    [
+      "zip_lookup_pkey",
+      8192
+    ],
+    [
+      "zip_state_loc_pkey",
+      8192
+    ],
+    [
+      "zip_state_pkey",
+      8192
+    ]
+  ]
+}

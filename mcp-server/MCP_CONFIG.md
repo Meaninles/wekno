@@ -1,6 +1,9 @@
 # 使用 uv 运行 WeKnora MCP 服务器
 
 > 更推荐使用`uv`来运行基于python的MCP服务。
+>
+> 生产 API 基地址统一为 `https://knora.moutai.com.cn/api/v1`。配置中的
+> `<TENANT_API_KEY>` 仅为占位符；真实密钥应由客户端环境变量/密钥管理注入。
 
 ## 1. 安装 uv
 
@@ -33,8 +36,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
       ],
       "command": "uv",
       "env": {
-        "WEKNORA_API_KEY": "your_api_key_here",
-        "WEKNORA_BASE_URL": "http://localhost:8080/api/v1"
+        "WEKNORA_API_KEY": "<TENANT_API_KEY>",
+        "WEKNORA_BASE_URL": "https://knora.moutai.com.cn/api/v1"
       }
     }
   }
@@ -57,8 +60,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
         "run_server.py"
       ],
       "env": {
-        "WEKNORA_API_KEY": "your_api_key_here",
-        "WEKNORA_BASE_URL": "http://localhost:8080/api/v1"
+        "WEKNORA_API_KEY": "<TENANT_API_KEY>",
+        "WEKNORA_BASE_URL": "https://knora.moutai.com.cn/api/v1"
       }
     }
   }
@@ -81,8 +84,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
         "run_server.py"
       ],
       "env": {
-        "WEKNORA_API_KEY": "your_api_key_here",
-        "WEKNORA_BASE_URL": "http://localhost:8080/api/v1"
+        "WEKNORA_API_KEY": "<TENANT_API_KEY>",
+        "WEKNORA_BASE_URL": "https://knora.moutai.com.cn/api/v1"
       }
     }
   }
@@ -105,8 +108,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
         "run_server.py"
       ],
       "env": {
-        "WEKNORA_API_KEY": "your_api_key_here",
-        "WEKNORA_BASE_URL": "http://localhost:8080/api/v1"
+        "WEKNORA_API_KEY": "<TENANT_API_KEY>",
+        "WEKNORA_BASE_URL": "https://knora.moutai.com.cn/api/v1"
       }
     }
   }

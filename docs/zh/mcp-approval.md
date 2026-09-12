@@ -1,5 +1,8 @@
 # MCP 工具人工审核（危险调用）
 
+> 生产入口为 `https://knora.moutai.com.cn`，API 基地址为
+> `https://knora.moutai.com.cn/api/v1`。下文只使用示例配置，不写入真实密钥或服务地址。
+
 对应需求：智能体调用 MCP 工具前可中断，待人工确认后再执行（GitHub #1173）。
 
 ## 行为说明

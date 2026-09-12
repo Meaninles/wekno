@@ -6,7 +6,7 @@
 恢复输入区的 `last_request_state`。后者只是上次提问时的 UI 资源快照，不是后端运行
 时配置；真正的知识库、模型、检索策略仍在每次问答请求中由 Agent/请求体决定。
 
-对话分享属于二开扩展能力，接口独立挂载在 `/custom/chat-share/*`，详见 [chat-share.md](./chat-share.md)。
+对话分享属于扩展能力，接口独立挂载在 `/custom/chat-share/*`，详见 [chat-share.md](./chat-share.md)。
 
 | 方法   | 路径                                       | 描述                          |
 | ------ | ------------------------------------------ | ----------------------------- |
@@ -22,8 +22,8 @@
 | POST   | `/sessions/:session_id/pin`                | 置顶会话                      |
 | DELETE | `/sessions/:id/pin`                        | 取消置顶会话                  |
 | GET    | `/sessions/continue-stream/:session_id`    | 继续未完成的流式响应          |
-| POST   | `/custom/session-state/status`             | 批量查询会话展示状态（二开）  |
-| POST   | `/custom/session-state/sessions/:id/read`  | 标记会话已读（二开）          |
+| POST   | `/custom/session-state/status`             | 批量查询会话展示状态（扩展接口）  |
+| POST   | `/custom/session-state/sessions/:id/read`  | 标记会话已读（扩展接口）          |
 
 > **路由命名说明**：置顶接口的 POST 与 DELETE 使用了不同的路径参数名（POST 用 `:session_id`，DELETE 用 `:id`）。这是由于 gin 路由器为每个 HTTP 方法维护独立的 radix tree，且既有树中的通配符命名不同，必须保留以避免注册时的 `wildcard conflicts` panic。两者语义上都指会话 ID。
 
@@ -32,8 +32,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/sessions' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/sessions' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "我的新对话",
@@ -83,8 +83,8 @@ curl --location 'http://localhost:8080/api/v1/sessions' \
 **请求 - 按 ID 列表删除**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/batch' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/sessions/batch' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "ids": [
@@ -97,8 +97,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/batch' \
 **请求 - 删除所有会话**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/batch' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/sessions/batch' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "delete_all": true
@@ -128,8 +128,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/batch' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -168,8 +168,8 @@ curl --location 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-f
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/sessions?page=1&page_size=10&keyword=AI&source=web' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/sessions?page=1&page_size=10&keyword=AI&source=web' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -215,12 +215,12 @@ curl --location 'http://localhost:8080/api/v1/sessions?page=1&page_size=10&keywo
 
 ## POST `/custom/session-state/status` - 批量查询会话展示状态
 
-二开接口，用于 Web 侧边栏和移动端会话抽屉展示未读提示、最后一条助手消息和生成中状态。它不修改会话内容，也不替代 `/sessions` 列表接口。
+扩展接口用于 Web 侧边栏和移动端会话抽屉展示未读提示、最后一条助手消息和生成中状态。它不修改会话内容，也不替代 `/sessions` 列表接口。
 
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/custom/session-state/status' \
+curl --location 'https://knora.moutai.com.cn/api/v1/custom/session-state/status' \
 --header 'Authorization: Bearer <jwt>' \
 --header 'Content-Type: application/json' \
 --data '{
@@ -258,12 +258,12 @@ curl --location 'http://localhost:8080/api/v1/custom/session-state/status' \
 
 ## POST `/custom/session-state/sessions/:id/read` - 标记会话已读
 
-二开接口，用于记录当前访问者对指定会话的已读水位。
+扩展接口用于记录当前访问者对指定会话的已读水位。
 
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/custom/session-state/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f/read' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/custom/session-state/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f/read' \
 --header 'Authorization: Bearer <jwt>' \
 --header 'Content-Type: application/json' \
 --data '{}'
@@ -297,8 +297,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/custom/session-stat
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "WeKnora 技术讨论",
@@ -345,8 +345,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/sessions/411d6b70-9a
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -372,8 +372,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/411d6b70
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/messages' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/messages' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -399,8 +399,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/ceb9babb
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/generate_title' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/generate_title' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
   "messages": [
@@ -444,8 +444,8 @@ curl --location 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-f
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/sessions/7c966c74-610e-4516-8d5b-05e14b2e4ee0/stop' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/sessions/7c966c74-610e-4516-8d5b-05e14b2e4ee0/stop' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "message_id": "ebbf7e53-dfe6-44d5-882f-36a4104910b5"
@@ -491,8 +491,8 @@ curl --location 'http://localhost:8080/api/v1/sessions/7c966c74-610e-4516-8d5b-0
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/pin' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/pin' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **路径参数**:
@@ -519,8 +519,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/sessions/ceb9babb-1
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/pin' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/sessions/ceb9babb-1e30-41d7-817d-fd584954304b/pin' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **路径参数**:
@@ -559,8 +559,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/sessions/ceb9babb
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/sessions/continue-stream/ceb9babb-1e30-41d7-817d-fd584954304b?message_id=b8b90eeb-7dd5-4cf9-81c6-5ebcbd759451' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/sessions/continue-stream/ceb9babb-1e30-41d7-817d-fd584954304b?message_id=b8b90eeb-7dd5-4cf9-81c6-5ebcbd759451' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 

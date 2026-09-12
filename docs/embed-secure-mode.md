@@ -1,5 +1,9 @@
 # Embed 安全模式
 
+> 本文按当前代码与生产配置编写。WeKnora 生产地址固定使用
+> `https://knora.moutai.com.cn`；`localhost` 仅表示本地开发环境，业务站点示例域名仍是
+> 外部业务方占位符。
+
 > **一句话**：长期密钥（发布 Token `em_…`）只放在**你自己的服务器**；访客浏览器里只有 30 分钟有效的短时令牌（`ems_…`）。
 
 当前产品界面品牌为“茅台智汇”，挂件默认标题为“智汇助手”；前端 SDK 继续保留
@@ -67,7 +71,7 @@
 **调 exchange 的约定**：
 
 ```http
-POST https://<weknora-host>/api/v1/embed/<channel_id>/exchange
+POST https://knora.moutai.com.cn/api/v1/embed/<channel_id>/exchange
 Authorization: Embed <发布 Token em_…>
 Origin: https://<你的业务站点>    ← 须与渠道白名单一致，否则 403
 ```
@@ -80,12 +84,12 @@ Origin: https://<你的业务站点>    ← 须与渠道白名单一致，否则
 
 ## 服务端示例
 
-以下 `<WEKNORA_HOST>`、`<CHANNEL_ID>` 替换为实际值；发布 Token 放环境变量 `WEKNORA_PUBLISH_TOKEN`，**不要**写进前端。
+以下 `<CHANNEL_ID>` 替换为实际值；发布 Token 放环境变量 `WEKNORA_PUBLISH_TOKEN`，**不要**写进前端。
 
 ### Node.js（Express）
 
 ```javascript
-const WEKNORA_BASE = 'https://<WEKNORA_HOST>';
+const WEKNORA_BASE = 'https://knora.moutai.com.cn';
 const CHANNEL_ID = '<CHANNEL_ID>';
 const ALLOWED_ORIGIN = 'https://shop.example.com'; // 与渠道白名单一致
 
@@ -120,7 +124,7 @@ func embedTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req, _ := http.NewRequest(http.MethodPost,
-		"https://<WEKNORA_HOST>/api/v1/embed/<CHANNEL_ID>/exchange", nil)
+		"https://knora.moutai.com.cn/api/v1/embed/<CHANNEL_ID>/exchange", nil)
 	req.Header.Set("Authorization", "Embed "+os.Getenv("WEKNORA_PUBLISH_TOKEN"))
 	req.Header.Set("Origin", "https://shop.example.com") // 与渠道白名单一致
 	resp, err := http.DefaultClient.Do(req)

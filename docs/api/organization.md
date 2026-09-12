@@ -15,7 +15,7 @@
 
 公共说明：
 - 所有路径前缀为 `/api/v1`
-- 鉴权头：`X-API-Key: sk-xxxxx`（或 `Authorization: Bearer ...`）
+- 鉴权头：`X-API-Key: <TENANT_API_KEY>`（或 `Authorization: Bearer ...`）
 - 错误响应统一为 `{ "success": false, "error": "..." }`，HTTP 状态码遵循 RESTful 语义
 - 角色 (`OrgMemberRole`) 取值：`owner` / `admin` / `editor` / `viewer`
 - 共享权限 (`permission`) 取值：`viewer` / `editor`（创建时通常只允许这两个）
@@ -104,8 +104,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "AI 技术团队",
@@ -151,8 +151,8 @@ curl --location 'http://localhost:8080/api/v1/organizations' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -206,8 +206,8 @@ curl --location 'http://localhost:8080/api/v1/organizations' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/preview/ABC123XY' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/preview/ABC123XY' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -243,8 +243,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/preview/ABC123XY' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/join' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/join' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "invite_code": "ABC123XY"
@@ -268,8 +268,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/join' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/join-request' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/join-request' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "invite_code": "ABC123XY",
@@ -308,8 +308,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/join-request' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/search?q=AI&limit=10' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/search?q=AI&limit=10' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -350,8 +350,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/search?q=AI&limit=10
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/join-by-id' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/join-by-id' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "organization_id": "org-00000001",
@@ -373,8 +373,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/join-by-id' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -426,8 +426,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001' \
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/organizations/org-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "description": "专注于 AI 技术研究与知识管理（更新）",
@@ -445,8 +445,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/organizations/org-00
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/organizations/org-00000001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -462,8 +462,8 @@ owner 不能离开自己的组织，需先转让所有权或删除组织。
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/organizations/org-00000001/leave' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/leave' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -486,8 +486,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/organizations/org-0
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/organizations/org-00000001/request-upgrade' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/request-upgrade' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "requested_role": "admin",
@@ -518,8 +518,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/organizations/org-0
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/organizations/org-00000001/invite-code' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/invite-code' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -549,8 +549,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/organizations/org-0
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/search-users?q=zhang&limit=10' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/search-users?q=zhang&limit=10' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -583,8 +583,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/search-
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/invite' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/invite' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "user_id": "user-00000002",
@@ -603,8 +603,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/invite'
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/members' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/members' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -658,8 +658,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/members
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/organizations/org-00000001/members/user-00000002' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/members/user-00000002' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{ "role": "admin" }'
 ```
@@ -677,8 +677,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/organizations/org-00
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/organizations/org-00000001/members/user-00000002' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/members/user-00000002' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -698,8 +698,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/organizations/org
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/join-requests' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/join-requests' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -761,8 +761,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/join-re
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/organizations/org-00000001/join-requests/jr-00000001/review' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/join-requests/jr-00000001/review' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "approved": true,
@@ -795,8 +795,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/organizations/org-00
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/shares' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/shares' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "organization_id": "org-00000001",
@@ -828,8 +828,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/shares
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/shares' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/shares' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -880,8 +880,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/shares
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/shares/kbs-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/shares/kbs-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{ "permission": "editor" }'
 ```
@@ -897,8 +897,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/shares/kbs-00000001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/shares/kbs-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -914,8 +914,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/k
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/shares' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/shares' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: 结构同 `GET /knowledge-bases/:id/shares`。
@@ -931,8 +931,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/shares'
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/shared-knowledge-bases' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/shared-knowledge-bases' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -987,8 +987,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/shared-
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agents/agent-00000001/shares' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/agents/agent-00000001/shares' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "organization_id": "org-00000001",
@@ -1018,8 +1018,8 @@ curl --location 'http://localhost:8080/api/v1/agents/agent-00000001/shares' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agents/agent-00000001/shares' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/agents/agent-00000001/shares' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -1052,8 +1052,8 @@ curl --location 'http://localhost:8080/api/v1/agents/agent-00000001/shares' \
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/agents/agent-00000001/shares/as-00000001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/agents/agent-00000001/shares/as-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -1069,8 +1069,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/agents/agent-0000
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/agent-shares' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/agent-shares' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -1112,8 +1112,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/agent-s
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/shared-agents' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/organizations/org-00000001/shared-agents' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -1154,8 +1154,8 @@ curl --location 'http://localhost:8080/api/v1/organizations/org-00000001/shared-
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/shared-knowledge-bases' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/shared-knowledge-bases' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -1188,8 +1188,8 @@ curl --location 'http://localhost:8080/api/v1/shared-knowledge-bases' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/shared-agents' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/shared-agents' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:

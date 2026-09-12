@@ -1,175 +1,103 @@
 # 生产集群无 RWX 部署方案
 
-> 已落地基线，核对日期：2026-08-06。本文说明为什么现有五个节点无需新增资源也能
-> 承载当前拓扑。精确模型并发和发布边界以
-> [当前生产实现与部署基线](./当前生产实现与部署基线.md)为准。
+> 代码与配置核对日期：2026-09-13。本文只根据当前生产 Helm 模板和运行时代码描述
+> 角色与边界，不公开节点 IP、内部 Service、对象存储桶、模型地址、文件路径、命名空间
+> 或凭据。生产访问统一为 [https://knora.moutai.com.cn](https://knora.moutai.com.cn)。
 
 ## 1. 结论
 
-生产不使用 RWX，也不新增磁盘、节点、数据库或模型实例。持久文件进入私有 OBS，
-需要 POSIX 随机读写的解析/Office 工作区使用 `.1/.2/.7` 现有数据盘上的隔离
-hostPath scratch。PostgreSQL、Neo4j 与 Redis 保存各自持久或可恢复状态。
+当前生产高可用模板不依赖共享 RWX 文件系统。持久文件使用受保护的对象存储；需要
+POSIX 随机读写的解析、Office 转换和 Agent 工作目录使用按角色、Pod 和任务隔离的
+临时本地工作区。PostgreSQL、Redis 和 Neo4j 分别承担业务事实、队列/租约状态和图谱
+数据。
 
-当前不是“单体 app ×3”：同一个 app 镜像已经拆为 API、parse、derivative、wiki 和
-maintenance 角色。每个角色按真实 CPU、内存、连接和下游并发单独配置，避免 API
-副本数无意放大解析和模型并发。
+当前不是“单体 app ×3”。同一应用镜像按 API、解析、衍生、Wiki、维护和迁移角色运行，
+Agent Runtime、DocReader、前端和移动端也独立编排；每个角色的副本和并发以生产模板为准。
 
-## 2. 现有节点分配
+## 2. 生产角色基线
 
-| 节点 | 主要工作负载 | request 合计 | request 占用 |
-|---|---|---:|---:|
-| `10.14.201.1` | API、parse、derivative、maintenance、DocReader、两个 Agent、两种 Web | 4130m / 8400Mi | 52.2% CPU / 29.5% 内存 |
-| `10.14.201.2` | API、parse、wiki、maintenance、DocReader、两个 Agent、两种 Web | 4130m / 8400Mi | 52.2% / 29.5% |
-| `10.14.201.7` | API、parse、derivative、wiki、DocReader | 3580m / 6800Mi | 45.3% / 23.9% |
-| `10.14.201.6` | PostgreSQL 与集群基础设施 | 5110m / 11316Mi | 64.6% / 86% |
-| `10.14.201.54` | Neo4j 与集群基础设施 | 2610m / 3636Mi | 现有固定预算 |
+| 角色 | 当前生产副本/执行方式 | 主要职责 |
+|---|---:|---|
+| API | 3 | API、会话、知识库、智能体和管理接口 |
+| parse | 3 | 文档解析和解析任务消费 |
+| derivative | 2 | 衍生内容、切片等后台任务 |
+| wiki | 2 | Wiki 索引及地图任务 |
+| maintenance | 2 | 清理、恢复和维护任务 |
+| migration | 1 次性 | 数据库迁移，完成后退出 |
+| DocReader | 3 | 文档读取基础设施与运行时读取任务 |
+| Agent Runtime | 2 | Agent 代码/产物任务的受控运行时 |
+| frontend | 2 | Web 前端服务 |
+| mobileWeb | 2 | 移动端前端服务 |
 
-`.6` 内存 request 已接近 86%，不能再放置新应用 worker。主要弹性和离线任务使用
-`.1/.2/.7` 的余量。limit 可以高于节点容量以允许短时突发，但 request 必须保证
-调度可落地；压测时监控实际 CPU、RSS、OOM 和节点 eviction。
+基础数据库、缓存、图数据库、对象存储和入口控制器属于独立基础设施；它们的生产
+连接信息由受保护配置提供，不在本文中展开。
 
-## 3. 工作负载与资源
+## 3. 工作负载与资源边界
 
-| 组件 | 副本与分布 | request/副本 | limit/副本 | 本地并发 |
-|---|---|---:|---:|---:|
-| API | `.1/.2/.7` | 500m / 1280Mi | 1500m / 3Gi | DB 6 |
-| parse-worker | `.1/.2/.7` | 1C / 2Gi | 3C / 5Gi | 文档 4，多模态 4，embedding 12 |
-| DocReader | `.1/.2/.7` | 750m / 1Gi | 4C / 4Gi | gRPC worker 4 |
-| derivative-worker | `.1/.7` | 500m / 1Gi | 1500m / 2Gi | consumer 18 |
-| wiki-worker | `.2/.7` | 500m / 1Gi | 1500m / 2Gi | consumer 6 |
-| maintenance | `.1/.2` | 150m / 384Mi | 750m / 1Gi | DB 3，主备 |
-| general-agent | `.1/.2` | 250m / 768Mi | 1500m / 2Gi | 运行固定单 Pod |
-| document-agent | `.1/.2` | 500m / 1280Mi | 2500m / 4Gi | 运行固定单 Pod |
-| frontend | `.1/.2` | 100m / 128Mi | 500m / 512Mi | 无状态 |
-| mobile-web | `.1/.2` | 50m / 64Mi | 300m / 512Mi | 无状态 |
+- API、解析、衍生、Wiki 和维护通过不同角色消费对应队列，避免 API 副本数直接放大
+  解析、图谱或模型并发。
+- DocReader 以独立进程/运行时处理文档，异常任务超时后必须终止对应进程树；新任务
+  不应被已超时任务永久占用。
+- Agent Runtime 当前为 2 个生产副本，运行时并发和工作区由 Helm 配置及任务预算共同
+  约束；不能以增加线程、Pod 或共享目录的方式绕过预算。
+- 入口生产配置允许公共知识源最大 2048 MiB，反向代理请求体最大 2304 MiB；普通文件
+  和 DocReader 解析文件最大 50 MiB，内部产物上传代理最大 128 MiB。
+- 这些上限是不同链路的边界，不应互相替代。超过限制时应先拆分文件或调整受控配置，
+  不要只修改客户端 Content-Length。
 
-API、parse-worker 和 DocReader 在 `.1/.2/.7` 各一个；双副本角色跨主机。调度以
-hostname topology spread、anti-affinity 和节点亲和表达，不用不可恢复的 `nodeName`
-硬绑定。大工作区角色滚动时使用 `maxSurge=0,maxUnavailable=1`，避免瞬时重复占盘。
+## 4. 无 RWX 存储设计
 
-## 4. 容量匹配
-
-### 4.1 文档链路
-
-```text
-parse-worker:       3 × 4  = 12 个完整文档工作流
-DocReader:          3 × 4  = 12 个 gRPC 解析请求
-multimodal:         3 × 4  = 12 个本地 consumer
-embedding local:    3 × 12 = 36 个本地执行窗口
-derivative:         2 × 18 = 36 个 consumer
-wiki:               2 × 6  = 12 个 consumer
-```
-
-1000 份文档可以持久排队，但核心链路只并行 12 份完整工作流。DocReader、VLM、
-Embedding、Rerank 和聊天模型再受实际资源池全集群上限控制；不能通过增加线程绕过。
-
-DocReader 每个请求在独立进程组运行，600 秒硬超时后终止整个进程树。单个异常 PDF、
-Java/Office 子进程或已有 gRPC 长连接不能永久占住解析服务。readiness 摘除异常 Pod
-后仍要让调用端旧连接失效，验收以健康 endpoint 收到新请求和队列持续推进为准。
-
-### 4.2 模型和队列
-
-主要聊天池为 Qwen 27B `32 running + 36 waiting`、V4 Flash INT8
-`16 running + 16 waiting`，合计 48 执行、52 等待、100 接纳。Embedding/Rerank
-各 64，VLM 16，Omni 8。衍生/Wiki 权重 3:1、prefetch 2、容量等待 30 秒、派发
-租约 120 秒。精确字段见 `deploy/production/concurrency-plan.json`。
-
-### 4.3 PostgreSQL
-
-```text
-API             3 × 6 = 18
-parse           3 × 5 = 15
-derivative      2 × 4 =  8
-wiki            2 × 4 =  8
-maintenance     2 × 3 =  6
-steady                  55
-migration overlap        3
-maximum                 58 / 100
-```
-
-普通 Deployment 必须 `AUTO_MIGRATE=false`。唯一迁移 Job 最多使用 3 个连接，完成并
-归档证据后清理。
-
-## 5. 无 RWX 存储设计
-
-| 数据 | 位置 | 语义 |
+| 数据/目录 | 存储语义 | 处理要求 |
 |---|---|---|
-| 原始知识文件 | 私有 OBS | 持久、停机迁移时不变化 |
-| 解析图片与衍生对象 | 私有 OBS | 持久、租户隔离 |
-| Agent 最终产物 | 私有 OBS | 持久、鉴权下载 |
-| 业务/工作流/chunk/向量 | PostgreSQL/ParadeDB | 持久事实来源 |
-| 实体关系 | Neo4j | 持久图谱 |
-| 投递/流/准入 | Redis | 可恢复运行状态 |
-| 解析/Office 工作目录 | hostPath scratch | 可丢弃、按角色和 Pod 隔离 |
+| 原始知识文件 | 受保护对象存储 | 持久保存，按租户和知识条目鉴权 |
+| 解析图片、衍生对象和 Agent 产物 | 受保护对象存储 | 完成持久化后才允许业务侧读取 |
+| 业务、工作流、切片、向量 | PostgreSQL/ParadeDB | 以数据库事实为准 |
+| 实体关系 | Neo4j | 由图谱开关和异步任务控制 |
+| 队列、流、派发和租约 | Redis | 只保存可恢复运行状态，不能替代业务事实 |
+| 解析/Office/Agent 临时工作区 | Pod 本地 scratch | 可丢弃、按角色/Pod/任务隔离 |
 
-当前 scratch 根目录：
+临时工作区只用于 PDF 渲染、Office 转换、解压、SDK workspace 等可重建内容。完成的
+原始文件和产物必须先提交持久存储，再允许其他副本读取。对象存储不应被挂载成 POSIX
+工作目录，因为随机读写、rename、锁和目录遍历语义不同。
 
-```text
-/mnt/weknora-data/weknora-v2-scratch/api
-/mnt/weknora-data/weknora-v2-scratch/parse
-/mnt/weknora-data/weknora-v2-scratch/docreader
-/mnt/weknora-data/weknora-v2-scratch/derivative
-/mnt/weknora-data/weknora-v2-scratch/wiki
-/mnt/weknora-data/weknora-v2-scratch/general-agent
-/mnt/weknora-data/weknora-v2-scratch/document-agent
-```
+Kubernetes Agent Runtime 使用按任务划分的静态工作区/子路径；不得让多个运行实例写
+入同一任务目录。具体 PVC、挂载点和 Pod 标识属于部署内部数据，不应复制到公共文档。
 
-具体 Pod 路径继续包含 namespace、角色或 Pod UID，禁止多个运行实例写同一工作目录。
-目录只用于可重建中间文件：PDF 渲染、Office 转换、解压和 SDK workspace。完成产物
-必须先提交 OBS，随后任一 Pod 才能读取。
+## 5. 调度、恢复与发布
 
-对象存储不能挂载成 POSIX 工作目录。S3/OBS 对随机小文件、rename、文件锁和目录遍历
-语义不同，用它替代本地 scratch 会造成性能与正确性问题。
+1. 使用不可变镜像摘要和受保护的生产 values；不要用 `latest` 推断实际运行版本。
+2. 迁移只由一次性 migration 角色执行，普通业务角色不应在启动时重复迁移。
+3. 发布前离线渲染并校验角色、副本、入口、容量、安全上下文和探针，再进行受控更新。
+4. 发布后检查 API、队列消费者、DocReader、Agent Runtime、Wiki、对象存储和前端资源。
+5. 解析、衍生、Wiki 和维护任务使用状态、租约和代际校验恢复；不能以容器退出或单次
+   HTTP 200 代替业务任务完成判断。
+6. 回滚同时评估镜像、数据库迁移、队列消息、对象产物和配置；只回滚 Pod 不等于完整
+   回滚。
 
-## 6. 对象与回滚
+生产部署模板当前要求受控 apply，并明确不允许使用 namespace 级 `--prune` 误删入口
+或基础设施。任何入口控制器、Ingress、Service 或集群级组件的变更都必须单独审批。
 
-私有对象按用途使用互不重叠的部署/namespace UUID 前缀：
+## 6. 验收清单
 
-```text
-weknora/__weknora_private_knowledge_objects_v1__/deployment/<deployment>/namespace/<uuid>/
-weknora/__weknora_private_agent_artifacts_v1__/deployment/<deployment>/namespace/<uuid>/
-weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/<deployment>/namespace/<uuid>/
-```
+- 用生产域名验证 Web、API、移动端、分享、嵌入式和 IM 回调路径；移动端路径为
+  `/mobile/`，不使用 5178 端口。
+- 确认三个 API、三个 parse、两个 derivative、两个 Wiki、两个 maintenance、三个
+  DocReader 和两个 Agent Runtime 按模板运行，migration 已完成并退出。
+- 用小文件、大知识源、PDF、Office、图片、音频和异常文档验证解析、超时、重试和恢复。
+- 验证临时目录按任务隔离、持久文件可读取、产物下载有租户/会话/任务鉴权。
+- 逐一验证九种 Agent 类型、工具白名单、技能、知识库/数据源选择、产物和迭代预算。
+- 验证 MCP 凭据子资源、OAuth、工具审批、递归脱敏和跨租户边界。
+- 验证日志、文档、镜像构建上下文和发布产物没有密钥、真实 token、私有地址、内部路径
+  或租户标识。
 
-对象默认私有，下载必须先由 API 校验 tenant/session/artifact 权限。测试和容灾环境
-不得复用生产 UUID 前缀。
+## 7. 仍然存在的基础设施单点
 
-停机迁移只备份 PostgreSQL：在线低优先级全量备份，停机后增量备份，两者必须验证能
-组合恢复到原库。文件在停机窗口不变化，不重复备份、不移动；回滚继续引用原对象。
+应用多副本和无 RWX 设计解决应用/解析 Pod 故障、水平执行和临时目录边界，不能据此
+宣称数据库、缓存、图数据库、模型服务、对象存储或单可用区基础设施没有单点。生产
+容量、容灾和回滚仍需结合基础设施团队维护的受保护运行手册执行。
 
-## 7. 入口与静态资源
+## 8. 相关文档
 
-- 知识源原文件上限 2048 MiB；Nginx/Ingress 入口上限 2304 MiB，关闭 request
-  buffering，读写超时 7200 秒。
-- 普通附件和 DocReader 单次 gRPC 传输保持 50 MiB；大知识文件先拆分。
-- Agent 内部 JSON/Base64 代理上限至少 128 MiB，并受膨胀比和任务预算限制。
-- TDesign 图标、PDF worker/WASM/CMap/font/ICC 全部本站托管，不依赖公共 CDN。
-- 生产镜像与构建依赖提前通过现有内部/国内镜像源缓存，不在发布窗口临时下载。
-
-## 8. 发布与清理
-
-当前生产不是可直接接管的活动 Helm release。`helm/values-production-ha.yaml` 用于机器
-渲染基线，不授权直接 `helm upgrade --install`。必须离线渲染、校验、固定镜像 digest，
-再审查后受控 `kubectl apply`；禁止 namespace `--prune`。
-
-不得删除 `ingress-nginx`、Ingress Controller、其 Service 或集群级入口组件。停机只
-切断业务 Ingress 路由。一次性迁移、预拉取、验证 Pod/Job 在证据归档后清理；失败项
-先保留现场，不能为了“看起来干净”提前删除。
-
-## 9. 验收
-
-- 长期 Pod Ready、零异常重启、endpoint 与计划一致；
-- `.1/.2/.7` scratch 独立、可写、可清理，不出现跨 Pod 工作目录复用；
-- 三个 parse-worker 和三个 DocReader 都收到真实任务；异常文档超时后新任务继续；
-- 48 执行、52 等待、100 接纳及七个模型资源池有效值无冲突；
-- PostgreSQL 连接峰值、节点 RSS/CPU、队列 P95 与磁盘空间有余量；
-- 小/大/复杂文档、PDF/Office/图片/音频、知识检索与真实引用正常；
-- 企业微信电脑/移动端引用、原文和 PDF 本地静态资源正常；
-- 原 OBS 对象和回滚数据库备份点保持可用；
-- 一次性 Pod/Job 清理完成，Ingress Controller 未改变。
-
-## 10. 当前单点
-
-PostgreSQL、Neo4j 仍是单实例，Redis 主从缺少自动切换，外部 llmgateway 是独立共享
-依赖，集群也仍为单 AZ。应用多副本和无 RWX 设计解决的是应用/解析 Pod 故障、水平
-执行与文件共享边界，不能据此宣称整个平台无单点。
+- [当前生产实现与部署基线](./当前生产实现与部署基线.md)
+- [当前实现架构与文档索引](./当前实现架构与文档索引.md)
+- [Helm 部署说明](../../helm/README.md)

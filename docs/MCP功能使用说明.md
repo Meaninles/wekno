@@ -1,30 +1,77 @@
-## MCP 功能使用说明
+# MCP 功能使用说明
 
-### 功能概述
-- MCP（Model Context Protocol）让 WeKnora 可以安全地连接外部工具或数据源，扩展 Agent 在推理时可调用的能力。
-- 在前端 `设置 > MCP 服务`（`frontend/src/views/settings/McpSettings.vue`）中集中管理所有服务，无需手动改配置文件。
-- 每个服务都包含名称、传输方式（SSE / HTTP Streamable / Stdio）、连接地址或命令、认证信息以及高级超时与重试策略。
+> 当前代码核对日期：2026-09-13。生产 API 基地址为
+> `https://knora.moutai.com.cn/api/v1`；本地开发 API 仅使用
+> `http://localhost:8080/api/v1`。文档中的外部 MCP 地址、密钥和服务 ID 均为占位符。
 
-### 入口与界面
-- 打开控制台左侧菜单 `设置 -> MCP 服务`，即可看到当前租户下的所有 MCP 服务列表。
-- 列表中可快速启停服务、查看描述，并通过右侧菜单执行“测试 / 编辑 / 删除”。
-- “添加服务”按钮会弹出 `McpServiceDialog`，用于创建或修改服务。
+MCP（Model Context Protocol）让 WeKnora 的 Agent 连接外部工具或数据源。MCP 服务在
+“设置 → MCP 服务”中按当前租户管理，Agent 运行时只使用已启用且对当前租户可见的服务。
 
-### 常用操作流程
-1. **新建服务**
-   - 点击“添加服务”，填写名称与描述，选择传输方式。
-   - SSE / HTTP Streamable 需提供可访问的服务 URL；Stdio 需配置 `uvx`/`npx` 命令与参数，可附加环境变量。
-   - 根据需要填写 API Key、Bearer Token、超时与重试策略，保存后服务会出现在列表中。
-2. **启停服务**
-   - 在列表开关中切换启用状态，系统会即时调用后端 `updateMCPService`，失败时会自动回滚状态并弹出提示。
-3. **连接测试**
-   - 通过更多菜单选择“测试”，前端会调用 `/api/v1/mcp-services/{id}/test` 并弹出 `McpTestResult`。
-   - 成功时会展示服务可用的工具清单（含输入 schema）和资源列表；失败时会显示错误信息，方便排查网络或鉴权问题。
-4. **编辑 / 删除**
-   - “编辑”会带出原有配置，修改后保存即可。
-   - “删除”需要在弹窗中确认，完成后列表自动刷新。
+## 当前支持范围
 
-### 使用建议
-- **传输方式选择**：优先使用 SSE 获取流式体验；需要标准 HTTP Streamable 兼容时再切换；本地调试或离线环境适合使用 Stdio 并在同机启动 MCP Server。
-- **鉴权管理**：将 API Key / Token 保存在“认证配置”中，生产环境建议单独创建最小权限 Key，并定期轮换。
-- **重试策略**：对公网或第三方服务适当提高 `retry_count` 与 `retry_delay`，避免间歇性超时导致 Agent 中断
+- 可用传输：`sse`、`http-streamable`。
+- `stdio` 字段仍存在于数据模型/API 兼容结构中，但当前服务端出于命令注入风险会拒绝
+  创建和连接，不应在生产配置中使用。
+- 认证策略：无认证、自定义请求头、API Key、Bearer Token、OAuth 2.0；OAuth 授权令牌
+  按当前登录用户和 MCP 服务隔离保存。
+- 每个服务可设置超时、重试次数、重试间隔，并可测试工具和资源发现。
+- MCP 服务可以配置工具人工审批策略；Agent 调用被要求审批的工具时会暂停等待用户处理。
+
+## 管理操作
+
+1. 打开生产控制台 [https://knora.moutai.com.cn](https://knora.moutai.com.cn)，进入
+   “设置 → MCP 服务”。本地联调才使用 `http://localhost:5177`。
+2. 点击“添加服务”，填写名称、描述、`sse` 或 `http-streamable` 地址，以及非敏感
+   连接配置。
+3. 保存 API Key 或 Bearer Token 时，使用“认证配置”对应的凭据操作；密钥不会在服务
+   列表、详情或更新响应中返回，只显示是否已配置。
+4. 点击“测试”检查初始化、工具列表和资源列表；失败时先检查 URL、SSRF 策略、认证和
+   上游 MCP 服务可达性。
+5. 编辑/启停/删除只影响当前租户自己的普通服务。系统级内置服务对所有租户可见，
+   连接细节会隐藏，不能由租户编辑、删除或修改凭据。
+
+## API 地址与凭据边界
+
+生产 API 示例：
+
+```text
+https://knora.moutai.com.cn/api/v1/mcp-services
+```
+
+普通 MCP 服务的主资源用于名称、传输方式、地址、Headers、OAuth 非敏感配置和高级
+策略。API Key/Token 使用以下子资源，成功响应只返回 `configured` 状态：
+
+```http
+PUT    /api/v1/mcp-services/<MCP_SERVICE_ID>/credentials
+DELETE /api/v1/mcp-services/<MCP_SERVICE_ID>/credentials/api_key
+DELETE /api/v1/mcp-services/<MCP_SERVICE_ID>/credentials/token
+```
+
+完整请求/响应字段见 [MCP Service API](./api/mcp-service.md)。任何真实密钥只能通过
+密钥管理系统、环境变量或受保护的 API 请求注入，不得写进 Markdown、日志、镜像或前端
+静态文件。
+
+## OAuth 2.0
+
+将普通 MCP 服务的 `auth_config.auth_type` 设为 `oauth` 后，由当前用户发起授权：
+
+1. 调用 `POST /mcp-services/<MCP_SERVICE_ID>/oauth/authorize-url` 获取一次性授权地址。
+2. OAuth 服务回调生产地址
+   `https://knora.moutai.com.cn/api/v1/mcp-oauth/callback`。
+3. 用 `GET /mcp-services/<MCP_SERVICE_ID>/oauth/status` 查询状态，或用
+   `DELETE /mcp-services/<MCP_SERVICE_ID>/oauth/token` 撤销授权。
+
+不要记录授权码、access token 或 refresh token。对话内授权暂停/继续使用 API 文档中
+列出的 `mcp-oauth-resolutions` 路由。
+
+## 安全建议
+
+- 生产上游地址使用 HTTPS，并让服务端 SSRF 校验决定是否允许访问；不要通过白名单绕过
+  校验暴露不必要的内网目标。
+- 外部服务使用最小权限凭据并定期轮换；更换凭据后服务端会关闭旧连接，下次调用重新建立。
+- 对可能产生写入或删除的工具启用人工审批，并限制 Agent 的服务/工具选择范围。
+- 测试响应只用于诊断，不代表 Agent 已获得某个工具的业务权限；仍需按租户和用户权限
+  检查实际调用。
+
+相关文档：[Agent 技能 API](./api/skill.md)、[IM 集成](./IM集成开发文档.md)、
+[API 概览](./api/README.md)。

@@ -25,8 +25,8 @@
 
 ```curl
 # 搜索单个知识库
-curl --location 'http://localhost:8080/api/v1/knowledge-search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "如何使用知识库",
@@ -34,8 +34,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-search' \
 }'
 
 # 搜索多个知识库
-curl --location 'http://localhost:8080/api/v1/knowledge-search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "如何使用知识库",
@@ -43,8 +43,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-search' \
 }'
 
 # 搜索指定文件
-curl --location 'http://localhost:8080/api/v1/knowledge-search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "如何使用知识库",

@@ -1,4 +1,4 @@
-# 对话分享 API（二开）
+# 对话分享 API
 
 [返回目录](./README.md)
 
@@ -26,7 +26,7 @@ Authorization: Bearer <jwt>
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/custom/chat-share/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/custom/chat-share/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f' \
 --header 'Authorization: Bearer <jwt>' \
 --header 'Content-Type: application/json' \
 --data '{}'
@@ -46,8 +46,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/custom/chat-share/s
   "data": {
     "id": "f7b37cb4-1877-48da-9c90-bde11f73e43f",
     "session_id": "411d6b70-9a85-4d03-bb74-aab0fd8bd12f",
-    "token": "MrYLBGnBbvIxnAadFKbCLlzpLxIGSTRW7g05R9KCThU",
-    "url": "/share/chat/MrYLBGnBbvIxnAadFKbCLlzpLxIGSTRW7g05R9KCThU",
+    "token": "<SHARE_TOKEN>",
+    "url": "/share/chat/<SHARE_TOKEN>",
     "title": "我的对话",
     "created_at": "2026-07-09T10:20:30+08:00"
   }
@@ -65,7 +65,7 @@ curl --location --request POST 'http://localhost:8080/api/v1/custom/chat-share/s
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/custom/chat-share/MrYLBGnBbvIxnAadFKbCLlzpLxIGSTRW7g05R9KCThU' \
+curl --location 'https://knora.moutai.com.cn/api/v1/custom/chat-share/<SHARE_TOKEN>' \
 --header 'Authorization: Bearer <jwt>'
 ```
 
@@ -117,7 +117,7 @@ curl --location 'http://localhost:8080/api/v1/custom/chat-share/MrYLBGnBbvIxnAad
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/custom/chat-share/MrYLBGnBbvIxnAadFKbCLlzpLxIGSTRW7g05R9KCThU/files?file_path=local%3A%2F%2F1%2Fchat%2Fimage.png' \
+curl --location 'https://knora.moutai.com.cn/api/v1/custom/chat-share/<SHARE_TOKEN>/files?file_path=local%3A%2F%2F1%2Fchat%2Fimage.png' \
 --header 'Authorization: Bearer <jwt>' \
 --output image.png
 ```
@@ -147,7 +147,7 @@ curl --location 'http://localhost:8080/api/v1/custom/chat-share/MrYLBGnBbvIxnAad
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/custom/chat-share/MrYLBGnBbvIxnAadFKbCLlzpLxIGSTRW7g05R9KCThU/artifacts/2e4b6f20-4f2b-4026-bd64-4a5b6f9a8b71/download' \
+curl --location 'https://knora.moutai.com.cn/api/v1/custom/chat-share/<SHARE_TOKEN>/artifacts/2e4b6f20-4f2b-4026-bd64-4a5b6f9a8b71/download' \
 --header 'Authorization: Bearer <jwt>' \
 --output artifact.xlsx
 ```

@@ -2,6 +2,11 @@
 
 本模块只在本地实现和验证；生产尚未更新。
 
+> 本文为本地实现/验收记录；当前代码、路由、生产部署和地址以
+> [当前实现架构与文档索引](./当前实现架构与文档索引.md)为准。生产入口统一使用
+> `https://knora.moutai.com.cn`；本文中的 `localhost` 仅表示本地验收。测试租户、业务数据、
+> 工作树和证据文件不应作为生产信息使用。
+
 ## 2026-09-12 本地验收记录
 
 - 已按分角色 compose 停止旧实例、构建共享镜像并 force-recreate 全部角色。
@@ -63,7 +68,7 @@ metadata 等不影响匹配字段的更新不重写投影。TRUNCATE 同步清�
 
 - `GREPSEARCH_TEST_POSTGRES=1 go test ./internal/custom/modules/grepsearch -count=1`：真实 PostgreSQL 临时 schema，测试后只删除该 schema。
 - `go test -race` 同一模块：迁移、payload/计数、批量生命周期、并发发布、错误与就绪检查。
-- `GREPSEARCH_TEST_LIVE=1 go test ./internal/agent/tools -run TestGrepProjectionLiveReferences -count=1`：本地迁移完成后，只读比较真实工具输出引用与源表基线（固定本地 tenant 10000 的最多18个库）。
+- `GREPSEARCH_TEST_LIVE=1 go test ./internal/agent/tools -run TestGrepProjectionLiveReferences -count=1`：本地迁移完成后，只读比较真实工具输出引用与源表基线（固定本地测试租户的有限库集合）。
 - 既有 grep 排序、覆盖、来源引用测试继续执行。
 
 实验脚本及历史评估在 `custom/tests/grep_plan_lab/`，其中实验触发器仅在独立实验 schema；不得当作正式迁移。完整对话 LLM 回答质量不是 SQL 集合一致测试的替代品。

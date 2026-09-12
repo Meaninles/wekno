@@ -25,8 +25,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/web-search/providers' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/web-search/providers' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -65,8 +65,8 @@ curl --location 'http://localhost:8080/api/v1/web-search/providers' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/web-search-providers/types' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/web-search-providers/types' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -102,14 +102,14 @@ curl --location 'http://localhost:8080/api/v1/web-search-providers/types' \
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/web-search-providers/test' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/web-search-providers/test' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "provider": "google",
     "parameters": {
-        "api_key": "AIza...",
-        "cx": "0123456789:abcdefg"
+        "api_key": "<SEARCH_API_KEY>",
+        "cx": "<SEARCH_ENGINE_ID>"
     }
 }'
 ```
@@ -141,16 +141,16 @@ curl --location --request POST 'http://localhost:8080/api/v1/web-search-provider
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/web-search-providers' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/web-search-providers' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "公司 Google CSE",
     "provider": "google",
     "description": "用于内网搜索",
     "parameters": {
-        "api_key": "AIza...",
-        "cx": "0123456789:abcdefg"
+        "api_key": "<SEARCH_API_KEY>",
+        "cx": "<SEARCH_ENGINE_ID>"
     },
     "is_default": true
 }'
@@ -166,7 +166,7 @@ curl --location 'http://localhost:8080/api/v1/web-search-providers' \
         "name": "公司 Google CSE",
         "provider": "google",
         "is_default": true,
-        "parameters": { "api_key": "***", "cx": "0123456789:abcdefg" }
+        "parameters": { "api_key": "***", "cx": "<SEARCH_ENGINE_ID>" }
     },
     "success": true
 }
@@ -179,8 +179,8 @@ curl --location 'http://localhost:8080/api/v1/web-search-providers' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/web-search-providers' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/web-search-providers' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -205,8 +205,8 @@ curl --location 'http://localhost:8080/api/v1/web-search-providers' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/web-search-providers/wsp-001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/web-search-providers/wsp-001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: 同创建接口。404 表示不存在。
@@ -220,12 +220,12 @@ curl --location 'http://localhost:8080/api/v1/web-search-providers/wsp-001' \
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/web-search-providers/wsp-001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/web-search-providers/wsp-001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "公司 Google CSE (v2)",
-    "parameters": { "api_key": "NEW...", "cx": "0123456789:abcdefg" },
+    "parameters": { "api_key": "<SEARCH_API_KEY>", "cx": "<SEARCH_ENGINE_ID>" },
     "is_default": false
 }'
 ```
@@ -237,8 +237,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/web-search-providers
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/web-search-providers/wsp-001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/web-search-providers/wsp-001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: `{ "success": true }`
@@ -250,8 +250,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/web-search-provid
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/web-search-providers/wsp-001/test' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/web-search-providers/wsp-001/test' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: 同 `POST /web-search-providers/test`。

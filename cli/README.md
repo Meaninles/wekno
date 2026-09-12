@@ -59,13 +59,13 @@ release. Grab the latest from the [Releases page](https://github.com/Tencent/WeK
 
 ```bash
 # 1. Register your WeKnora server as a profile and make it active
-weknora profile add prod --host https://kb.example.com --use
+weknora profile add prod --host https://knora.moutai.com.cn --use
 
 # 2. Authenticate the active profile (interactive password prompt)
 weknora auth login
 
 # 2b. Or pipe an API key from stdin (for CI / AI agents)
-echo "sk-..." | weknora auth login --with-token
+echo "<TENANT_API_KEY>" | weknora auth login --with-token
 
 # 3. List knowledge bases
 weknora kb list
@@ -148,11 +148,11 @@ on the *active* profile (override per-invocation with the global `--profile`
 flag). Create a profile first, then authenticate it:
 
 ```bash
-weknora profile add prod    --host https://prod.example.com --use     # add + switch
-weknora auth login                                                    # authenticate active (prod)
+weknora profile add prod    --host https://knora.moutai.com.cn --use     # add + switch
+weknora auth login                                                       # authenticate active (prod)
 
-weknora profile add staging --host https://staging.example.com        # add (stays inactive)
-echo "sk-..." | weknora --profile staging auth login --with-token     # authenticate staging
+weknora profile add staging --host <NON_PRODUCTION_HOST>                # add (stays inactive)
+echo "<TENANT_API_KEY>" | weknora --profile staging auth login --with-token # authenticate staging
 
 weknora auth list
 weknora profile use prod                                              # switch back

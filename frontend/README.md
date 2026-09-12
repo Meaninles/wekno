@@ -1,5 +1,8 @@
 # 前端开发说明
 
+> 当前代码与构建配置核对日期：2026-09-13。生产前端访问
+> `https://knora.moutai.com.cn/`；本文的 `localhost` 仅为本地开发地址。
+
 桌面前端位于本目录，开发入口为 `http://localhost:5177`。当前生产还包含独立的
 `mobile-web` 两副本入口；两者通过 Nginx 代理同一组 app API。
 

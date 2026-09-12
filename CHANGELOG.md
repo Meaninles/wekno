@@ -35,7 +35,7 @@ All notable changes to this project will be documented in this file.
   3/3/2/2/2 with three DocReader, two Agent, two desktop, and two mobile
   replicas; PostgreSQL remains on the existing `.6` node.
 - **CHANGED**: Production scratch uses per-role/per-Pod hostPath directories
-  below `/mnt/weknora-data/weknora-v2-scratch`; durable files remain in private
+  below a protected deployment scratch root; durable files remain in private
   OBS and no RWX volume is required.
 - **CHANGED**: Model traffic uses the external llmgateway domain and seven
   centrally distributed models. Qwen ASR 1.7B was removed in favor of
@@ -629,7 +629,7 @@ All notable changes to this project will be documented in this file.
 ## [0.4.0] - 2026-04-14
 
 ### 🚀 New Features
-- **NEW**: Cloud Knowledge Assistant — [WeKnora Platform](https://weknora.weixin.qq.com/platform), a cloud-hosted knowledge assistant service for quick onboarding without local deployment
+- **NEW**: Cloud Knowledge Assistant — [WeKnora Platform](https://knora.moutai.com.cn), a cloud-hosted knowledge assistant service for quick onboarding without local deployment
 - **NEW**: WeKnora Cloud — WeKnora Cloud provider integration, providing hosted LLM models and document parsing capabilities, with credential management, status checks, and UI feedback
 - **NEW**: Chrome Extension — browser extension support with menu entry and quick access integration for seamless knowledge capture from web pages
 - **NEW**: WeChat IM Integration — WeChat channel adapter with QR code login and long-polling message support

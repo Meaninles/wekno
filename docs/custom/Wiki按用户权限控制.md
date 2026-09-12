@@ -1,5 +1,9 @@
 # Wiki 按用户权限控制
 
+> 代码与配置核对日期：2026-09-13。生产入口为
+> `https://knora.moutai.com.cn`，API 基地址为
+> `https://knora.moutai.com.cn/api/v1`；本文不包含内部服务地址或凭据。
+
 Wiki 的生成、浏览和后端处理能力保持不变，但“新开启 Wiki 索引”采用按用户显式授权：
 
 - 默认用户没有 Wiki 选择权，知识库编辑器中的 Wiki 开关显示为灰色。

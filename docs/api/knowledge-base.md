@@ -55,9 +55,9 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-xxxxx' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "weknora",
     "description": "weknora description",
@@ -222,9 +222,9 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-xxxxx'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: `data` 为数组，每个元素的字段结构同 `POST /knowledge-bases` 响应，并额外携带 `knowledge_count` / `chunk_count` / `processing_count` / `share_count` / `is_pinned` / `pinned_at` 这些聚合与状态字段。
@@ -250,9 +250,9 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-xxxxx'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: 字段结构同 `POST /knowledge-bases` 响应（包含 Phase 2 的 `vector_store_*` 元数据字段），并附 `is_pinned` / `pinned_at` / `knowledge_count` / `chunk_count` / `processing_count` 状态字段。通过共享智能体访问时还会附加 `my_permission`；同时 `vector_store_name` / `vector_store_engine_type` 会被隐藏（`vector_store_source` 返回 `"shared"`），避免跨租户泄漏存储展示名。
@@ -278,9 +278,9 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001' \
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/b5829e4a-3845-4624-a7fb-ea3b35e843b0' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/b5829e4a-3845-4624-a7fb-ea3b35e843b0' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-xxxxx' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "weknora new",
     "description": "weknora description new",
@@ -330,9 +330,9 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/b582
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/b5829e4a-3845-4624-a7fb-ea3b35e843b0' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/knowledge-bases/b5829e4a-3845-4624-a7fb-ea3b35e843b0' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-xxxxx'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -357,8 +357,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/b
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/pin' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/pin' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -395,8 +395,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/hybrid-search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/hybrid-search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query_text": "如何使用知识库",
@@ -457,8 +457,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/knowledge-bases/kb-
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/copy' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/copy' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "source_id": "kb-00000001"
@@ -508,8 +508,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/copy' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/copy/progress/kb_clone_1_kb-00000001_1736582400' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/copy/progress/kb_clone_1_kb-00000001_1736582400' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -553,8 +553,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/copy/progress/kb_c
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/move-targets' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/move-targets' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 

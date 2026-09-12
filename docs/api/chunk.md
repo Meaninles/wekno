@@ -29,8 +29,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5?page=1&page_size=1' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5?page=1&page_size=1' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -97,8 +97,8 @@ curl --location 'http://localhost:8080/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "content": "更新后的分块内容",
@@ -127,8 +127,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/chunks/4c4e7c1a-09cf
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -151,8 +151,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/chunks/4c4e7c1a-0
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/chunks/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -177,8 +177,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/chunks/4c4e7c1a-0
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/chunks/by-id/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/chunks/by-id/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: 同 `GET /chunks/:knowledge_id` 列表中的单条 data。
@@ -202,8 +202,8 @@ curl --location 'http://localhost:8080/api/v1/chunks/by-id/df10b37d-cd05-4b14-ba
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/chunks/by-id/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7/questions' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/chunks/by-id/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7/questions' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "question_id": "q-00000001"

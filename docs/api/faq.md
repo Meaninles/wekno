@@ -44,12 +44,12 @@ FAQ 接口分为两组：
 
 ```curl
 # 全字段搜索
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries?page=1&page_size=10&keyword=密码' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries?page=1&page_size=10&keyword=密码' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 
 # 仅搜索标准问
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries?keyword=密码&search_field=standard_question' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries?keyword=密码&search_field=standard_question' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -93,8 +93,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/en
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries/export' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries/export' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --output faq_export.csv
 ```
 
@@ -107,8 +107,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/en
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries/1' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries/1' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -172,8 +172,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/en
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "mode": "append",
@@ -212,8 +212,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/en
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entry' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entry' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "standard_question": "如何联系客服？",
@@ -270,8 +270,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/en
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries/1' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries/1' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "standard_question": "如何重置账户密码？",
@@ -296,8 +296,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries/1/similar-questions' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries/1/similar-questions' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "similar_questions": ["怎样修改密码", "密码重置方法"]
@@ -334,8 +334,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/en
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries/fields' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries/fields' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "by_id": {
@@ -368,8 +368,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries/tags' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries/tags' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "updates": {
@@ -397,8 +397,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/entries' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/entries' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "ids": [1, 2, 3]
@@ -429,8 +429,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/k
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query_text": "如何重置密码",
@@ -484,8 +484,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/se
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/faq/import/last-result/display' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/faq/import/last-result/display' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "display_status": "close"
@@ -511,8 +511,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/faq/import/progress/task-00000001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/faq/import/progress/task-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**（节选关键字段）:

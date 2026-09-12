@@ -1,5 +1,9 @@
 # 常见问题
 
+> 生产访问统一使用 `https://knora.moutai.com.cn`，API 基地址为
+> `https://knora.moutai.com.cn/api/v1`。本页的 Compose、`localhost`、MinIO 控制台和
+> 容器服务名仅用于本地开发/验收；生产凭据、内部地址和实际模型端点必须从受保护配置读取。
+
 ## 1. 如何查看日志？
 ```bash
 docker compose -p weknora-runtime-profile-e2e \
@@ -193,8 +197,8 @@ WeKnora 支持通过 Langfuse 对 Agent 的 ReAct 循环、大模型 Token 消�
 1. 准备一个可用的 Langfuse 实例（支持云端版或私有部署版）。
 2. 在 `.env` 文件中配置以下环境变量：
 ```bash
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_PUBLIC_KEY=<LANGFUSE_PUBLIC_KEY>
+LANGFUSE_SECRET_KEY=<LANGFUSE_SECRET_KEY>
 LANGFUSE_HOST=https://cloud.langfuse.com # 或你的私有部署地址
 ```
 3. 重启服务后，系统会自动对所有支持的模型调用和 Agent 运行轨迹进行追踪，你可以在 Langfuse 的 Traces 面板中直观地看到每次对话和后台任务的详细执行瀑布图与 Token 统计。

@@ -1,5 +1,10 @@
 # WeKnora OIDC 认证调用流程
 
+> 本文按当前代码核对。生产前端/回调基地址使用
+> `https://knora.moutai.com.cn`，生产 redirect URI 为
+> `https://knora.moutai.com.cn/api/v1/auth/oidc/callback`。文末的 `localhost` 或
+> `127.0.0.1` 仅用于本地 Dex 联调。
+
 本文档说明 WeKnora 当前 OIDC 登录能力的实际调用过程，覆盖：
 
 - 前端如何判断是否展示 OIDC 登录入口
@@ -8,16 +13,8 @@
 - 登录成功后前端如何接收结果并落盘本地登录态
 - 关键配置项与本地联调方式
 
-本文内容基于当前项目实现，相关代码主要位于：
-
-- 后端路由：`internal/router/router.go`
-- 认证处理：`internal/handler/auth.go`
-- 认证服务：`internal/application/service/user.go`
-- 配置定义：`internal/config/config.go`
-- 前端登录页：`frontend/src/views/auth/Login.vue`
-- 前端全局回调处理：`frontend/src/App.vue`
-- 前端认证 API：`frontend/src/api/auth/index.ts`
-- 本地 Dex 示例：`misc/dex-config.yaml`
+本文内容按当前平台公开接口和实际登录行为整理；生产 OIDC Provider 的地址、客户端
+凭据和 claims 映射由平台管理员通过受保护配置维护。
 
 ---
 
@@ -44,7 +41,7 @@
 
 ## 2. 相关接口
 
-当前 OIDC 相关接口均注册在 `internal/router/router.go` 中：
+当前公开的 OIDC 接口为：
 
 - `GET /api/v1/auth/oidc/config`
   - 获取 OIDC 是否启用，以及 Provider 展示名称
@@ -131,8 +128,6 @@ flowchart TD
 ## 4. 前端调用流程
 
 ## 4.1 登录页初始化：决定是否展示 OIDC 登录按钮
-
-登录页组件位于 `frontend/src/views/auth/Login.vue`。
 
 页面加载时会执行：
 
@@ -323,8 +318,6 @@ LoginWithOIDC(ctx, code, decodedState.RedirectURI)
 
 ## 7. 后端用 code 换 token 并解析用户身份
 
-核心逻辑位于 `internal/application/service/user.go`。
-
 ## 7.1 换取 OIDC token
 
 `exchangeOIDCCode()` 会向 OIDC Provider 的 `token_endpoint` 发起：
@@ -468,9 +461,9 @@ GenerateTokens(ctx, user)
 
 ## 11. 前端如何消费 OIDC 回调结果
 
-前端不是在 `Login.vue` 中处理回调，而是在 `frontend/src/App.vue` 中统一处理。
+平台应用会在根页面统一处理回调。
 
-这样即使后端把用户重定向到 `/`，应用根组件也能接住这次 OIDC 登录结果。
+这样即使后端把用户重定向到 `/`，应用也能接住这次 OIDC 登录结果。
 
 ## 11.1 App.vue 解析 hash
 
@@ -522,7 +515,8 @@ window.location.hash
 
 ## 12. 关键配置项
 
-OIDC 配置定义位于 `internal/config/config.go`，环境变量示例见 `.env.example`。
+OIDC 配置由平台管理员通过受保护配置维护；客户端只需向管理员提供 Provider 要求的
+redirect URI 和必要的 claims 约定。
 
 ### 12.1 主要配置项
 
@@ -556,7 +550,8 @@ OIDC 配置定义位于 `internal/config/config.go`，环境变量示例见 `.en
 ## 13. 本地联调示例（Dex）
 [Dex](https://dexidp.io/) 是一个简单易用的OIDC Provider，您可以通过它对接多种第三方认证系统（如OAuth2.0，Google，GitHub，LDAP等）。除了Dex之外，您也可以选择[KeyCloak](https://www.keycloak.org/)等其他符合OpenID Connect协议的Provider进行接入。
 
-项目中已提供 Dex 示例配置：`misc/dex-config.yaml`。
+本包不携带任何本地 Provider 配置文件。联调时请使用组织批准的测试 Provider，并将
+客户端密钥保存在受保护的环境变量或密钥管理系统中。
 
 其中静态客户端配置示例：
 
@@ -571,6 +566,12 @@ staticClients:
 ```
 
 这说明本地调试时，需要确保 **Provider 注册的 redirect URI 与前端实际传给后端的 `redirect_uri` 完全一致**。
+
+生产环境应在 OIDC Provider 中登记：
+
+```text
+https://knora.moutai.com.cn/api/v1/auth/oidc/callback
+```
 
 前端当前实现中使用的是：
 
@@ -625,22 +626,8 @@ Provider 回调后端 `/auth/oidc/callback`，后端用 `code` 换 token、拉�
 
 ---
 
-## 16. 相关源码定位
+## 16. 实施边界
 
-- 前端是否展示 OIDC 登录按钮：
-  - `frontend/src/views/auth/Login.vue`
-- 前端获取授权地址：
-  - `frontend/src/api/auth/index.ts`
-  - `frontend/src/views/auth/Login.vue`
-- 前端解析回调 hash：
-  - `frontend/src/App.vue`
-- OIDC 接口路由注册：
-  - `internal/router/router.go`
-- OIDC HTTP 处理：
-  - `internal/handler/auth.go`
-- OIDC 业务逻辑：
-  - `internal/application/service/user.go`
-- OIDC 配置结构与环境变量覆盖：
-  - `internal/config/config.go`
-- Dex 本地示例：
-  - `misc/dex-config.yaml`
+本包只保留 OIDC 使用方需要的接口、时序、配置字段和安全约束；平台内部源码、测试
+Provider 配置和部署参数不属于本包。若需要启用或修改生产 OIDC，请由平台管理员在
+受保护配置中完成，并先验证 redirect URI、claims 映射、JWT 生命周期和退出登录流程。

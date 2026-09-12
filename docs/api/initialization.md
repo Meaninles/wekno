@@ -24,8 +24,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/config/kb-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/config/kb-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -48,8 +48,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/config/kb-00000001'
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/initialize/kb-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/initialize/kb-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "chat_model_id": "model-00000001",
@@ -72,8 +72,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/initialize/kb-00000
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/initialization/config/kb-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/initialization/config/kb-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "chat_model_id": "model-00000010",
@@ -94,8 +94,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/initialization/confi
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/ollama/status' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/ollama/status' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -115,8 +115,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/ollama/status' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/ollama/models' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/ollama/models' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -145,8 +145,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/ollama/models' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/ollama/models/check' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/ollama/models/check' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "models": ["llama3:8b", "nomic-embed-text:latest", "mistral:7b"]
@@ -171,8 +171,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/ollama/models/check
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/ollama/models/download' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/ollama/models/download' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "model": "mistral:7b"
@@ -200,8 +200,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/ollama/models/downl
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/ollama/download/progress/task-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/ollama/download/progress/task-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -226,8 +226,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/ollama/download/pro
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/ollama/download/tasks' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/ollama/download/tasks' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -263,12 +263,12 @@ curl --location 'http://localhost:8080/api/v1/initialization/ollama/download/tas
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/remote/check' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/remote/check' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "api_url": "https://api.openai.com/v1",
-    "api_key": "sk-xxxxx",
+    "api_key": "<TENANT_API_KEY>",
     "model": "gpt-4o"
 }'
 ```
@@ -290,12 +290,12 @@ curl --location 'http://localhost:8080/api/v1/initialization/remote/check' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/embedding/test' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/embedding/test' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "api_url": "https://api.openai.com/v1",
-    "api_key": "sk-xxxxx",
+    "api_key": "<TENANT_API_KEY>",
     "model": "text-embedding-3-small"
 }'
 ```
@@ -317,12 +317,12 @@ curl --location 'http://localhost:8080/api/v1/initialization/embedding/test' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/rerank/check' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/rerank/check' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "api_url": "https://api.cohere.ai/v1",
-    "api_key": "sk-xxxxx",
+    "api_key": "<TENANT_API_KEY>",
     "model": "rerank-english-v3.0"
 }'
 ```
@@ -344,12 +344,12 @@ curl --location 'http://localhost:8080/api/v1/initialization/rerank/check' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/multimodal/test' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/multimodal/test' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "api_url": "https://api.openai.com/v1",
-    "api_key": "sk-xxxxx",
+    "api_key": "<TENANT_API_KEY>",
     "model": "gpt-4o"
 }'
 ```
@@ -371,8 +371,8 @@ curl --location 'http://localhost:8080/api/v1/initialization/multimodal/test' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/initialization/extract/text-relation' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/initialization/extract/text-relation' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "text": "WeKnora 是一个知识管理平台，支持多种文档格式的解析和检索。",

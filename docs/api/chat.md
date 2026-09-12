@@ -40,13 +40,13 @@ Token 或 `X-API-Key`。`session_id` 必须是调用者可访问的会话。
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-chat/ceb9babb-1e30-41d7-817d-fd584954304b' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-chat/ceb9babb-1e30-41d7-817d-fd584954304b' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "彗尾的形状",
     "knowledge_base_ids": ["kb-00000001"],
-    "agent_id": "builtin-quick-answer"
+    "agent_id": "builtin-knowledge-qa"
 }'
 ```
 
@@ -132,15 +132,15 @@ Agent 模式支持更智能的问答，包括工具调用、网络搜索、多�
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agent-chat/ceb9babb-1e30-41d7-817d-fd584954304b' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/agent-chat/ceb9babb-1e30-41d7-817d-fd584954304b' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "帮我查询今天的天气",
     "agent_enabled": true,
     "web_search_enabled": true,
     "knowledge_base_ids": ["kb-00000001"],
-    "agent_id": "builtin-smart-reasoning",
+    "agent_id": "builtin-general-agent",
     "mentioned_items": [
         {
             "id": "kb-00000001",
@@ -200,8 +200,8 @@ data: {"id":"req-001","response_type":"answer","content":"","done":true}
 | `knowledge_ids` | string[] | 否 | 限定搜索的知识文件 ID |
 
 ```bash
-curl --location 'http://localhost:8080/api/v1/knowledge-search' \
-  --header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-search' \
+  --header 'X-API-Key: <TENANT_API_KEY>' \
   --header 'Content-Type: application/json' \
   --data '{
     "query": "彗尾的形状",

@@ -1,5 +1,9 @@
 # Agent 运行时静态 PVC 与目录隔离
 
+> 代码与配置核对日期：2026-09-13。生产入口为
+> `https://knora.moutai.com.cn`；本文不记录 PVC/PV 名称、节点、挂载点、命名空间、镜像
+> 仓库或拉取凭据。
+
 Kubernetes 后端使用一个预先绑定的静态 PVC，不再动态创建或删除运行级 PVC。
 Docker 开发后端继续沿用其现有命名卷，不改变文件工具、历史上下文、输入下载、
 输出基线、对象存储交付、执行回执及故障恢复协议。本改造无数据库 schema 变更。
@@ -11,12 +15,9 @@ Docker 开发后端继续沿用其现有命名卷，不改变文件工具、历�
 旧 `storageClass/storageSize` 配置已移除，缺少 PVC 或 PVC 未 Bound 时拒绝启动工作区，
 不回退到动态供给。应用不创建 StorageClass、PV 或 PVC。
 
-生产现有对象是 `weknora-agent-workspaces/agent-runtime-shared` →
-`weknora-agent-runtime-pv`，local 路径 `/mnt/weknora-data/weknora-agent-runtime`，
-节点 `10.14.201.2`，RWO、Retain、100Gi。参见
-[独立存储清单](../../deploy/production/agent-runtime-storage.example.yaml)。
-该清单不进入业务 workload 渲染和删除流程；namespace 和存储应提前准备。
-工作区及清理 Pod 使用 namespace 内的 `default-secret` 拉取 SWR 镜像。
+生产 PVC/PV 对象、存储路径、节点调度和容量由受保护部署清单预先准备，并使用 RWO/Retain
+等策略。该清单不进入业务 workload 渲染和删除流程；命名空间、存储和镜像拉取凭据应由
+部署管理员提前配置。公共文档只说明“受保护镜像拉取凭据”，不写入 Secret 名称或值。
 
 一个运行对应 `sha256(run_id)[:32]`，与副本数、Worker 编号、并发配置无关：
 
@@ -57,7 +58,7 @@ PVC 被重新创建或绑定错误时拒绝操作。
 
 Linux 容器运行 `tests/test_static_workspace*.py` 验证真实权限、符号链接、重试、并发
 清理与终态防复活；运行原工作区、文件问答和交付测试验证能力回归。
-标准本地应用仍运行角色化 Compose 与独立 agent-runtime Compose。
+标准本地应用仍运行角色化 Compose 与当前 `custom/services/agent-runtime` 运行时。
 没有本地 Kubernetes 时不能用 Docker 测试宣称 CCE 挂载和网络策略验证通过。
 
 上线前必须在目标版本验证两个工作区 Pod 同时挂载、首次目录初始化、同运行恢复、
@@ -65,10 +66,11 @@ Linux 容器运行 `tests/test_static_workspace*.py` 验证真实权限、符号
 工作区保留直接出站能力，并须验证 DNS、HTTPS、GitHub、依赖下载源及所需外部 API。
 控制 API 查询在外部 Agent Runtime 完成，清理 Pod不主动联网。
 
-生产目前为旧 general-agent/document-processing-agent hostPath 架构。
-整体升级须先验证旧制品/上传记录可被新版读取、旧任务完成交付，再停止旧服务。
-旧目录保持，不由新回收器管理。不要直接将旧运行任务挂载到新的空目录。
+生产 Agent Runtime 以静态 PVC 和每运行 subPath 为当前基线，不把对象存储挂载为 POSIX
+工作目录。升级须先验证已发布产物、上传记录和运行状态可被当前版本读取，再滚动更新
+运行时；不要把一个任务的目录挂载给另一个运行。
 
-本次不实现磁盘耗尽、配额或新的文件大小限制；100Gi 不是文件系统硬配额。
-local PV 的 workspace Pod 固定在 .2，节点不可用时不能自动跨节点访问数据。
-不要强制删除失联节点上的执行 Pod并把它视为已停止；等待节点恢复和实际进程退出。
+本方案不把 PVC 容量当成文件系统业务配额；磁盘耗尽、配额、清理和保留策略仍需按受保护
+生产运维配置验收。工作区 Pod 的调度由生产拓扑和卷绑定共同决定，节点不可用时不能假设
+RWO 数据自动跨节点可用。不要强制删除失联节点上的执行 Pod 并把它视为已停止；等待
+节点恢复并确认实际进程退出。

@@ -130,7 +130,7 @@ Current production roles are API/parse-worker `3/3`, derivative/wiki/maintenance
 frontend/mobile-web `2/2`. Every parse-worker admits four complete document
 workflows; cluster document capacity is 12. Durable files use private OBS. Each
 worker/DocReader/Agent Pod gets an isolated hostPath scratch directory under
-`/mnt/weknora-data/weknora-v2-scratch`; no RWX volume is required.
+the protected deployment scratch root; no RWX volume is required.
 
 The current production namespace is not an active Helm release that may be
 adopted with `helm upgrade --install`. Render and validate this chart, then use a

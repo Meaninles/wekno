@@ -66,8 +66,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/file' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/knowledge/file' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --form 'file=@"/Users/xxxx/tests/彗星.txt"' \
 --form 'enable_multimodel="true"' \
 --form 'tag_id="tag-00000001"' \
@@ -137,8 +137,8 @@ URL 会经过 SSRF 安全校验，禁止指向内网/回环地址。
 **请求（网页模式）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/url' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/knowledge/url' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "url": "https://github.com/Tencent/WeKnora",
@@ -149,8 +149,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求（远程文件模式）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/url' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/knowledge/url' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "url": "https://example.com/papers/whitepaper.pdf",
@@ -211,8 +211,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/manual' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/knowledge/manual' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "产品使用指南",
@@ -285,8 +285,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge?page=1&page_size=1&tag_ids=tag-00000001&workflow_status=completed' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/knowledge?page=1&page_size=1&tag_ids=tag-00000001&workflow_status=completed' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -336,8 +336,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/knowledge' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**（已入队）:
@@ -375,8 +375,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/k
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/batch?ids=9c8af585-ae15-44ce-8f73-45ad18394651&ids=4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge/batch?ids=9c8af585-ae15-44ce-8f73-45ad18394651&ids=4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -422,8 +422,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge/batch?ids=9c8af585-ae15-
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -468,8 +468,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "彗星 - 天文百科",
@@ -493,8 +493,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-0
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge/9c8af585-ae15-44ce-8f73-45ad18394651' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/knowledge/9c8af585-ae15-44ce-8f73-45ad18394651' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -513,8 +513,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge/9c8af58
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/manual/5a3b2c1d-0e9f-4a8b-7c6d-5e4f3a2b1c0d' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge/manual/5a3b2c1d-0e9f-4a8b-7c6d-5e4f3a2b1c0d' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "产品使用指南 V2",
@@ -548,8 +548,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/manual/5a3
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/reparse' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/reparse' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -590,8 +590,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/cancel-parse' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/cancel-parse' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -629,8 +629,8 @@ Content-Disposition: attachment; filename="彗星.txt"
 **请求**:
 
 ```curl
-curl --location -OJ 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/download' \
---header 'X-API-Key: sk-xxxxx'
+curl --location -OJ 'https://knora.moutai.com.cn/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/download' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 响应体为文件二进制流。
@@ -671,8 +671,8 @@ curl --location -OJ 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/preview' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/preview' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 -D -
 ```
 
@@ -707,8 +707,8 @@ Cache-Control: private, no-store
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/image/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge/image/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "image_info": "{\"description\":\"产品架构图\",\"alt_text\":\"WeKnora 系统架构\"}"
@@ -740,8 +740,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/image/4c4e
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/tags' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge/tags' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "kb_id": "kb-00000001",
@@ -775,8 +775,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/tags' \
 **请求**:
 
 ```curl
-curl --location --get 'http://localhost:8080/api/v1/knowledge/search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --get 'https://knora.moutai.com.cn/api/v1/knowledge/search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data-urlencode 'keyword=彗星' \
 --data-urlencode 'offset=0' \
 --data-urlencode 'limit=10' \
@@ -827,8 +827,8 @@ curl --location --get 'http://localhost:8080/api/v1/knowledge/search' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/batch-delete' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge/batch-delete' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "kb_id": "kb-00000001",
@@ -875,8 +875,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge/batch-delete' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/move' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge/move' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "knowledge_ids": ["4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5"],
@@ -908,8 +908,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge/move' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/move/progress/kg_move_1_kb-00000001_xxxx' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge/move/progress/kg_move_1_kb-00000001_xxxx' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:

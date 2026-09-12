@@ -7,6 +7,9 @@ source: IM集成开发文档.md
 
 # IM 集成开发
 
+> 生产回调地址使用 `https://knora.moutai.com.cn/api/v1/im/callback/{channel_id}`；渠道
+> 密钥和实际回调标识只从受保护配置中获取，本文不记录真实值。
+
 WeKnora 的 IM 集成模块将企业即时通讯平台（企业微信、飞书、Slack、Telegram、钉钉、Mattermost）接入 WeKnora 知识问答管道，支持在 IM 中直接向 AI 提问并获得实时流式回答。
 
 IM 渠道绑定到 Agent，一个 Agent 可接入多个 IM 渠道。

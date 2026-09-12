@@ -1,5 +1,10 @@
 # Langfuse 集成
 
+> 本文按当前代码与配置核对。WeKnora 生产访问地址为
+> `https://knora.moutai.com.cn`；下文出现的 `localhost`、Compose 服务名和本地端口均只
+> 适用于本地开发或本地自建 Langfuse，不代表生产地址。Langfuse 密钥统一使用占位符，
+> 不要把真实凭据写入文档或仓库。
+
 WeKnora 内置了对 [Langfuse](https://langfuse.com) 的轻量级集成，用于统计 token 消耗、追踪 LLM 调用链路、并为每个对话生成可在 Langfuse 控制台查看的 trace。该集成解决 issue [#497](https://github.com/Tencent/WeKnora/issues/497)（token 使用量统计）和 discussion [#620](https://github.com/Tencent/WeKnora/discussions/620)（接入 Langfuse）。
 
 ## 1. 特性
@@ -30,8 +35,8 @@ WeKnora 内置了对 [Langfuse](https://langfuse.com) 的轻量级集成，用�
 只需要在 **`.env`** 里加 3 行：
 
 ```bash
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+LANGFUSE_PUBLIC_KEY=<LANGFUSE_PUBLIC_KEY>
+LANGFUSE_SECRET_KEY=<LANGFUSE_SECRET_KEY>
 LANGFUSE_HOST=https://cloud.langfuse.com    # 美区用 https://us.cloud.langfuse.com
 ```
 
@@ -74,8 +79,8 @@ docker compose --profile langfuse up -d
 # 3. 把 key 填回 .env 并把 HOST 改成容器内部地址
 cat >> .env <<'EOF'
 LANGFUSE_HOST=http://langfuse-web:3000
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+LANGFUSE_PUBLIC_KEY=<LANGFUSE_PUBLIC_KEY>
+LANGFUSE_SECRET_KEY=<LANGFUSE_SECRET_KEY>
 EOF
 
 # 4. 让 app 重新加载配置
@@ -124,8 +129,8 @@ docker compose up -d app
 在 `.env.lite`（或启动脚本导出的环境变量）里加：
 
 ```bash
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+LANGFUSE_PUBLIC_KEY=<LANGFUSE_PUBLIC_KEY>
+LANGFUSE_SECRET_KEY=<LANGFUSE_SECRET_KEY>
 LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
@@ -157,8 +162,8 @@ app:
 #### （D）二进制 / 源码运行
 
 ```bash
-export LANGFUSE_PUBLIC_KEY="pk-lf-xxxx"
-export LANGFUSE_SECRET_KEY="sk-lf-xxxx"
+export LANGFUSE_PUBLIC_KEY="<LANGFUSE_PUBLIC_KEY>"
+export LANGFUSE_SECRET_KEY="<LANGFUSE_SECRET_KEY>"
 export LANGFUSE_HOST="https://cloud.langfuse.com"
 ./weknora-server
 ```
@@ -174,8 +179,8 @@ runtime profile，不通过宿主机 `go run` 或单体 `app-dev` 启动。Langf
 无需改任何 Compose 文件，把变量写入 `.env` 后重新创建 runtime 角色即可：
 
 ```dotenv
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxx
+LANGFUSE_PUBLIC_KEY=<LANGFUSE_PUBLIC_KEY>
+LANGFUSE_SECRET_KEY=<LANGFUSE_SECRET_KEY>
 LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
@@ -199,8 +204,8 @@ docker compose -f docker-compose.dev.yml --profile langfuse up -d
 
 # 将以下变量写入项目根目录 .env，runtime profile 中的 API 角色使用服务名访问
 LANGFUSE_HOST=http://langfuse-web:3000
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+LANGFUSE_PUBLIC_KEY=<LANGFUSE_PUBLIC_KEY>
+LANGFUSE_SECRET_KEY=<LANGFUSE_SECRET_KEY>
 ```
 
 将这些变量写入 `.env` 后重新创建 runtime profile；API 角色通过开发网络访问
@@ -223,8 +228,8 @@ Dev 相关容器都带 `-dev` 后缀、用独立网络 `WeKnora-network-dev`，�
 | --- | --- | --- |
 | `LANGFUSE_ENABLED` | 自动 | 显式开关。未设置时，只要 `PUBLIC_KEY` + `SECRET_KEY` 都存在就自动启用。支持 `true/false/1/0/yes/no`。 |
 | `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse 实例地址。美区用 `https://us.cloud.langfuse.com`，自建实例填 `https://langfuse.your-domain.com`。 |
-| `LANGFUSE_PUBLIC_KEY` | — | 项目 Public Key（`pk-lf-...`）。 |
-| `LANGFUSE_SECRET_KEY` | — | 项目 Secret Key（`sk-lf-...`），请走密钥管理工具注入，不要提交到仓库。 |
+| `LANGFUSE_PUBLIC_KEY` | — | 项目 Public Key；通过密钥管理或运行环境注入。 |
+| `LANGFUSE_SECRET_KEY` | — | 项目 Secret Key；通过密钥管理或运行环境注入，不要提交到仓库。 |
 | `LANGFUSE_RELEASE` | — | 可选，上报到 Langfuse 的版本号，例如 CI 构建号。 |
 | `LANGFUSE_ENVIRONMENT` | — | 可选，环境标签（`production` / `staging` / `dev`），方便在 UI 过滤。 |
 | `LANGFUSE_FLUSH_AT` | `15` | 批处理大小：缓冲区积累到该数量立即上报。 |

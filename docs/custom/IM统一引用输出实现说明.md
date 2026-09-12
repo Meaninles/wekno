@@ -1,6 +1,6 @@
 # IM 统一引用输出实现说明
 
-> 当前实现核对日期：2026-08-06。生产设备跳转、PDF 静态资源和部署边界见
+> 当前实现核对日期：2026-09-13。本文按当前源码与配置核对；生产设备跳转、PDF 静态资源和部署边界见
 > [当前生产实现与部署基线](./当前生产实现与部署基线.md)。
 
 ## 目标与边界
@@ -36,8 +36,11 @@
 ## 生效范围
 
 统一转换是所有 IM 最终发送的强制出口，不属于某个智能体类型或某个 IM 渠道，也不
-设置单独开关。快速问答、简单对话、智能推理、Wiki、数据分析、表格分析、通用智能体、
-文档处理智能体以及后续新增类型，只要通过统一 IM 服务发送最终回答，都会使用同一转换。
+设置单独开关。当前九种 `agent_type`（`knowledge-qa`、`wiki-qa`、
+`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、
+`general-agent`、`knowledge-base-manager`、`custom`）只要通过统一 IM 服务发送最终回答，
+都会使用同一转换。`agent_mode` 当前统一为 `agent`；历史页面中的“快速问答”“简单对话”
+和“智能推理”不是新的配置值。
 
 生产必须配置浏览器可访问的前端 Origin：
 
@@ -66,7 +69,7 @@ FRONTEND_BASE_URL=https://knora.moutai.com.cn
 企业微信应用与智能 Bot 都使用：
 
 ```markdown
-[\[1\]](https://knora.example.com/source)
+[\[1\]](https://knora.moutai.com.cn/im-reference?token=<REFERENCE_TOKEN>)
 ```
 
 客户端显示可点击的 `[1]`，不显示裸网址。应用模式发送 Markdown 消息，超过 2048
@@ -75,9 +78,10 @@ FRONTEND_BASE_URL=https://knora.moutai.com.cn
 
 ## 设备跳转与匿名隔离
 
-文档与 Wiki 在 IM 正文中使用同一个绝对
-`/api/v1/custom/im-output/reference?token=...` 地址。`token` 只由最终 IM 出口根据已绑定
-到真实消息的来源签发，不接受模型生成的地址。用户点击时，后端先验证签名，再按
+新发送的文档与 Wiki 引用使用生产前端 Origin 加同源阅读页：
+`https://knora.moutai.com.cn/im-reference?token=<REFERENCE_TOKEN>`。历史消息和兼容入口仍
+使用 `/api/v1/custom/im-output/reference?token=...`，该入口验证后按设备重定向。`token` 只由
+最终 IM 出口根据已绑定到真实消息的来源签发，不接受模型生成的地址。用户点击时，后端先验证签名，再按
 User-Agent 和 `Sec-CH-UA-Mobile` 做无状态设备判断：企业微信电脑端跳到独立
 `/im-reference?token=...`，移动端跳到独立 `/mobile/reference?token=...`。网页引用始终
 直接使用原始 HTTP(S) 地址。文档分片与 Wiki 必须固定使用企业微信内置阅读链路，
@@ -127,18 +131,21 @@ Content-Type: application/json
 }
 ```
 
-也可以传 `channel_id`，此时平台、模式、输出模式和智能体都从真实渠道读取。响应同时
-返回统一渲染结果和 `transport_payloads`：企业微信应用为实际 Markdown 分包，Bot 为
-实际 `stream` 最终 body。接口不发送任何外部消息。
+也可以传 `channel_id`，此时平台、模式、输出模式和智能体都从当前租户可见的真实渠道读取。
+响应在 `data` 中返回统一渲染结果和 `transport_payloads`：企业微信 Webhook 为实际 Markdown
+分包，企业微信 WebSocket Bot 为最终 `stream` body，其他平台返回最终正文载荷。接口只读且不
+发送任何外部消息；`session_id`、`message_id`、`channel_id` 和 `agent_id` 必须属于当前租户。
 
 ## 验收重点
 
 - 所有平台 × 流式/完整输出；
-- 快速问答与全部 ReAct/Claude Agent SDK 智能体；
+- 九种当前 `agent_type`，并确认统一 `agent_mode: agent` 的 IM 出口行为一致；
 - 单轮、多轮、取消知识库、无召回、零引用、重复引用、多分片、多来源、错误标签；
 - 企业微信应用长回答分包、Bot 中间 replace 与最终 `finish`；
 - Web 和移动端正文引用位置、顺序、完整性及三类来源跳转；
 - 同一条企业微信引用分别从电脑端和移动端匿名点击，确认进入各自独立阅读页的精确来源；
 - 文档分片页继续打开原文档，且全过程不进入知识库、不要求登录；
 - 普通 Web/移动端知识库、Wiki 与聊天接口仍拒绝匿名访问；
-- 本地 `-local` 模型为主，协议正常时可用 V4 Flash 排除模型能力因素；不采用降级实现。
+- 生产验收使用 `https://knora.moutai.com.cn`；本地协议验收仅使用明确标注的
+  `http://localhost:5177` / `http://localhost:8080`，并使用当前本地 runtime profile；
+  模型名称和凭据从环境配置注入，不写入本文档。

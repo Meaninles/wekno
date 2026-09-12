@@ -2,7 +2,9 @@
 
 This local Docker service mirrors the production `llmgateway-prod` LiteLLM
 configuration for diagnosing production behavior without mutating production.
-The source snapshot was captured read-only on 2026-08-01.
+The source snapshot is an internal diagnostic input; document verification date
+is 2026-09-13. This README intentionally omits production hosts, network
+segments, model endpoints, credentials, and captured response data.
 
 The active config applies exactly two requested transformations to
 `config.production.non-glm.yaml`: it excludes deployments that are unreachable
@@ -22,9 +24,10 @@ patch and LiteLLM 1.92.0 runtime are mirrored as well.
 ## Runtime
 
 The checked-in Compose file expects secrets through environment variables and
-never stores them in Git. It joins `weknora_WeKnora-network-dev`, publishes the
-gateway at `http://127.0.0.1:14000`, and keeps the legacy Docker DNS alias that
-is already present in WeKnora's SSRF allowlist.
+never stores them in Git. It publishes the mirror locally at
+`http://127.0.0.1:14000` for local diagnostics only. It may use a private Docker
+network alias required by the local test stack; the alias and its upstream
+address are deliberately not documented here.
 
 ```powershell
 docker compose --env-file .env.local up -d
@@ -37,11 +40,11 @@ cluster.
 
 ## Reachability selection
 
-The local host and Docker network currently cannot route to the production-only
-`10.14.210.*` service subnet, so those deployments are intentionally absent
-from the active config. The production snapshot retains them for drift audits;
-no replacement endpoint or fallback is invented. All active `10.0.11.*`
-entries retain their production fields unchanged.
+Some production-only deployments are intentionally absent from the local active
+config when the local host cannot reach the protected production network. The
+production snapshot retains them only for drift audits; no replacement endpoint
+or fallback is invented. Exact upstream addresses remain in protected
+deployment inputs and must not be copied into public documentation.
 
 ## WeKnora registration
 
@@ -66,7 +69,7 @@ temporary agents, sessions, and a knowledge base, then deletes them in a
 `finally` cleanup block.
 
 ```powershell
-$env:WEKNORA_TOKEN = "<local bearer token>"
+$env:WEKNORA_TOKEN = "<TENANT_BEARER_TOKEN>"
 node .\business_workflow_smoke.mjs
 ```
 

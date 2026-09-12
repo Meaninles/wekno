@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 轻量技能 | `internal/custom/modules/skillhub` 管理，前端“技能”页创建 | 作为提示词/上下文片段注入智能体，可共享给空间或用户，也可在对话中临时选择。 |
 | 预加载运行时技能 | `skills/preloaded/` | 原生智能体技能目录，按渐进式披露方式读取 `SKILL.md` 和资源文件，可通过沙箱执行脚本。 |
-| 专业技能 | `internal/custom/modules/skillhub` 管理，通常从技能包导入 | Claude SDK 运行时会把技能包落到 `.claude/skills/<name>`，供 `general-agent` 和 `document-processing-agent` 按需使用。 |
+| 专业技能 | `internal/custom/modules/skillhub` 管理，通常从技能包导入 | 统一 Agent Runtime 会把技能包准备到受控工作区 `/workspace/skills/<name>`，供 AgentScope Harness 按需使用。 |
 
 轻量技能不要求 `SKILL.md` 格式；预加载运行时技能和专业技能通常包含 `SKILL.md`。前端会分别展示轻量技能和专业技能。
 
@@ -31,7 +31,7 @@
   - 其他技能包文件
 ```
 
-原生运行时技能通过 `read_skill` 读取内容，通过 `execute_skill_script` 在沙箱中执行脚本。Claude SDK 专业技能由旁路服务放到 `.claude/skills/<name>` 后交给 Claude SDK 按需读取。
+原生运行时技能通过 `read_skill` 读取内容，通过 `execute_skill_script` 在沙箱中执行脚本。专业技能由统一 Agent Runtime 放到受控工作区 `/workspace/skills/<name>`，再交给 AgentScope Harness 按需读取。
 
 ## SKILL.md 格式
 
@@ -57,7 +57,7 @@ description: 从 PDF 文件中提取文本和表格。用户要求分析或转�
 
 ## 轻量技能
 
-轻量技能由二开技能中心管理，适合固定写作风格、术语约束、输出模板、审校规则等场景。它们不会作为文件技能包挂载到 `.claude/skills`，也不依赖沙箱脚本。
+轻量技能由二开技能中心管理，适合固定写作风格、术语约束、输出模板、审校规则等场景。它们不会作为文件技能包挂载到专业技能工作区，也不依赖沙箱脚本。
 
 相关配置字段：
 
@@ -86,7 +86,7 @@ description: 从 PDF 文件中提取文本和表格。用户要求分析或转�
 | `professional_skills_selection_mode` | `all` / `selected` / `none` |
 | `selected_professional_skills` | `selected` 模式下的专业技能名称列表 |
 
-当前前端主要在 `general-agent` 和 `document-processing-agent` 的技能配置页展示专业技能。运行时会把选中的专业技能传给 Claude SDK 旁路服务，旁路服务在运行目录中准备 `.claude/skills/<name>`。
+当前前端主要在 `general-agent` 和 `document-processing-agent` 的技能配置页展示专业技能。运行时会把选中的专业技能传给统一 Agent Runtime，服务在受控工作区中准备 `/workspace/skills/<name>`。
 
 当前仓库内置专业技能目录位于 `skills/professional/`，包括：
 
@@ -115,7 +115,7 @@ skills/preloaded/
 | `WEKNORA_SANDBOX_TIMEOUT` | 脚本执行超时秒数 | `60` |
 | `WEKNORA_SANDBOX_DOCKER_IMAGE` | Docker 沙箱镜像 | `wechatopenai/weknora-sandbox:latest` |
 
-轻量技能不执行脚本，不受沙箱模式影响。专业技能在 Claude SDK 旁路服务中作为技能包使用，具体脚本能力取决于旁路服务能力和技能包内容。
+轻量技能不执行脚本，不受沙箱模式影响。专业技能在统一 Agent Runtime 中作为技能包使用，具体脚本能力取决于运行时沙箱和技能包内容。
 
 ## 接口
 
@@ -128,7 +128,7 @@ skills/preloaded/
     {
       "name": "policy-style",
       "display_name": "制度写作风格",
-      "description": "按公司制度文档风格输出",
+      "description": "按制度类文档风格输出",
       "kind": "lightweight"
     }
   ],
@@ -156,3 +156,4 @@ skills/preloaded/
 - 多文件说明、模板、复杂工作法优先做专业技能。
 - 需要脚本执行的能力必须明确沙箱边界，不要把任意代码执行能力混入普通提示词技能。
 - 专业技能名称和描述要清楚描述触发条件，避免模型在无关任务中误用。
+- 专业技能工作区路径由服务端控制，客户端不应依赖或拼接该路径。

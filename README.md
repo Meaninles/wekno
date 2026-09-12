@@ -8,6 +8,14 @@
 
 # WeKnora Agent 企业知识平台
 
+> 当前代码、配置与文档索引核对日期：2026-09-13。
+>
+> 生产访问地址（本文所有面向使用者的示例均以此为准）：
+> [https://knora.moutai.com.cn](https://knora.moutai.com.cn)。
+> API 基地址为 `https://knora.moutai.com.cn/api/v1`，移动端为
+> `https://knora.moutai.com.cn/mobile/`。生产页面不要求用户直接访问后端容器端口；
+> 文中出现的 `localhost` 仅代表明确标注的本地开发验证地址。
+
 Kubernetes Agent 工作区支持单个静态 PVC、按运行隔离的 subPath，跨轮文件获取和制品交付沿用现有链路；见[配置与回收说明](docs/custom/Agent运行时静态PVC与目录隔离.md)。
 
 本仓库是基于 WeKnora 深度二开的企业知识与智能体平台。当前版本已经不只是单
@@ -25,7 +33,17 @@ Embed SDK 同时保留 `window.WeKnora`，并提供 `window.ZhiHui` 品牌别名
 > [当前版本生产更新部署执行手册](./docs/custom/当前版本生产更新部署执行手册.md)
 > 开始，不能只使用上游 WeKnora 的部署说明或默认 Helm 值。
 
-## 当前开发入口
+## 生产入口与本地开发入口
+
+| 场景 | 桌面 Web | API | 移动 Web |
+|---|---|---|---|
+| 生产 | `https://knora.moutai.com.cn/` | `https://knora.moutai.com.cn/api/v1` | `https://knora.moutai.com.cn/mobile/` |
+| 本地开发（仅开发机） | `http://localhost:5177/` | `http://localhost:8080/api/v1` | `http://localhost:5177/mobile/` |
+
+生产的公网 TLS、域名路由和后端服务发现由 WAF/Ingress/Service 配置负责；不要把
+生产内部 Service、节点地址、对象存储地址或模型地址写入文档、前端代码或客户端配置。
+
+### 本地开发入口（仅本地）
 
 | 服务 | 地址 | 说明 |
 |---|---|---|
@@ -43,14 +61,14 @@ Embed SDK 同时保留 `window.WeKnora`，并提供 `window.ZhiHui` 品牌别名
 | 索引和衍生 | chunk、向量、关键词、摘要、问题生成、实体关系图谱、Wiki 页面 |
 | 检索问答 | 向量/关键词混合检索、Rerank、FAQ 优先、图谱、Wiki、来源引用 |
 | 精确文本定位 | [grep 同步检索投影](docs/custom/GrepChunks同步检索投影.md)，保留正文/标题正则及权限，减少无效切片扫描 |
-| 智能体 | 快速问答、简单对话、智能推理、Wiki、数据、表格、通用、文档处理 |
+| 智能体 | 统一 `agent` 运行模式下的知识问答、Wiki、混合 Wiki+RAG、数据分析、表格分析、通用、文档处理、知识库管理和自定义类型 |
 | 企业治理 | 多租户、RBAC、共享空间、SSO、组织同步、默认配置、审计、凭据加密 |
 | 工具与数据 | MCP、技能、Web 搜索、MySQL/PostgreSQL 只读分析、定时任务 |
 | 发布集成 | REST API、Embed、IM、移动 Web、Chrome 扩展、ClawHub |
 
 ### 常见业务场景
 
-- 制度、流程、产品手册问答：文档知识库 + 快速问答，回答附来源。
+- 制度、流程、产品手册问答：文档知识库 + 知识问答 Agent，回答附来源。
 - 大量长文档阅读：Wiki + 分类页面 + 渐进式关联图。
 - 客服标准口径：FAQ + FAQ 优先策略 + 推荐问题。
 - 经营数据分析：受限数据库源 + 数据分析智能体 + 图表/报告。
@@ -120,15 +138,15 @@ flowchart LR
     WF --> Q["Redis / Asynq 投递"]
     Q --> A1["parse-worker-1\n完整文档并发 4"]
     Q --> A2["parse-worker-2\n完整文档并发 4"]
-    Q --> A3["app-3\n完整文档并发 4"]
+    Q --> A3["parse-worker-3\n完整文档并发 4"]
     A1 --> P["解析→分块→索引→衍生→终态"]
     A2 --> P
     A3 --> P
 ```
 
-管理员的 `asynq.concurrency` 现在表示“单个 app 同时接纳的完整文档数”。生产
-使用 3 个 app、每实例 4，因此同时处理 12 份完整文档；等待文档在全局按文档
-排队，哪个实例先空闲就继续领取，而不是把不同任务类型分别堆成长队列。
+管理员的 `asynq.concurrency` 现在表示“单个解析执行实例同时接纳的完整文档数”。
+生产使用 3 个 parse worker、每实例 4，因此解析执行层同时处理 12 份完整文档；等待
+文档在全局按文档排队，哪个实例先空闲就继续领取，而不是把不同任务类型分别堆成长队列。
 
 每份文档只有在启用项全部达到终态后才算完成：
 
@@ -166,20 +184,11 @@ flowchart LR
 
 ### 4. 集群级模型准入
 
-模型和解析器并发通过 Redis 在整个集群共享，不能乘以 API/worker 副本数：
-
-| 资源池 | 集群并发 | 交互预留 | 等待 | 单租户/单文档 |
-|---|---:|---:|---:|---:|
-| Qwen3.6-27B | 32 | 28 | 36 | 32 / 2 |
-| DeepSeek-V4-Flash INT8 | 16 | 14 | 16 | 16 / 2 |
-| Qwen3.6-35B-A3B | 32 | 8 | 0 | 32 / 4 |
-| Qwen3-Embedding-8B | 64 | — | — | 32 / 8 |
-| bge-reranker-v2-m3 | 64 | — | — | 64 / 2 |
-| Qwen3-VL-32B | 16 | — | — | 16 / 4 |
-| Qwen2.5-Omni-7B | 8 | — | — | 8 / 2 |
-
-两个主要聊天池合计同时执行 48、等待 52，总接纳 100；100 已包含 48 个执行会话。
-该设置与每个 parse-worker 的完整文档并发是两个不同层级。
+模型和解析器并发通过 Redis 在整个集群共享，不能乘以 API/worker 副本数。当前
+有效资源池由 `capacity-control` 编译并由 `modeladmission` 执行，后台文档、衍生、
+Wiki 与交互会话按资源类型共用准入边界。生产具体模型名称、地址、并发和凭据属于受
+保护的部署值，不在公开文档中展开；管理员应以系统容量页和受保护的 Helm/Secret 值
+为准。该设置与每个 parse-worker 的完整文档并发是两个不同层级。
 
 ### 5. 无 RWX 存储
 
@@ -188,7 +197,7 @@ flowchart LR
 | 原始知识文件、衍生对象 | MinIO | 私有 OBS |
 | Agent 最终产物 | MinIO | 私有 OBS |
 | Agent 原文件中转 | MinIO 临时唯一前缀 | OBS 临时唯一前缀，生命周期 ≤24h |
-| app/DocReader/Agent 工作区 | 容器/节点本地临时盘 | `/mnt/weknora-data/weknora-v2-scratch/<role>` 隔离 hostPath |
+| app/DocReader/Agent 工作区 | 容器/节点本地临时盘 | 按角色隔离的节点本地临时盘（具体路径属于受保护部署值） |
 | 状态、chunk、向量、问题、Wiki | PostgreSQL | PostgreSQL/ParadeDB |
 | 实体关系 | Neo4j | Neo4j |
 
@@ -207,21 +216,26 @@ flowchart LR
 
 ### 7. 统一 Agent Harness
 
-所有问答使用同一 AgentScope Harness。各智能体保留独立类型和能力：知识问答固定 15 次，其余类型固定 50 次。Go 持久化 Run、检查点、工具回执与事件；Worker 使用租约和 epoch 接管，最终消息与结果原子提交。工作区独立于 Worker，最终产物经 Go 校验并写入私有对象存储。详见[统一 Agent Harness 实现与验证](./docs/custom/统一AgentHarness实现方案.md)。
+所有问答使用同一 AgentScope Harness。各智能体保留独立类型和能力：知识问答默认 15
+次；文档处理、数据分析和表格分析可用产物能力，预算为 100 次；其他类型默认 50 次。
+Go 持久化 Run、检查点、工具回执与事件；Worker 使用租约和 epoch 接管，最终消息与
+结果原子提交。工作区独立于 Worker，最终产物经 Go 校验并写入私有对象存储。详见
+[统一 Agent Harness 实现与验证](./docs/custom/统一AgentHarness实现方案.md)。
 
 ## 生产部署
 
 ### 目标拓扑
 
-当前生产最优落地配置不是“第一阶段/第二阶段”方案：
+生产目标拓扑以受保护的 `helm/values-production-ha.yaml` 和现场发布值为准。
+为避免泄露节点地址，公开文档只使用逻辑节点角色：
 
-| 节点 | 规格 | 目标工作负载 |
+| 逻辑节点角色 | 目标工作负载 |
 |---|---|---|
-| `10.14.201.1` | 8C/32Gi + 500G | API、parse、derivative、maintenance、DocReader、两个 Agent、Web |
-| `10.14.201.2` | 8C/32Gi + 500G | API、parse、wiki、maintenance、DocReader、两个 Agent、Web |
-| `10.14.201.7` | 8C/32Gi + 数据盘 | API、parse、derivative、wiki、DocReader |
-| `10.14.201.6` | 8C/16Gi | PostgreSQL 和集群基础设施，不新增应用 worker |
-| `10.14.201.54` | 8C/16Gi | 保留 Neo4j、Ingress 等 |
+| `document-worker-a` | API、parse、derivative、maintenance、DocReader、Agent、Web |
+| `document-worker-b` | API、parse、wiki、maintenance、DocReader、Agent、Web |
+| `document-worker-c` | API、parse、derivative、wiki、DocReader |
+| `stateful-services` | PostgreSQL、Redis 及其他既有集群基础设施；不新增应用 worker |
+| `graph-ingress-services` | Neo4j、Ingress 等既有入口/图谱服务 |
 
 | 组件 | 副本 | request | limit | 临时卷 |
 |---|---:|---:|---:|---:|
@@ -412,14 +426,10 @@ helm lint ./helm \
   -f ./deploy/production/values-site.example.yaml
 ```
 
-最终验收不能只检查 HTTP 200 或脚本摘要，要联合核对 PostgreSQL、向量字段、
-Neo4j、Wiki、对象存储、前端状态和真实召回。当前代表性结果：
-
-- 500/500 文档完成，约 4.10 docs/s。
-- 严格匹配的 100 文档测试，三 app 相对单 app 本地提升约 3.67 倍。
-- “公司制度”632/632 文档主解析和所有启用衍生阶段完成，保留供继续使用。
-- 最终报告：
-  [`final_acceptance_report.json`](./custom/tests/document_processing_cluster_e2e/final_acceptance_outputs/20260726-0107/final_acceptance_report.json)。
+最终验收不能只检查 HTTP 200 或脚本摘要，要联合核对 PostgreSQL、向量字段、Neo4j、
+Wiki、对象存储、前端状态和真实召回。历史压测报告和测试样本随测试目录保存，不作为
+当前生产容量或性能承诺；验收入口见[二开测试索引](./custom/tests/README.md)和受保护
+的生产执行手册。
 
 ## 文档
 

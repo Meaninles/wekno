@@ -1,5 +1,8 @@
 # WeKnora HTTP 客户端
 
+> 生产 API 入口使用 `https://knora.moutai.com.cn`。客户端内部会拼接 `/api/v1/*`；本地
+> 开发时才把 base URL 替换为 `http://localhost:8080`，不要把本地地址用于生产配置。
+
 > 文档上传/重解析返回成功只表示已经持久接收，不表示所有处理完成。当前服务按
 > 文档级工作流排队；启用的向量、多模态、摘要、问题/图谱和 Wiki 全部成功后才
 > 是最终完成。队列位置和完整状态筛选见
@@ -34,8 +37,8 @@ import (
 
 // 创建客户端实例
 apiClient := client.NewClient(
-    "http://api.example.com", 
-    client.WithToken("your-auth-token"),
+    "https://knora.moutai.com.cn",
+    client.WithAPIKey("<TENANT_API_KEY>"),
     client.WithTimeout(30*time.Second),
 )
 ```
@@ -45,10 +48,10 @@ apiClient := client.NewClient(
 客户端支持通过 `WithTenantID` 设置默认租户，请求时会自动携带 `X-Tenant-ID` 请求头：
 
 ```go
-tenantID := uint64(10000)
+tenantID := uint64(123456) // 替换为实际租户 ID；示例值不可用于生产
 apiClient := client.NewClient(
-    "http://api.example.com",
-    client.WithToken("your-auth-token"),
+    "https://knora.moutai.com.cn",
+    client.WithAPIKey("<TENANT_API_KEY>"),
     client.WithTenantID(tenantID),
 )
 ```
@@ -56,8 +59,8 @@ apiClient := client.NewClient(
 如果某个请求需要临时切换租户，可以在 `context` 中设置 `TenantID`，值可以是 `uint64`、`*uint64` 或字符串形式的数字，客户端会优先使用该值：
 
 ```go
-ctx := context.WithValue(context.Background(), "TenantID", uint64(10000))
-// 调用任意客户端方法时传入 ctx，即可切换到租户 10000
+ctx := context.WithValue(context.Background(), "TenantID", uint64(123456))
+// 调用任意客户端方法时传入 ctx，即可切换到示例租户；实际 ID 由权限决定
 ```
 
 ### 示例：创建知识库并上传文件
@@ -236,6 +239,7 @@ err = agentSession.Ask(context.Background(), "什么是深度学习?",
 ```bash
 cd client/cmd/agent_test
 go build -o agent_test
+# 仅本地开发/验收；生产客户端 base URL 使用 https://knora.moutai.com.cn
 ./agent_test -url http://localhost:8080 -kb <knowledge_base_id>
 ```
 

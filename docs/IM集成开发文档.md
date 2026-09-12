@@ -1,5 +1,9 @@
 # IM 集成开发文档
 
+> 本文按当前源码核对。生产回调基地址为
+> `https://knora.moutai.com.cn/api/v1/im/callback/{channel_id}`；本地联调使用明确标注的
+> `http://localhost:8080`，不得把本地地址当作生产地址。
+
 > 当前生产的统一引用、企业微信设备内跳转和公共原文预览实现见
 > [IM 统一引用输出实现说明](./custom/IM统一引用输出实现说明.md)；本文其余部分保留
 > 各平台接入协议。模型正文来源说明与平台可点击引用必须同时保留。
@@ -113,7 +117,7 @@ IM 渠道绑定到 Agent，一个 Agent 可接入多个 IM 渠道，所有配置
    - **Token**：自定义或随机生成（记录下来）
    - **EncodingAESKey**：自定义或随机生成（记录下来）
    - **Corp Agent ID**：应用 AgentID（整数）
-3. 保存后，渠道卡片上会显示**回调地址**，格式为 `https://你的域名/api/v1/im/callback/{channel_id}`
+3. 保存后，渠道卡片上会显示**回调地址**，生产格式为 `https://knora.moutai.com.cn/api/v1/im/callback/{channel_id}`；本地联调将主机部分替换为 `http://localhost:8080`。
 4. 复制该回调地址
 
 **第三步：配置企业微信接收消息**

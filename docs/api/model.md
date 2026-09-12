@@ -57,12 +57,12 @@ WeKnora 支持多种主流 AI 模型服务商，在创建模型时可通过 `par
 
 ```curl
 # 获取所有服务商
-curl --location 'http://localhost:8080/api/v1/models/providers' \
---header 'X-API-Key: your_api_key'
+curl --location 'https://knora.moutai.com.cn/api/v1/models/providers' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 
 # 获取支持 Embedding 类型的服务商
-curl --location 'http://localhost:8080/api/v1/models/providers?model_type=embedding' \
---header 'X-API-Key: your_api_key'
+curl --location 'https://knora.moutai.com.cn/api/v1/models/providers?model_type=embedding' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -118,9 +118,9 @@ curl --location 'http://localhost:8080/api/v1/models/providers?model_type=embedd
 **本地 Ollama 模型**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "qwen3:8b",
     "type": "KnowledgeQA",
@@ -136,9 +136,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **远程 API 模型（指定服务商）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "qwen-plus",
     "type": "KnowledgeQA",
@@ -146,7 +146,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
     "description": "阿里云 Qwen 大模型",
     "parameters": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key": "sk-your-dashscope-api-key",
+        "api_key": "<API_KEY_OUTPUT>",
         "provider": "aliyun"
     }
 }'
@@ -157,9 +157,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **本地 Ollama 模型**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "nomic-embed-text:latest",
     "type": "Embedding",
@@ -179,9 +179,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **远程 API 模型（阿里云 DashScope）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "text-embedding-v3",
     "type": "Embedding",
@@ -189,7 +189,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
     "description": "阿里云通义千问 Embedding 模型",
     "parameters": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key": "sk-your-dashscope-api-key",
+        "api_key": "<API_KEY_OUTPUT>",
         "provider": "aliyun",
         "embedding_parameters": {
             "dimension": 1024,
@@ -202,9 +202,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **远程 API 模型（Jina AI）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "jina-embeddings-v3",
     "type": "Embedding",
@@ -212,7 +212,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
     "description": "Jina AI Embedding 模型",
     "parameters": {
         "base_url": "https://api.jina.ai/v1",
-        "api_key": "jina_your_api_key",
+        "api_key": "<MODEL_API_KEY>",
         "provider": "jina",
         "embedding_parameters": {
             "dimension": 1024,
@@ -227,9 +227,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **远程 API 模型（阿里云 DashScope）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "gte-rerank",
     "type": "Rerank",
@@ -237,7 +237,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
     "description": "阿里云 GTE Rerank 模型",
     "parameters": {
         "base_url": "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
-        "api_key": "sk-your-dashscope-api-key",
+        "api_key": "<API_KEY_OUTPUT>",
         "provider": "aliyun"
     }
 }'
@@ -246,9 +246,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **远程 API 模型（Jina AI）**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "jina-reranker-v2-base-multilingual",
     "type": "Rerank",
@@ -256,7 +256,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
     "description": "Jina AI Rerank 模型",
     "parameters": {
         "base_url": "https://api.jina.ai/v1",
-        "api_key": "jina_your_api_key",
+        "api_key": "<MODEL_API_KEY>",
         "provider": "jina"
     }
 }'
@@ -265,9 +265,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 ### 创建视觉模型（VLLM）
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "qwen-vl-plus",
     "type": "VLLM",
@@ -275,7 +275,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
     "description": "阿里云通义千问视觉模型",
     "parameters": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key": "sk-your-dashscope-api-key",
+        "api_key": "<API_KEY_OUTPUT>",
         "provider": "aliyun"
     }
 }'
@@ -295,7 +295,7 @@ curl --location 'http://localhost:8080/api/v1/models' \
         "description": "阿里云通义千问 Embedding 模型",
         "parameters": {
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "sk-***",
+            "api_key": "<API_KEY_OUTPUT>",
             "provider": "aliyun",
             "embedding_parameters": {
                 "dimension": 1024,
@@ -318,9 +318,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: `data` 为数组，每个元素的字段结构同 `POST /models` 响应。内置模型的 `base_url` 与 `api_key` 字段为空字符串。
@@ -336,9 +336,9 @@ curl --location 'http://localhost:8080/api/v1/models' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/models/dff7bc94-7885-4dd1-bfd5-bd96e4df2fc3' \
+curl --location 'https://knora.moutai.com.cn/api/v1/models/dff7bc94-7885-4dd1-bfd5-bd96e4df2fc3' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**: 字段结构同 `POST /models` 响应。404 表示模型不存在。
@@ -366,9 +366,9 @@ curl --location 'http://localhost:8080/api/v1/models/dff7bc94-7885-4dd1-bfd5-bd9
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/models/8fdc464d-8eaa-44d4-a85b-094b28af5330' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/models/8fdc464d-8eaa-44d4-a85b-094b28af5330' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --data '{
     "name": "gte-rerank-v2",
     "type": "Rerank",
@@ -376,7 +376,7 @@ curl --location --request PUT 'http://localhost:8080/api/v1/models/8fdc464d-8eaa
     "description": "阿里云 GTE Rerank 模型 V2",
     "parameters": {
         "base_url": "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
-        "api_key": "sk-your-new-api-key",
+        "api_key": "<API_KEY_OUTPUT>",
         "provider": "aliyun"
     }
 }'
@@ -395,9 +395,9 @@ curl --location --request PUT 'http://localhost:8080/api/v1/models/8fdc464d-8eaa
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/models/8fdc464d-8eaa-44d4-a85b-094b28af5330' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/models/8fdc464d-8eaa-44d4-a85b-094b28af5330' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: your_api_key'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:

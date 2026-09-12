@@ -1,5 +1,8 @@
 # Chunking Guide
 
+> Production users access the platform at `https://knora.moutai.com.cn`. The local Docker
+> commands and service addresses, if used in examples below, are for development only.
+
 How WeKnora splits uploaded documents before embedding, why the defaults
 are what they are, and when to change them.
 

@@ -2,6 +2,10 @@
 
 这是一个独立的外部 MCP 协议适配层，供 WorkBuddy、Codex 或其他 MCP 客户端访问 WeKnora。它不保存租户 API Key：HTTP 请求必须携带 `X-API-Key`，服务只在当前请求内把该 Key 转发到 `WEKNORA_BASE_URL`。
 
+> 文档核对日期：2026-09-13。生产后端基地址统一为
+> `https://knora.moutai.com.cn/api/v1`。适配层自身的公网 MCP 入口由受保护的生产部署
+> 配置决定，不能臆造为生产域名下的 `/mcp`；客户端应使用发布人员提供的实际入口。
+
 ## 能力
 
 - Streamable HTTP：`/mcp` 和 `/mcp/`（两者等价，不依赖重定向）
@@ -30,9 +34,38 @@
 
 服务启动或请求 `tools/list` 时会校验工具名。缺文件、格式错误或出现未知工具名时，`/healthz` 返回 503，避免错误配置意外开放全部能力。
 
-## WorkBuddy 配置
+## 生产客户端配置
 
-本地双实例入口由 Compose 的 `runtime-mcp-entry` 提供，宿主机默认地址为 `http://127.0.0.1:8000/mcp`。WorkBuddy 的 MCP 配置可写成：
+生产部署时，适配层进程应设置：
+
+```text
+WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
+```
+
+WorkBuddy、Codex 或其他客户端的 `url` 必须填写生产部署实际发布的 MCP 入口；该入口
+不在本仓库公开。请求头中的 API Key 使用客户端密钥管理注入：
+
+```json
+{
+  "mcpServers": {
+    "weknora": {
+      "type": "http",
+      "url": "<PRODUCTION_MCP_ENDPOINT>",
+      "headers": {
+        "X-API-Key": "<TENANT_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+`WEKNORA_BASE_URL` 是后端 API 地址，客户端 `url` 是适配层 MCP 协议入口，两者不是
+同一个地址。
+
+## 本地开发/验收客户端配置
+
+本地双实例入口由 Compose 的 `runtime-mcp-entry` 提供，宿主机默认地址为
+`http://127.0.0.1:8000/mcp`。这只适用于本地开发/验收，WorkBuddy 的 MCP 配置可写成：
 
 ```json
 {
@@ -41,14 +74,15 @@
       "type": "http",
       "url": "http://127.0.0.1:8000/mcp/",
       "headers": {
-        "X-API-Key": "填写当前租户 API Key"
+        "X-API-Key": "<TENANT_API_KEY>"
       }
     }
   }
 }
 ```
 
-不要把 API Key 写进服务镜像、Compose 文件或 Git。生产环境只需要把 URL 换成生产 MCP 入口，并在生产机器挂载生产白名单；本次实现不修改生产部署。
+不要把 API Key 写进服务镜像、Compose 文件或 Git。生产环境应在受保护部署中挂载生产
+白名单，并使用 API Key 轮换和网络 ACL。
 
 工具名称保持稳定的英文标识，便于 MCP 客户端调用；每个工具同时提供中文标题和中文描述，支持客户端在工具列表中显示中文。客户端若不显示 MCP `title` 字段，仍会显示协议要求的英文工具名，这不影响调用。
 
@@ -87,7 +121,7 @@ docker compose -p weknora-runtime-profile-e2e -f custom/tests/runtime_profile_e2
 `custom/tests/mcp_policy_e2e/protocol_probe.py` 使用官方 `mcp.client` 的 `ClientSession` 模拟 WorkBuddy，验证初始化、`tools/list`、白名单拒绝和实际 API 调用。脚本不会输出 API Key：
 
 ```powershell
-$env:WEKNORA_E2E_TENANT_API_KEY = "当前租户 API Key"
+$env:WEKNORA_E2E_TENANT_API_KEY = "<TENANT_API_KEY>"
 python custom/tests/mcp_policy_e2e/protocol_probe.py `
   --url http://127.0.0.1:8000/mcp/ `
   --api-key-env WEKNORA_E2E_TENANT_API_KEY `

@@ -21,8 +21,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/system/info' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/system/info' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -51,8 +51,8 @@ curl --location 'http://localhost:8080/api/v1/system/info' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/system/parser-engines' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/system/parser-engines' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -84,11 +84,11 @@ curl --location 'http://localhost:8080/api/v1/system/parser-engines' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/system/parser-engines/check' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/system/parser-engines/check' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
-    "addr": "http://docreader:8000"
+    "addr": "<DOCREADER_SERVICE_URI>"
 }'
 ```
 
@@ -113,11 +113,11 @@ curl --location 'http://localhost:8080/api/v1/system/parser-engines/check' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/system/docreader/reconnect' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/system/docreader/reconnect' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
-    "addr": "http://docreader:8000"
+    "addr": "<DOCREADER_SERVICE_URI>"
 }'
 ```
 
@@ -134,8 +134,8 @@ curl --location 'http://localhost:8080/api/v1/system/docreader/reconnect' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/system/storage-engine-status' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/system/storage-engine-status' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -177,15 +177,15 @@ curl --location 'http://localhost:8080/api/v1/system/storage-engine-status' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/system/storage-engine-check' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/system/storage-engine-check' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "provider": "minio",
     "minio": {
-        "endpoint": "localhost:9000",
-        "access_key": "minioadmin",
-        "secret_key": "minioadmin",
+        "endpoint": "<OBJECT_STORAGE_ENDPOINT>",
+        "access_key": "<OBJECT_STORAGE_ACCESS_KEY>",
+        "secret_key": "<OBJECT_STORAGE_SECRET>",
         "bucket": "weknora",
         "use_ssl": false
     }

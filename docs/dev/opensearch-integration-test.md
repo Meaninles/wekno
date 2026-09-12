@@ -1,5 +1,10 @@
 # OpenSearch k-NN driver — local integration test
 
+> This page is for local integration testing only. Production users call
+> `https://knora.moutai.com.cn/api/v1`; the localhost cluster and Docker service names below
+> must not be copied into production configuration. Production credentials and endpoints come
+> from protected deployment configuration.
+
 This guide brings up a single-node OpenSearch cluster and exercises the
 OpenSearch retrieve engine end to end. The driver lives in
 `internal/application/repository/retriever/opensearch/`.

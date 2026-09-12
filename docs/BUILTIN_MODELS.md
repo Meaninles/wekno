@@ -28,7 +28,7 @@ WeKnora 支持两种方式添加内置模型：**推荐**使用 YAML 声明式�
 ```yaml
 builtin_models:
   - id: <required, stable, UPSERT key>
-    tenant_id: <int, default 10000>          # 与 tenants_id_seq 起点对齐
+    tenant_id: <BUILTIN_MODEL_TENANT_ID>  # 使用当前部署的内置模型租户
     name: <string>
     type: KnowledgeQA | Embedding | Rerank | VLLM | ASR
     source: <string, default "remote">       # local | remote | aliyun | ...
@@ -113,7 +113,7 @@ env_file:
 ```bash
 LLM_MODEL_NAME=gpt-4o-mini
 LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=sk-...
+LLM_API_KEY=<LLM_API_KEY>
 LLM_PROVIDER=openai
 ```
 
@@ -179,12 +179,12 @@ INSERT INTO models (
     parameters, is_default, status, is_builtin
 ) VALUES (
     'builtin-llm-001',
-    10000,
+    <BUILTIN_MODEL_TENANT_ID>,
     'gpt-4o-mini',
     'KnowledgeQA',
     'remote',
     '系统内置 LLM 模型',
-    '{"base_url": "https://api.openai.com/v1", "api_key": "sk-xxx", "provider": "openai"}'::jsonb,
+    '{"base_url": "https://api.openai.com/v1", "api_key": "<LLM_API_KEY>", "provider": "openai"}'::jsonb,
     false,
     'active',
     true
@@ -196,12 +196,12 @@ INSERT INTO models (
     parameters, is_default, status, is_builtin
 ) VALUES (
     'builtin-embedding-001',
-    10000,
+    <BUILTIN_MODEL_TENANT_ID>,
     'text-embedding-3-small',
     'Embedding',
     'remote',
     '系统内置 Embedding 模型',
-    '{"base_url": "https://api.openai.com/v1", "api_key": "sk-xxx", "provider": "openai", "embedding_parameters": {"dimension": 1536, "truncate_prompt_tokens": 0}}'::jsonb,
+    '{"base_url": "https://api.openai.com/v1", "api_key": "<EMBEDDING_API_KEY>", "provider": "openai", "embedding_parameters": {"dimension": 1536, "truncate_prompt_tokens": 0}}'::jsonb,
     false,
     'active',
     true
@@ -213,12 +213,12 @@ INSERT INTO models (
     parameters, is_default, status, is_builtin
 ) VALUES (
     'builtin-rerank-001',
-    10000,
+    <BUILTIN_MODEL_TENANT_ID>,
     'bge-reranker-v2-m3',
     'Rerank',
     'remote',
     '系统内置 Rerank 模型',
-    '{"base_url": "https://api.jina.ai/v1", "api_key": "jina-xxx", "provider": "jina"}'::jsonb,
+    '{"base_url": "https://api.jina.ai/v1", "api_key": "<RERANK_API_KEY>", "provider": "jina"}'::jsonb,
     false,
     'active',
     true
@@ -274,7 +274,7 @@ DELETE FROM models WHERE id = '模型ID';
 ## 注意事项
 
 1. **ID 命名规范**：建议使用 `builtin-{type}-{slug}` 的格式，例如 `builtin-openai-chat`、`builtin-rerank`
-2. **租户ID**：内置模型可以属于任意租户，默认 `10000`（与 `tenants_id_seq` 起点一致）
+2. **租户ID**：内置模型可以属于任意租户；示例中的 `<BUILTIN_MODEL_TENANT_ID>` 必须替换为当前部署定义的值，不要把生产租户 ID 写入文档。
 3. **YAML 与 SQL 并存**：两种方式可以同时使用，loader 只动 `managed_by='yaml'` 的行；通过 SQL 插入的 builtin 行对 loader 完全不可见
 4. **`is_default` 单一保证**：YAML 中将某条 entry 标记 `is_default: true` 时，loader 会先把同 `(tenant_id, type)` 下的其它默认模型置为 `false`，避免 API 路径维护的"每类型一个默认模型"语义被破坏
 5. **重启即生效**：修改 YAML 后按本地 runtime profile 的 down → build → up 顺序

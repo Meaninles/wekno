@@ -18,7 +18,7 @@ WeKnora 中有两类容易混淆的图：
 NEO4J_ENABLE=true
 NEO4J_URI=bolt://neo4j:7687
 NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=your_strong_password
+NEO4J_PASSWORD=<NEO4J_PASSWORD>
 # NEO4J_DATABASE=neo4j
 ```
 

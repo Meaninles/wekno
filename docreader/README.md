@@ -1,5 +1,9 @@
 # DocReader Service
 
+> 本文包含 DocReader 的本地/集群内部配置说明。生产用户入口仍是
+> `https://knora.moutai.com.cn`；文中的容器服务名、`localhost` 和本地临时目录不能直接
+> 作为公网配置。生产节点、存储地址和凭据由受保护部署配置提供。
+
 DocReader 是 WeKnora 项目中负责文档解析和处理的 gRPC 服务。它支持多种文档格式的读取、OCR 识别、多模态处理等功能。
 
 当前集群模式下 DocReader 是无状态解析执行器：三个副本通过 headless Service 暴露
@@ -18,7 +22,7 @@ DOCREADER_PDF_RENDER_MAX_WORKERS=1
 DOCREADER_MARKITDOWN_MAX_WORKERS=1
 DOCREADER_ODL_MAX_WORKERS=1
 DOCREADER_GRPC_MAX_FILE_SIZE_MB=50
-scratch=/mnt/weknora-data/weknora-v2-scratch/docreader/<pod> hostPath
+scratch=<PROTECTED_SCRATCH_ROOT>/docreader/<pod> hostPath
 ```
 
 每个 `Read` / `ReadStream` 请求都由 `IsolatedParseRunner` 放入独立 OS 进程组。请求
@@ -71,7 +75,7 @@ docreader:
   ```
   或直接在 docker-compose.yml 中修改：
   ```yaml
-  - MINIO_PUBLIC_ENDPOINT=http://192.168.1.100:9000  # 使用实际 IP
+  - MINIO_PUBLIC_ENDPOINT=http://<LOCAL_HOST_IP>:9000  # 仅本地设备联调
   ```
 
 #### 3. MINERU_ENDPOINT
@@ -130,8 +134,8 @@ DocReader 支持多种存储后端：
 #### MinIO/S3 存储（推荐）
 
 - `STORAGE_TYPE`: 设置为 `minio`
-- `MINIO_ACCESS_KEY_ID`: MinIO 访问密钥 ID（默认：minioadmin）
-- `MINIO_SECRET_ACCESS_KEY`: MinIO 访问密钥（默认：minioadmin）
+- `MINIO_ACCESS_KEY_ID`: MinIO 访问密钥 ID（由本地编排或受保护生产配置注入）
+- `MINIO_SECRET_ACCESS_KEY`: MinIO 访问密钥（由本地编排或受保护生产配置注入）
 - `MINIO_BUCKET_NAME`: MinIO 存储桶名称（默认：WeKnora）
 - `MINIO_PATH_PREFIX`: 文件路径前缀
 - `MINIO_USE_SSL`: 是否使用 SSL（默认：false）
@@ -187,7 +191,7 @@ docreader:
 docreader:
   environment:
     - MINIO_ENDPOINT=minio:9000
-    - MINIO_PUBLIC_ENDPOINT=http://192.168.1.100:9000
+    - MINIO_PUBLIC_ENDPOINT=http://<LOCAL_HOST_IP>:9000
     - MINERU_ENDPOINT=http://mineru:8080
     - MAX_FILE_SIZE_MB=50
 ```
@@ -249,7 +253,7 @@ Service 会把新请求送到其余 ready endpoint；已经在退出 Pod 内但�
 
 不能把 OBS/S3 挂成 POSIX 解析工作目录。PDF 渲染、Office 转换、OCR 图片和解压
 需要本地随机读写。当前生产使用
-`/mnt/weknora-data/weknora-v2-scratch/docreader/<pod>` 下的独立 hostPath 临时目录；
+`<PROTECTED_SCRATCH_ROOT>/docreader/<pod>` 下的独立 hostPath 临时目录；
 持久原文和衍生对象由 app 写入私有 OBS，不需要 RWX。
 
 ## 服务健康检查

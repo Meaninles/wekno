@@ -81,7 +81,7 @@
 ```json
 {
   "parent_id": "",
-  "name": "公司制度",
+  "name": "示例知识库",
   "description": "制度分类",
   "sort_order": 0
 }

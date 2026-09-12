@@ -10,28 +10,28 @@
 
 ### 内置智能体
 
-系统默认从 `config/builtin_agents.yaml` 加载以下内置智能体：
+平台当前提供以下内置智能体。所有新建智能体使用统一 `agent_mode: agent`，具体行为
+由 `agent_type` 和其他能力开关决定。
 
-| ID | 名称 | 描述 | 模式 |
+| ID | 名称 | 类型 | 说明 |
 |----|------|------|------|
-| `builtin-quick-answer` | 快速问答 | 基于知识库的 RAG 问答 | `quick-answer` |
-| `builtin-simple-chat` | 简单对话 | 不默认绑定知识库，支持联网搜索和文件、图片、音频上传 | `quick-answer` |
-| `builtin-smart-reasoning` | 智能推理 | ReAct 推理框架，支持多步思考和工具调用 | `smart-reasoning` / `rag-qa` |
-| `builtin-data-analyst` | 数据分析 | Claude SDK 数据分析智能体，绑定 MySQL/PostgreSQL 数据源后使用 SQL 和图表分析数据 | `smart-reasoning` / `data-analysis` |
-| `builtin-table-analyst` | 表格分析 | Claude SDK 表格分析智能体，分析 CSV/Excel 知识库文件或对话附件并生成图表 | `smart-reasoning` / `table-analysis` |
-| `builtin-general-agent` | 通用智能体 | Claude SDK 通用智能体，复用知识库、联网、MCP、技能、数据库源和产物生成 | `smart-reasoning` / `general-agent` |
-| `builtin-document-processing` | 文档处理 | Claude SDK 文档处理智能体，生成或修改 Word、Excel、PDF、PPT 文档 | `smart-reasoning` / `document-processing-agent` |
-| `builtin-wiki-researcher` | 维基问答 | 面向 Wiki 知识库的问答智能体 | `smart-reasoning` / `wiki-qa` |
-| `builtin-wiki-fixer` | 维基修订 | 面向 Wiki 巡检问题的页面修订智能体，配置中存在但普通排序列表不默认展示 | `custom` |
+| `builtin-knowledge-qa` | 知识问答 | `knowledge-qa` | 基于知识库检索回答，默认启用多轮、FAQ、图片和音频能力 |
+| `builtin-data-analyst` | 数据分析 | `data-analysis` | 绑定数据源后进行 SQL/数据分析并生成产物 |
+| `builtin-table-analyst` | 表格分析 | `table-analysis` | 分析 CSV/Excel 知识库文件或附件并生成产物 |
+| `builtin-general-agent` | 通用智能体 | `general-agent` | 组合知识库、Wiki、网络搜索、MCP、技能、数据源和产物能力 |
+| `builtin-document-processing` | 文档处理 | `document-processing-agent` | 按文档要求处理或生成 Word、Excel、PDF、PPT |
+| `builtin-wiki-fixer` | Wiki 修订 | `custom` | 内部 Wiki 巡检/修复用途，不作为普通用户默认智能体展示 |
 
-### 智能体模式
+### 智能体模式与类型
 
-| 模式 | 说明 |
-|------|------|
-| `quick-answer` | RAG 模式，快速问答，直接基于知识库检索结果生成回答 |
-| `smart-reasoning` | ReAct 模式，支持多步推理和工具调用 |
+`agent_mode` 的当前有效运行模式为 `agent`。当前 `agent_type` 预设为：
 
-`smart-reasoning` 下还可以通过 `agent_type` 选择类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`knowledge-base-manager`、`custom`。其中 `general-agent`、`knowledge-base-manager`、`document-processing-agent`、`data-analysis`、`table-analysis` 会进入 Claude SDK sidecar 运行时。
+`knowledge-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、
+`document-processing-agent`、`general-agent`、`knowledge-base-manager`、`custom`。
+
+类型预设由平台统一维护；知识问答默认迭代预算为 15；启用产物能力时为 100；
+其他普通情况为 50。数据分析、表格分析、通用智能体和文档处理内置定义当前使用
+100 次迭代及产物能力。是否进入 Agent Runtime 还取决于类型、能力开关和当前部署配置。
 
 ## API 列表
 
@@ -63,15 +63,15 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agents' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/agents' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "我的智能体",
     "description": "自定义智能体描述",
     "avatar": "🤖",
     "config": {
-        "agent_mode": "smart-reasoning",
+        "agent_mode": "agent",
         "system_prompt": "你是一个专业的助手...",
         "temperature": 0.7,
         "max_iterations": 10,
@@ -97,7 +97,7 @@ curl --location 'http://localhost:8080/api/v1/agents' \
         "tenant_id": 1,
         "created_by": "user-123",
         "config": {
-            "agent_mode": "smart-reasoning",
+            "agent_mode": "agent",
             "system_prompt": "你是一个专业的助手...",
             "temperature": 0.7,
             "max_iterations": 10
@@ -124,8 +124,8 @@ curl --location 'http://localhost:8080/api/v1/agents' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agents' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/agents' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -135,17 +135,17 @@ curl --location 'http://localhost:8080/api/v1/agents' \
     "success": true,
     "data": [
         {
-            "id": "builtin-quick-answer",
-            "name": "快速问答",
+            "id": "builtin-knowledge-qa",
+            "name": "知识问答",
             "description": "基于知识库的 RAG 问答，快速准确地回答问题",
             "avatar": "💬",
             "is_builtin": true,
-            "tenant_id": 10000,
+            "tenant_id": "<TENANT_ID>",
             "created_by": "",
             "config": {
-                "agent_mode": "quick-answer",
+                "agent_mode": "agent",
                 "temperature": 0.3,
-                "max_completion_tokens": 2048,
+                "max_completion_tokens": 16384,
                 "kb_selection_mode": "all",
                 "web_search_enabled": false,
                 "multi_turn_enabled": true,
@@ -160,7 +160,7 @@ curl --location 'http://localhost:8080/api/v1/agents' \
             "name": "我的智能体",
             "is_builtin": false,
             "config": {
-                "agent_mode": "smart-reasoning"
+                "agent_mode": "agent"
             }
         }
     ],
@@ -190,8 +190,8 @@ curl --location 'http://localhost:8080/api/v1/agents' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agents/builtin-quick-answer' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/agents/builtin-knowledge-qa' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -200,17 +200,17 @@ curl --location 'http://localhost:8080/api/v1/agents/builtin-quick-answer' \
 {
     "success": true,
     "data": {
-        "id": "builtin-quick-answer",
-        "name": "快速问答",
+        "id": "builtin-knowledge-qa",
+        "name": "知识问答",
         "description": "基于知识库的 RAG 问答，快速准确地回答问题",
         "is_builtin": true,
         "tenant_id": 1,
         "config": {
-            "agent_mode": "quick-answer",
+            "agent_mode": "agent",
             "system_prompt": "",
             "context_template": "请根据以下参考资料回答用户问题...",
             "temperature": 0.7,
-            "max_completion_tokens": 2048,
+            "max_completion_tokens": 16384,
             "kb_selection_mode": "all",
             "web_search_enabled": true,
             "multi_turn_enabled": true,
@@ -254,14 +254,14 @@ curl --location 'http://localhost:8080/api/v1/agents/builtin-quick-answer' \
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/agents/550e8400-e29b-41d4-a716-446655440000' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/agents/550e8400-e29b-41d4-a716-446655440000' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "更新后的智能体",
     "description": "更新后的描述",
     "config": {
-        "agent_mode": "smart-reasoning",
+        "agent_mode": "agent",
         "temperature": 0.8,
         "max_iterations": 20
     }
@@ -278,7 +278,7 @@ curl --location --request PUT 'http://localhost:8080/api/v1/agents/550e8400-e29b
         "name": "更新后的智能体",
         "description": "更新后的描述",
         "config": {
-            "agent_mode": "smart-reasoning",
+            "agent_mode": "agent",
             "temperature": 0.8,
             "max_iterations": 20
         },
@@ -311,8 +311,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/agents/550e8400-e29b
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/agents/550e8400-e29b-41d4-a716-446655440000' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/agents/550e8400-e29b-41d4-a716-446655440000' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -348,8 +348,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/agents/550e8400-e
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/agents/builtin-smart-reasoning/copy' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/agents/builtin-general-agent/copy' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -359,11 +359,11 @@ curl --location --request POST 'http://localhost:8080/api/v1/agents/builtin-smar
     "success": true,
     "data": {
         "id": "660e8400-e29b-41d4-a716-446655440001",
-        "name": "智能推理 (副本)",
-        "description": "ReAct 推理框架，支持多步思考和工具调用",
+        "name": "通用智能体（副本）",
+        "description": "统一 Agent Runtime，支持多步执行和工具调用",
         "is_builtin": false,
         "config": {
-            "agent_mode": "smart-reasoning",
+            "agent_mode": "agent",
             "max_iterations": 50
         },
         "created_at": "2025-01-19T12:00:00Z",
@@ -389,8 +389,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/agents/builtin-smar
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
---header 'X-API-Key: your_api_key'
+curl --location 'https://knora.moutai.com.cn/api/v1/agents/placeholders' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -420,11 +420,11 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `agent_mode` | string | - | 智能体模式：`quick-answer`（RAG）或 `smart-reasoning`（ReAct） |
-| `agent_type` | string | `custom` | 智能推理类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`custom` |
+| `agent_mode` | string | `agent` | 统一智能体运行模式；当前新建配置使用 `agent` |
+| `agent_type` | string | `custom` | 类型预设：`knowledge-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`knowledge-base-manager`、`custom` |
 | `system_prompt` | string | - | 系统提示词，支持使用占位符 |
 | `system_prompt_id` | string | - | 系统提示词模板 ID（引用 `prompt_templates/` YAML 文件中的模板） |
-| `context_template` | string | - | 上下文模板（仅 quick-answer 模式使用） |
+| `context_template` | string | - | 上下文模板（当前统一 `agent` 运行模式使用） |
 | `context_template_id` | string | - | 上下文模板 ID（引用 `prompt_templates/` YAML 文件中的模板） |
 | `document_template` | object | - | 文档处理智能体的 Word/Excel/PDF/PPT 要求文件和模板文件配置 |
 
@@ -435,15 +435,15 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 | `model_id` | string | - | 对话模型 ID |
 | `rerank_model_id` | string | - | 重排序模型 ID |
 | `temperature` | float | 0.7 | 温度参数（0-1） |
-| `max_completion_tokens` | int | 2048 | 最大生成 token 数 |
+| `max_completion_tokens` | int | 16384 | 最大生成 token 数；服务端空值默认补为 16384 |
 | `thinking` | *bool | nil | 是否启用思考模式（适用于支持扩展思考的模型） |
-| `enable_artifacts` | bool | false | Claude SDK 通用/文档处理运行时是否允许生成可下载产物 |
+| `enable_artifacts` | bool | false | 统一 Agent Runtime 是否允许生成可下载产物 |
 
 ### 智能体模式设置
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_iterations` | int | 10 | ReAct 最大迭代次数 |
+| `max_iterations` | int | - | 最大迭代次数；服务端预算为知识问答 15、启用产物 100、其他普通情况 50 |
 | `llm_call_timeout` | int | - | 单次 LLM 调用超时秒数，0 或空使用全局默认 |
 | `allowed_tools` | []string | - | 允许使用的工具列表 |
 | `mcp_selection_mode` | string | - | MCP 服务选择模式：`all`/`selected`/`none` |
@@ -495,7 +495,6 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `web_search_enabled` | bool | false | 是否启用网络搜索；文档处理内置智能体默认关闭 |
-| `claude_sdk_web_search_enabled` | bool | false | Claude SDK 运行时是否启用原生 web search 能力 |
 | `web_search_max_results` | int | 5 | 网络搜索最大结果数 |
 | `web_search_provider_id` | string | - | 网络搜索提供者 ID，为空使用租户默认提供者 |
 | `web_fetch_enabled` | bool | false | 是否自动获取重排后的搜索结果页面全文 |
@@ -547,8 +546,8 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 在问答请求中使用 `agent_id` 参数指定要使用的智能体：
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/agent-chat/session-123' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/agent-chat/session-123' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "帮我分析一下这份数据",

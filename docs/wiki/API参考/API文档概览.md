@@ -7,6 +7,9 @@ source: api/README.md
 
 # API 文档概览
 
+> 生产 API 基地址为 `https://knora.moutai.com.cn/api/v1`；文中的接口路径相对于该基地址，
+> 本地地址仅用于明确标注的开发/验收章节。
+
 WeKnora 提供了一系列 RESTful API，用于创建和管理知识库、检索知识，以及进行基于知识的问答。
 
 ## 基础信息
@@ -22,7 +25,7 @@ WeKnora 提供了一系列 RESTful API，用于创建和管理知识库、检索
 所有 API 请求需要在 HTTP 请求头中包含 `X-API-Key`：
 
 ```
-X-API-Key: your_api_key
+X-API-Key: <TENANT_API_KEY>
 X-Request-ID: unique_request_id  # 建议，便于追踪
 ```
 

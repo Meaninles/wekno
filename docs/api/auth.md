@@ -17,7 +17,7 @@ WeKnora 的 `/auth/*` 端点本身**不需要 X-API-Key**，但部分端点需�
 
 注册接口可通过环境变量 `DISABLE_REGISTRATION=true` 关闭。
 
-成功产生登录态的入口会把 `users.last_login_at` 更新为当前时间，包括 `/auth/login`、`/auth/oidc/callback`、邀请注册自动登录、Lite 自动初始化登录以及二开的 IAM SSO。`/auth/refresh` 和租户切换只轮换登录态，不更新该字段。
+成功产生登录态的入口会把 `users.last_login_at` 更新为当前时间，包括 `/auth/login`、`/auth/oidc/callback`、邀请注册自动登录、Lite 自动初始化登录以及组织 IAM SSO。`/auth/refresh` 和租户切换只轮换登录态，不更新该字段。
 
 ## 端点一览
 
@@ -49,12 +49,12 @@ WeKnora 的 `/auth/*` 端点本身**不需要 X-API-Key**，但部分端点需�
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/register' \
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/register' \
 --header 'Content-Type: application/json' \
 --data '{
     "username": "alice",
     "email": "alice@example.com",
-    "password": "secret123"
+    "password": "<PASSWORD>"
 }'
 ```
 
@@ -76,7 +76,7 @@ curl --location 'http://localhost:8080/api/v1/auth/register' \
     "tenant": {
         "id": 1,
         "name": "alice's workspace",
-        "api_key": "sk-..."
+        "api_key": "<API_KEY_OUTPUT>"
     }
 }
 ```
@@ -97,11 +97,11 @@ curl --location 'http://localhost:8080/api/v1/auth/register' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/login' \
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/login' \
 --header 'Content-Type: application/json' \
 --data '{
     "email": "alice@example.com",
-    "password": "secret123"
+    "password": "<PASSWORD>"
 }'
 ```
 
@@ -112,7 +112,7 @@ curl --location 'http://localhost:8080/api/v1/auth/login' \
     "success": true,
     "message": "Login successful",
     "user": { "id": "usr-...", "username": "alice", "last_login_at": "2026-05-11T10:01:00Z" },
-    "tenant": { "id": 1, "name": "alice's workspace", "api_key": "sk-..." },
+    "tenant": { "id": 1, "name": "alice's workspace", "api_key": "<API_KEY_OUTPUT>" },
     "token": "eyJhbGciOi...",
     "refresh_token": "eyJhbGciOi..."
 }
@@ -129,7 +129,7 @@ curl --location 'http://localhost:8080/api/v1/auth/login' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/oidc/config'
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/oidc/config'
 ```
 
 **响应**:
@@ -157,7 +157,7 @@ curl --location 'http://localhost:8080/api/v1/auth/oidc/config'
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/oidc/url?redirect=%2Fdashboard'
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/oidc/url?redirect=%2Fdashboard'
 ```
 
 **响应**:
@@ -204,7 +204,7 @@ curl --location 'http://localhost:8080/api/v1/auth/oidc/url?redirect=%2Fdashboar
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/refresh' \
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/refresh' \
 --header 'Content-Type: application/json' \
 --data '{
     "refreshToken": "eyJhbGciOi..."
@@ -233,8 +233,8 @@ curl --location 'http://localhost:8080/api/v1/auth/refresh' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/validate' \
---header 'Authorization: Bearer eyJhbGciOi...'
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/validate' \
+--header 'Authorization: Bearer <ACCESS_TOKEN>'
 ```
 
 **响应**:
@@ -257,8 +257,8 @@ curl --location 'http://localhost:8080/api/v1/auth/validate' \
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/auth/logout' \
---header 'Authorization: Bearer eyJhbGciOi...'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/auth/logout' \
+--header 'Authorization: Bearer <ACCESS_TOKEN>'
 ```
 
 **响应**: `{ "success": true, "message": "Logged out successfully" }`
@@ -270,8 +270,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/auth/logout' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/me' \
---header 'Authorization: Bearer eyJhbGciOi...'
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/me' \
+--header 'Authorization: Bearer <ACCESS_TOKEN>'
 ```
 
 **响应**:
@@ -308,12 +308,12 @@ curl --location 'http://localhost:8080/api/v1/auth/me' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/auth/change-password' \
---header 'Authorization: Bearer eyJhbGciOi...' \
+curl --location 'https://knora.moutai.com.cn/api/v1/auth/change-password' \
+--header 'Authorization: Bearer <ACCESS_TOKEN>' \
 --header 'Content-Type: application/json' \
 --data '{
-    "old_password": "secret123",
-    "new_password": "newsecret456"
+    "old_password": "<OLD_PASSWORD>",
+    "new_password": "<NEW_PASSWORD>"
 }'
 ```
 

@@ -7,6 +7,9 @@ source: OIDC认证调用流程.md
 
 # OIDC 认证调用流程
 
+> 生产入口为 `https://knora.moutai.com.cn`，生产回调地址使用该域名下的 API 路径；本文的
+> 本地 Provider 示例仅用于本地联调，不包含真实客户端密钥。
+
 本文档说明 WeKnora 当前 OIDC 登录能力的实际调用过程，覆盖前后端完整链路。
 
 > OIDC 认证是标准版多租户场景下的登录方式，[Lite 版](../项目概述/Lite与标准版区别.md)不需要

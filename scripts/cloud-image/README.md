@@ -10,7 +10,7 @@
 - 别人基于这份镜像创建新实例后，**首次开机会自动**：
   - 生成全新的随机密钥（DB / Redis / JWT / AES）
   - 启动 WeKnora 全部默认容器
-  - 把生成的凭证写到 `/root/weknora-credentials.txt`
+  - 把生成的凭证写到受保护的凭证文件（路径通过部署参数注入）
   - 自删除一次性初始化脚本
 - 实现「**开机即用、零私密泄漏、每实例独立密钥**」
 
@@ -234,7 +234,7 @@ sudo bash /opt/weknora-tools/scripts/cloud-image/cleanup.sh
 1. 生成随机的 `DB_PASSWORD` / `REDIS_PASSWORD` / `JWT_SECRET` / `SYSTEM_AES_KEY` / `TENANT_AES_KEY`
 2. 写回 `/opt/WeKnora/.env`
 3. `docker compose up -d` 启动全部服务
-4. 把生成的凭证写到 `/root/weknora-credentials.txt`（仅 root 可读）
+4. 把生成的凭证写到受保护的凭证文件（仅 root 可读；本文不记录具体路径）
 5. 把自己 disable + 删除自己（确保只跑一次）
 
 之后每次开机都由 `weknora.service` 接管。
@@ -264,7 +264,7 @@ sudo bash    /opt/weknora-tools/scripts/cloud-image/cleanup.sh   # 制作新镜�
 
 - 镜像里**不要**预置任何 LLM API Key、Langfuse Key、个人 SSH key
 - 数据库 / Redis / MinIO 端口默认仅对 docker 网络可见，不要在云防火墙里对外开放
-- `/root/weknora-credentials.txt` 用 `umask 077` 创建，仅 root 可读
+- 凭证文件用 `umask 077` 创建，仅 root 可读；具体路径由部署参数决定，不写入版本库
 - 每次重制镜像前必须执行 `cleanup.sh`，避免泄漏上一份测试数据 / SSH key / machine-id
 
 ## 各云平台具体操作

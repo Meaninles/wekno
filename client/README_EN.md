@@ -1,5 +1,8 @@
 # WeKnora HTTP Client
 
+> Use `https://knora.moutai.com.cn` as the production API base URL. The client appends
+> `/api/v1/*`; replace it with `http://localhost:8080` only for local development.
+
 > A successful upload or reparse response means that the document was durably
 > accepted, not that every stage has finished. Documents are queued as complete
 > workflows; enabled vector, multimodal, summary, question/graph, and Wiki
@@ -35,8 +38,8 @@ import (
 
 // Create client instance
 apiClient := client.NewClient(
-    "http://api.example.com", 
-    client.WithToken("your-auth-token"),
+    "https://knora.moutai.com.cn",
+    client.WithAPIKey("<TENANT_API_KEY>"),
     client.WithTimeout(30*time.Second),
 )
 ```
@@ -46,10 +49,10 @@ apiClient := client.NewClient(
 You can set a default tenant with `WithTenantID`; the client will automatically send the `X-Tenant-ID` header:
 
 ```go
-tenantID := uint64(10000)
+tenantID := uint64(123456) // Replace with the tenant ID authorized for this client.
 apiClient := client.NewClient(
-    "http://api.example.com",
-    client.WithToken("your-auth-token"),
+    "https://knora.moutai.com.cn",
+    client.WithAPIKey("<TENANT_API_KEY>"),
     client.WithTenantID(tenantID),
 )
 ```
@@ -57,8 +60,8 @@ apiClient := client.NewClient(
 If a single request needs a different tenant, set `TenantID` in the request context. The value can be a `uint64`, `*uint64`, or a numeric string, and it will take precedence over the client default:
 
 ```go
-ctx := context.WithValue(context.Background(), "TenantID", uint64(10000))
-// Pass ctx into any client method to switch to tenant 10000 for that request
+ctx := context.WithValue(context.Background(), "TenantID", uint64(123456))
+// Pass ctx into any client method to switch to the example tenant for that request.
 ```
 
 ### Example: Create Knowledge Base and Upload File

@@ -11,12 +11,20 @@ MCP（Model Context Protocol）服务管理接口，提供 MCP 服务的 CRUD、
 | GET    | `/mcp-services/:id`                               | 获取 MCP 服务详情                             |
 | PUT    | `/mcp-services/:id`                               | 更新 MCP 服务（部分字段更新）                 |
 | DELETE | `/mcp-services/:id`                               | 删除 MCP 服务                                 |
+| PUT    | `/mcp-services/:id/credentials`                  | 写入/替换 MCP 凭据（只返回 configured 状态）  |
+| DELETE | `/mcp-services/:id/credentials/:field`            | 删除单个凭据字段                               |
 | POST   | `/mcp-services/:id/test`                          | 测试 MCP 服务连通性                           |
 | GET    | `/mcp-services/:id/tools`                         | 获取 MCP 服务工具列表                         |
 | GET    | `/mcp-services/:id/resources`                     | 获取 MCP 服务资源列表                         |
+| POST   | `/mcp-services/:id/oauth/authorize-url`           | 为当前用户发起 MCP OAuth 授权                 |
+| GET    | `/mcp-services/:id/oauth/status`                  | 查询当前用户 OAuth 授权状态                   |
+| DELETE | `/mcp-services/:id/oauth/token`                   | 撤销当前用户 OAuth 授权                       |
+| GET    | `/mcp-oauth/callback`                             | OAuth 提供商回调（公开回调入口）              |
 | GET    | `/mcp-services/:id/tool-approvals`                | 列出该服务下各工具的人工审批策略 |
 | PUT    | `/mcp-services/:id/tool-approvals/:tool_name`     | 设置/更新某工具的人工审批策略  |
 | POST   | `/agent/tool-approvals/:pending_id`               | 处理 Agent 工具调用待审批请求  |
+| POST   | `/agent/mcp-oauth-resolutions/:pending_id`        | 完成对话内 MCP OAuth 授权                     |
+| POST   | `/agent/mcp-oauth-resolutions/:pending_id/cancel` | 取消对话内 MCP OAuth 授权                     |
 
 ## POST `/mcp-services` - 创建 MCP 服务
 
@@ -26,20 +34,23 @@ MCP（Model Context Protocol）服务管理接口，提供 MCP 服务的 CRUD、
 | ---------------- | ------- | ---- | --------------------------------------------------------------------------------------------- |
 | name             | string  | 是   | 服务名称                                                                                      |
 | description      | string  | 否   | 服务描述                                                                                      |
-| transport_type   | string  | 是   | 传输类型，可选：`sse`、`http-streamable`、`stdio`                                              |
+| transport_type   | string  | 是   | 当前可用传输：`sse`、`http-streamable`；`stdio` 仅保留为兼容字段，服务端拒绝其创建/连接 |
 | url              | string  | 条件 | 服务地址；当 `transport_type` 为 `sse` / `http-streamable` 时必填（受 SSRF 安全校验约束）        |
 | headers          | object  | 否   | 自定义请求头                                                                                  |
-| auth_config      | object  | 否   | 认证配置，支持 `api_key`、`token`                                                              |
+| auth_config      | object  | 否   | 非敏感认证配置，如 `auth_type`、`api_key_header`、OAuth scopes；密钥走凭据子资源           |
 | advanced_config  | object  | 否   | 高级配置，支持 `timeout`、`retry_count`、`retry_delay`                                          |
-| stdio_config     | object  | 条件 | stdio 传输配置，包含 `command`、`args`；当 `transport_type` 为 `stdio` 时必填                  |
-| env_vars         | object  | 否   | 环境变量（stdio 场景常用）                                                                    |
+| stdio_config     | object  | 否   | 兼容数据结构；当前服务端不接受 stdio 运行配置                                                  |
+| env_vars         | object  | 否   | 兼容数据结构；当前可用的 SSE/HTTP Streamable 连接不使用此字段                                  |
 | enabled          | boolean | 否   | 是否启用                                                                                      |
 
 **请求**:
 
+> 当前服务端只创建 `sse` 或 `http-streamable` 服务；`stdio` 仅存在于兼容 DTO，不能用于
+> 新建、更新为可运行服务或连接测试。
+
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "天气查询服务",
@@ -50,7 +61,7 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
         "X-Custom-Header": "value"
     },
     "auth_config": {
-        "api_key": "weather-api-key-xxxxx"
+        "api_key": "<EXTERNAL_SERVICE_KEY>"
     },
     "advanced_config": {
         "timeout": 30,
@@ -58,6 +69,45 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
         "retry_delay": 1
     }
 }'
+```
+
+> 安全约定：请求可以在 `auth_config` 中配置非敏感结构字段，但 `api_key` 和 `token`
+> 不应再通过主资源 PUT 传递。请使用下方的 `/credentials` 子资源。任何响应都不会返回
+> 凭据明文，只返回 `credentials.*.configured` 布尔值。
+
+## PUT `/mcp-services/:id/credentials` - 写入 MCP 凭据
+
+仅管理员可调用。请求体可以包含 `api_key`、`token` 的任意子集；省略字段保留原值，
+空字符串不用于删除。成功响应只返回是否已配置，不返回密钥。
+
+```curl
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/credentials' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
+--header 'Content-Type: application/json' \
+--data '{
+    "api_key": "<EXTERNAL_SERVICE_KEY>"
+}'
+```
+
+```json
+{
+    "success": true,
+    "data": {
+        "fields": {
+            "api_key": { "configured": true },
+            "token": { "configured": false }
+        }
+    }
+}
+```
+
+## DELETE `/mcp-services/:id/credentials/:field` - 删除单个凭据
+
+`field` 只能是 `api_key` 或 `token`。操作幂等，成功返回 HTTP 204：
+
+```curl
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/credentials/api_key' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -76,7 +126,12 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
             "X-Custom-Header": "value"
         },
         "auth_config": {
-            "api_key": "weather-api-key-xxxxx"
+            "auth_type": "api_key",
+            "api_key_header": "X-API-Key"
+        },
+        "credentials": {
+            "api_key": { "configured": true },
+            "token": { "configured": false }
         },
         "advanced_config": {
             "timeout": 30,
@@ -91,11 +146,14 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
 }
 ```
 
-**创建 stdio 类型的 MCP 服务示例**:
+**stdio 兼容性说明（不支持的请求示例）**:
+
+以下请求仅用于说明服务端会拒绝 `stdio`；外围应用不要提交此配置，生产只使用
+`sse` 或 `http-streamable`。
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "本地文件服务",
@@ -113,13 +171,14 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
 
 ## GET `/mcp-services` - 获取 MCP 服务列表
 
-返回当前租户已配置的所有 MCP 服务。
+返回当前租户已配置的所有 MCP 服务。历史数据可能携带 `stdio` 兼容字段，但当前服务端
+不会为其建立运行连接；新建和更新时只应使用 `sse` 或 `http-streamable`。
 
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -138,7 +197,12 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
             "url": "https://mcp.example.com/weather/sse",
             "headers": {},
             "auth_config": {
-                "api_key": "weather-api-key-xxxxx"
+                "auth_type": "api_key",
+                "api_key_header": "X-API-Key"
+            },
+            "credentials": {
+                "api_key": { "configured": true },
+                "token": { "configured": false }
             },
             "advanced_config": {
                 "timeout": 30,
@@ -183,13 +247,14 @@ curl --location 'http://localhost:8080/api/v1/mcp-services' \
 | ---- | ------ | -------------- |
 | id   | string | MCP 服务 ID    |
 
-> 注：内置（`is_builtin: true`）服务在响应中会隐藏敏感凭证字段。
+> 注：响应 DTO 永远不会包含 `api_key` 或 `token`。普通服务通过 `credentials` 返回
+> configured 元数据；内置服务还会隐藏租户特定的连接细节。
 
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -207,7 +272,12 @@ curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001' \
         "url": "https://mcp.example.com/weather/sse",
         "headers": {},
         "auth_config": {
-            "api_key": "weather-api-key-xxxxx"
+            "auth_type": "api_key",
+            "api_key_header": "X-API-Key"
+        },
+        "credentials": {
+            "api_key": { "configured": true },
+            "token": { "configured": false }
         },
         "advanced_config": {
             "timeout": 30,
@@ -224,13 +294,13 @@ curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001' \
 
 ## PUT `/mcp-services/:id` - 更新 MCP 服务
 
-支持部分字段更新，可传入下列任意子集：`name`、`description`、`enabled`、`transport_type`、`url`、`stdio_config`、`env_vars`、`headers`、`auth_config`、`advanced_config`。其中 `url` 若提供，会再次执行 SSRF 安全校验。
+支持部分字段更新，可传入下列任意子集：`name`、`description`、`enabled`、`transport_type`、`url`、`headers`、`auth_config`、`advanced_config`。`transport_type` 只能使用 `sse` 或 `http-streamable`；`stdio_config` 和 `env_vars` 仅为兼容字段，不能启用 stdio。其中 `url` 若提供，会再次执行 SSRF 安全校验。`auth_config.api_key` 和 `auth_config.token` 在主资源更新中会被忽略；凭据必须通过 `/credentials` 子资源显式更新。
 
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/mcp-services/mcp-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "天气查询服务（更新）",
@@ -253,7 +323,12 @@ curl --location --request PUT 'http://localhost:8080/api/v1/mcp-services/mcp-000
         "url": "https://mcp.example.com/weather/sse",
         "headers": {},
         "auth_config": {
-            "api_key": "weather-api-key-xxxxx"
+            "auth_type": "api_key",
+            "api_key_header": "X-API-Key"
+        },
+        "credentials": {
+            "api_key": { "configured": true },
+            "token": { "configured": false }
         },
         "advanced_config": {
             "timeout": 30,
@@ -273,8 +348,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/mcp-services/mcp-000
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/mcp-services/mcp-00000001' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -294,8 +369,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/mcp-services/mcp-
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/test' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/test' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -341,8 +416,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/mcp-services/mcp-00
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/tools' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/tools' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -393,8 +468,8 @@ curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/tools' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/resources' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/resources' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -420,6 +495,49 @@ curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/resource
 }
 ```
 
+## MCP OAuth 授权
+
+当 MCP 服务的非敏感 `auth_config.auth_type` 配置为 OAuth 时，当前登录用户可以按用户
+维度完成授权。授权令牌不会通过服务 CRUD 响应返回。
+
+### POST `/mcp-services/:id/oauth/authorize-url`
+
+请求体：
+
+```json
+{
+    "redirect_uri": "https://knora.moutai.com.cn/api/v1/mcp-oauth/callback",
+    "frontend_redirect": "/settings/mcp"
+}
+```
+
+成功响应返回一次性浏览器授权地址：
+
+```json
+{
+    "success": true,
+    "data": { "authorization_url": "https://mcp.example.com/oauth/authorize?..." }
+}
+```
+
+授权服务完成回调后访问生产地址 `https://knora.moutai.com.cn/api/v1/mcp-oauth/callback`。
+`state` 为一次性状态参数；不要在文档、日志或客户端持久化真实授权码和令牌。
+
+### GET `/mcp-services/:id/oauth/status`
+
+返回当前登录用户是否已完成该服务授权：
+
+```json
+{ "success": true, "data": { "authorized": true } }
+```
+
+### DELETE `/mcp-services/:id/oauth/token`
+
+撤销当前登录用户对该 MCP 服务的授权，成功返回 HTTP 204。
+
+对话内 OAuth 暂停还需要调用 `/agent/mcp-oauth-resolutions/:pending_id`，请求体至少
+包含 `service_id`；用户跳过授权可调用同路径的 `/cancel`。
+
 ## GET `/mcp-services/:id/tool-approvals` - 列出工具人工审批策略
 
 返回该 MCP 服务下各工具持久化的 `require_approval` 标记。仅返回数据库中已显式配置过的工具记录；未出现在列表中的工具默认无需审批。
@@ -433,8 +551,8 @@ curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/resource
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/tool-approvals' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/tool-approvals' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -477,8 +595,8 @@ curl --location 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/tool-app
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/mcp-services/mcp-00000001/tool-approvals/delete_file' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/mcp-services/mcp-00000001/tool-approvals/delete_file' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "require_approval": true
@@ -516,8 +634,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/mcp-services/mcp-000
 **请求（通过）**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/agent/tool-approvals/pending-abcdef123456' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/agent/tool-approvals/pending-abcdef123456' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "decision": "approve",
@@ -531,8 +649,8 @@ curl --location --request POST 'http://localhost:8080/api/v1/agent/tool-approval
 **请求（驳回）**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/agent/tool-approvals/pending-abcdef123456' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/agent/tool-approvals/pending-abcdef123456' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "decision": "reject",

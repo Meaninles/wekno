@@ -19,8 +19,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/tags?page=1&page_size=10' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/tags?page=1&page_size=10' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -82,8 +82,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/tags?p
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/tags' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/tags' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "产品手册",
@@ -124,8 +124,8 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/tags' 
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/tags/tag-00000003' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/tags/tag-00000003' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "产品手册更新",
@@ -169,8 +169,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/tags/tag-00000003?force=true' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/knowledge-bases/kb-00000001/tags/tag-00000003?force=true' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 

@@ -7,6 +7,8 @@ source: RBAC说明.md
 
 # 租户 RBAC 说明
 
+> 生产入口为 `https://knora.moutai.com.cn`；本文只描述授权规则，不记录真实租户、用户或密钥。
+
 本文档介绍 WeKnora 的**租户内权限控制（Tenant RBAC）**，包括角色矩阵、资源归属模型，以及它与 [共享空间](./共享空间说明.md) 的关系。
 
 > 状态：已发布；由配置项 `tenant.enable_rbac` 控制，默认 `true`（强制鉴权）。

@@ -29,9 +29,9 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants/all' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants/all' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-An7_t_izCKFIJ4iht9Xjcjnj_MC48ILvwezEDki9ScfIa7KA'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -77,9 +77,9 @@ curl --location 'http://localhost:8080/api/v1/tenants/all' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants/search?keyword=weknora&page=1&page_size=10' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants/search?keyword=weknora&page=1&page_size=10' \
 --header 'Content-Type: application/json' \
---header 'X-API-Key: sk-An7_t_izCKFIJ4iht9Xjcjnj_MC48ILvwezEDki9ScfIa7KA'
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -123,7 +123,7 @@ curl --location 'http://localhost:8080/api/v1/tenants/search?keyword=weknora&pag
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "weknora",
@@ -149,10 +149,10 @@ curl --location 'http://localhost:8080/api/v1/tenants' \
 ```json
 {
     "data": {
-        "id": 10000,
+        "id": "<TENANT_ID>",
         "name": "weknora",
         "description": "weknora tenants",
-        "api_key": "sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG",
+        "api_key": "<API_KEY_OUTPUT>",
         "status": "active",
         "retriever_engines": {
             "engines": [
@@ -190,8 +190,8 @@ curl --location 'http://localhost:8080/api/v1/tenants' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants/10000' \
---header 'X-API-Key: sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants/<tenant_id>' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -200,10 +200,10 @@ curl --location 'http://localhost:8080/api/v1/tenants/10000' \
 ```json
 {
     "data": {
-        "id": 10000,
+        "id": "<TENANT_ID>",
         "name": "weknora",
         "description": "weknora tenants",
-        "api_key": "sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG",
+        "api_key": "<API_KEY_OUTPUT>",
         "status": "active",
         "retriever_engines": {
             "engines": [
@@ -243,8 +243,8 @@ curl --location 'http://localhost:8080/api/v1/tenants/10000' \
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/tenants/10000' \
---header 'X-API-Key: sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/tenants/<tenant_id>' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "weknora new",
@@ -272,10 +272,10 @@ curl --location --request PUT 'http://localhost:8080/api/v1/tenants/10000' \
 ```json
 {
     "data": {
-        "id": 10000,
+        "id": "<TENANT_ID>",
         "name": "weknora new",
         "description": "weknora tenants new",
-        "api_key": "sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG",
+        "api_key": "<API_KEY_OUTPUT>",
         "status": "active",
         "retriever_engines": {
             "engines": [
@@ -313,8 +313,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/tenants/10000' \
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/tenants/10000' \
---header 'X-API-Key: sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/tenants/<tenant_id>' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -340,8 +340,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/tenants/10000' \
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/tenants/10000/api-key' \
---header 'X-API-Key: sk-aaLRAgvCRJcmtiL2vLMeB1FB5UV0Q-qB7DlTE1pJ9KA93XZG' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/tenants/<tenant_id>/api-key' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -350,7 +350,7 @@ curl --location --request POST 'http://localhost:8080/api/v1/tenants/10000/api-k
 ```json
 {
     "data": {
-        "api_key": "sk-IKtd9JGV4-aPGQ6RiL8YJu9Vzb3-ae4lgFkjFJZmhvUn2mLu"
+        "api_key": "<API_KEY_OUTPUT>"
     },
     "success": true
 }
@@ -397,7 +397,7 @@ Principal **不会**缩小 API Key 的 API 权限：`X-API-Key` 认证仍授予�
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants/10000/api-principal-config' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants/<tenant_id>/api-principal-config' \
 --header 'Authorization: Bearer <token>'
 ```
 
@@ -437,7 +437,7 @@ curl --location 'http://localhost:8080/api/v1/tenants/10000/api-principal-config
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/tenants/10000/api-principal-config' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/tenants/<tenant_id>/api-principal-config' \
 --header 'Authorization: Bearer <token>' \
 --header 'Content-Type: application/json' \
 --data '{
@@ -454,8 +454,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/tenants/10000/api-pr
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -469,7 +469,7 @@ curl --location 'http://localhost:8080/api/v1/tenants' \
                 "id": 10002,
                 "name": "weknora",
                 "description": "weknora tenants",
-                "api_key": "sk-An7_t_izCKFIJ4iht9Xjcjnj_MC48ILvwezEDki9ScfIa7KA",
+                "api_key": "<API_KEY_OUTPUT>",
                 "status": "active",
                 "retriever_engines": {
                     "engines": [
@@ -522,8 +522,8 @@ curl --location 'http://localhost:8080/api/v1/tenants' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/tenants/kv/agent-config' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/tenants/kv/agent-config' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -567,8 +567,8 @@ curl --location 'http://localhost:8080/api/v1/tenants/kv/agent-config' \
 **请求（以 `agent-config` 为例）**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/tenants/kv/agent-config' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/tenants/kv/agent-config' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "max_iterations": 20,

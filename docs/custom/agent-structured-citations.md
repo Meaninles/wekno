@@ -36,7 +36,7 @@
 
 - 运行时全套 184 项测试通过；Go agentruntime、sourcerefs、session 包在 Linux 容器测试通过。PostgreSQL 隔离 schema 验证证据读取权限、提交幂等、引用失败及错误偏移时的正文保留。
 - 前端类型检查及 18 项引用/会话展示相关测试通过；实际桌面和 `/mobile/` 页面验证列表、表格引用显示。
-- 在原会话 `10f6b571-6e0f-4ffe-802d-2e5499ae3ac4` 追加真实问题：主数据流程 9 个引用标记，表格追问 8 个，依据开发总结报告创建智能体 31 个。对应报告名为 `citation-json-qa-two-pass-final-master`、`citation-json-qa-two-pass-final-table`、`citation-json-qa-two-pass-final-create-kb`。
+- 在原会话 `<ID>` 追加真实问题：主数据流程 9 个引用标记，表格追问 8 个，依据开发总结报告创建智能体 31 个。对应报告名为 `citation-json-qa-two-pass-final-master`、`citation-json-qa-two-pass-final-table`、`citation-json-qa-two-pass-final-create-kb`。
 - 三个最终用例均为 3 次实际模型请求（检索/读取决策、完整正文、引用映射），正文去掉生成标签后逐字等于第一次提交；耗时分别约 16.6、16.5、26.2 秒。
 - 过程中发现重复问题直接复述历史答案的缺口，已在历史导航通用指令中要求先恢复原始证据，复测使用 `read_conversation` 正常补回引用。
 - 不应将“没有引用”全部归因于锚点：限定错误知识库而检索为空，或走技能文件读取但未注册可引用来源时，第二阶段不会伪造引用。这些诊断结果也留在原会话中，未删除或改写旧消息。

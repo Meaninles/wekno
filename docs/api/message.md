@@ -19,8 +19,8 @@
 **请求**:
 
 ```curl
-curl --location --request GET 'http://localhost:8080/api/v1/messages/ceb9babb-1e30-41d7-817d-fd584954304b/load?limit=3&before_time=2030-08-12T14%3A35%3A42.123456789Z' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request GET 'https://knora.moutai.com.cn/api/v1/messages/ceb9babb-1e30-41d7-817d-fd584954304b/load?limit=3&before_time=2030-08-12T14%3A35%3A42.123456789Z' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "彗尾的形状"
@@ -176,8 +176,8 @@ curl --location --request GET 'http://localhost:8080/api/v1/messages/ceb9babb-1e
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/messages/ceb9babb-1e30-41d7-817d-fd584954304b/9bcafbcf-a758-40af-a9a3-c4d8e0f49439' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/messages/ceb9babb-1e30-41d7-817d-fd584954304b/9bcafbcf-a758-40af-a9a3-c4d8e0f49439' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 
@@ -203,8 +203,8 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/messages/ceb9babb
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/messages/search' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/messages/search' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "query": "彗星的结构",
@@ -244,8 +244,8 @@ curl --location 'http://localhost:8080/api/v1/messages/search' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/messages/chat-history-stats' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/messages/chat-history-stats' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json'
 ```
 

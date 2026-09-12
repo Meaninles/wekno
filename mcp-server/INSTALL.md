@@ -1,5 +1,9 @@
 # WeKnora MCP Server 安装和使用指南
 
+> 文档核对日期：2026-09-13。生产 API 基地址为
+> `https://knora.moutai.com.cn/api/v1`；本地地址只用于明确标注的本地开发/验收。
+> 请将真实 API Key 放入环境变量或密钥管理工具，不要写入文档、镜像或 Git。
+
 ## 快速开始
 
 ### 1. 安装依赖
@@ -10,16 +14,16 @@ pip install -r requirements.txt
 ### 2. 设置环境变量
 ```bash
 # Linux/macOS
-export WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-export WEKNORA_API_KEY="your_api_key_here"
+export WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+export WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # Windows PowerShell
-$env:WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-$env:WEKNORA_API_KEY="your_api_key_here"
+$env:WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+$env:WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # Windows CMD
-set WEKNORA_BASE_URL=http://localhost:8080/api/v1
-set WEKNORA_API_KEY=your_api_key_here
+set WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
+set WEKNORA_API_KEY=<TENANT_API_KEY>
 ```
 
 ### 3. 运行服务器
@@ -167,7 +171,7 @@ RUN pip install -r requirements.txt
 COPY . .
 RUN pip install -e .
 
-ENV WEKNORA_BASE_URL=http://localhost:8080/api/v1
+ENV WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
 EXPOSE 8000
 
 CMD ["weknora-mcp-server"]
@@ -184,8 +188,8 @@ After=network.target
 Type=simple
 User=weknora
 WorkingDirectory=/opt/weknora-mcp
-Environment=WEKNORA_BASE_URL=http://localhost:8080/api/v1
-Environment=WEKNORA_API_KEY=your_api_key
+Environment=WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
+Environment=WEKNORA_API_KEY=<TENANT_API_KEY>
 ExecStart=/usr/local/bin/weknora-mcp-server
 Restart=always
 

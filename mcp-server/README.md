@@ -2,6 +2,11 @@
 
 这是一个 Model Context Protocol (MCP) 服务器，提供对 WeKnora 知识管理 API 的访问。
 
+> 文档核对日期：2026-09-13。连接 WeKnora 时，面向用户/开发者的示例默认使用生产
+> API `https://knora.moutai.com.cn/api/v1`；只有明确标注“仅本地开发/验收”的章节才
+> 使用 localhost。API Key 只从环境变量或客户端密钥管理注入，示例中的
+> `<TENANT_API_KEY>` 不是可用密钥。
+
 ## 快速开始
 
 > 推荐直接参考 [MCP配置说明](./MCP_CONFIG.md)，无需进行以下操作。
@@ -14,16 +19,16 @@ pip install -r requirements.txt
 ### 2. 配置环境变量
 ```bash
 # Linux/macOS
-export WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-export WEKNORA_API_KEY="your_api_key_here"
+export WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+export WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # Windows PowerShell
-$env:WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-$env:WEKNORA_API_KEY="your_api_key_here"
+$env:WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+$env:WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # Windows CMD
-set WEKNORA_BASE_URL=http://localhost:8080/api/v1
-set WEKNORA_API_KEY=your_api_key_here
+set WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
+set WEKNORA_API_KEY=<TENANT_API_KEY>
 ```
 
 ### 3. 运行服务器

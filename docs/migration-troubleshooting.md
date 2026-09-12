@@ -1,5 +1,9 @@
 # Database migration troubleshooting
 
+> Production users access WeKnora at `https://knora.moutai.com.cn`. This page avoids
+> internal service addresses and credentials; localhost examples, when present, are
+> for local diagnosis only.
+
 This guide is linked from the system info page when WeKnora's startup database
 migration fails. It covers the most common causes, how to diagnose them, and
 how to recover without losing data.

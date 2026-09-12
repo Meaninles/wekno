@@ -1,81 +1,80 @@
 # WeKnora 生产停机更新包
 
-> 当前状态（2026-08-06）：本轮生产更新、迁移和启动已完成。本目录保留为下一次
-> 发布/回滚工具包，不应在普通代码或文档同步中重新执行。现网权威值见
-> [当前生产实现与部署基线](../../docs/custom/当前生产实现与部署基线.md)。
-> 仅文档变更只需提交和推送 Git，不需要生产部署。
+> 文档核对日期：2026-09-13。本目录保存生产发布/回滚脚本和模板索引；具体生产值由
+> 受保护的现场配置注入，本文不记录节点、内部服务、对象存储、模型端点、路径、租户
+> 快照、Git SHA、镜像 digest 或任何凭据。生产访问统一为
+> [https://knora.moutai.com.cn](https://knora.moutai.com.cn)。
 
-本目录是现有 CCE 生产环境的发布入口。最终逐命令操作以
+仅文档变更不需要生产部署。执行发布前必须阅读
 [当前版本生产更新部署执行手册](../../docs/custom/当前版本生产更新部署执行手册.md)
-为准。现网不是可直接由 Helm 接管的活动 release，禁止直接执行
-`helm upgrade --install`，也禁止对命名空间使用 `--prune`。
+和[当前生产实现与部署基线](../../docs/custom/当前生产实现与部署基线.md)，并由有权限的
+发布人员完成审批、备份、渲染、校验和回滚准备。
 
-## 已确认的生产边界
+## 当前生产边界
 
-- 只使用现有 5 个节点，不新增节点、磁盘、数据库、Redis 或模型实例。
-- 采用完全停机切换；Ingress 关闭后才截取最终基线、备份和迁移。
-- 只备份 PostgreSQL。5,033 个已引用源对象均在私有 OBS，另有 10 条空路径；
-  `/data/files` 没有持久业务文件，因此不备份、不迁移文件。
-- 重建过程只新增目标 OBS 对象，所有原知识库及原 `obs://` 路径保持不变，作为
-  业务级回退副本。
-- 历史 Asynq/衍生任务不逐条回放。失败或未完成文档所属知识库整体重建，旧
-  payload、旧 generation 和已删除目标任务一律不重放。
-- 使用早期 2048 维截断 embedding 的知识库即使页面显示完成也必须全量重建为当前
-  Qwen3-Embedding-8B 的 4096 维向量，并用真实召回验证；混合文档+Wiki 库重建为
-  非 Wiki 目标库。
-
-2026-08-04 16:32 在线预检：58 个有效知识库、2,633 个文档、20 个租户；32 个库曾启用
-或生成过 Wiki，其中 30 个存在未完成文档，必须新建纯文档目标库。另有 8 个纯
-文档库原地全量重解析，15 个库全部完成保留，5 个空库保留。任务台账 16,043 条，
-逐条人工补跑数为 0。业务仍在线，正式停机 cutoff 重新计算的数量才是执行依据。
+- 生产使用角色化编排，不把单体 `app-dev` 当成生产拓扑；API、parse、derivative、Wiki、
+  maintenance、migration、DocReader、Agent Runtime、frontend 和 mobileWeb 分别管理。
+- 生产不依赖共享 RWX 文件系统：持久文件进入受保护对象存储，解析/Office/Agent 工作区
+  为按任务隔离的临时本地目录。
+- 数据库迁移只允许一次性 migration 角色执行；普通业务角色不重复迁移。
+- 历史任务、对象和数据库是否回放、迁移或重建，必须以停机截点和受保护台账为准；本文不
+  固化任何现场数量或租户数据。
+- 公开知识源、普通文件、DocReader、入口请求体和内部产物代理均有独立大小边界，详见
+  [生产实现与部署基线](../../docs/custom/当前生产实现与部署基线.md)。
 
 ## 目标拓扑
 
-| 角色 | 副本 | 固定分布 | 单副本请求/上限 |
-|---|---:|---|---|
-| API | 3 | `.1/.2/.7` | `500m/1280Mi`；`1500m/3Gi` |
-| parse-worker | 3 | `.1/.2/.7` | `1C/2Gi`；`3C/5Gi` |
-| DocReader | 3 | `.1/.2/.7` | `750m/1Gi`；`4C/4Gi` |
-| derivative-worker | 2 | `.1/.7` | `500m/1Gi`；`1500m/2Gi` |
-| wiki-worker | 2 | `.2/.7` | `500m/1Gi`；`1500m/2Gi` |
-| maintenance | 2 | `.1/.2` | `150m/384Mi`；`750m/1Gi` |
-| agent-runtime | 2 | `.1/.2` | `250m/512Mi`；`2C/2Gi` |
-| 按需运行工作区 | 最多 16 个活动运行 | document-worker 节点 | 每个 `100m/256Mi`；`2C/2Gi`；两个 4Gi PVC |
-| frontend/mobile | 各 2 | `.1/.2` | 见 values |
-| PostgreSQL | 1 | `.6` | `3C/8Gi`；`6C/12Gi`，`/dev/shm=2Gi` |
+| 角色 | 生产副本/执行方式 |
+|---|---:|
+| API | 3 |
+| parse | 3 |
+| derivative | 2 |
+| Wiki | 2 |
+| maintenance | 2 |
+| migration | 1 次性 |
+| DocReader | 3 |
+| Agent Runtime | 2 |
+| frontend | 2 |
+| mobileWeb | 2 |
 
-Neo4j 保持在 `.54`，Ingress 保持现状；集群内 LiteLLM 当前不承载流量，模型通过
-外部 llmgateway 域名访问。含工作区池预算的目标 request 占用：`.1` 约 `53.5% CPU / 29.5% RAM`，`.2` 约 `52.2% / 28.6%`，`.7` 约 `51.6% / 28.4%`。工作区 limits 允许资源超配，不等于可同时满负荷运行；生产需根据实际文件负载确认并发容量。
+精确资源、亲和/反亲和、探针、并发、镜像和受保护基础设施配置以
+`helm/values-production-ha.yaml` 及经审批的现场覆盖文件为准；不要从公开文档推导内部
+节点分布或网络地址。
 
 ## 文件索引
 
 | 文件 | 作用 |
 |---|---|
-| `values-site.example.yaml` | 受保护目录中的现场镜像仓库、SHA 和 digest 覆盖 |
-| `values-migration.example.yaml` | 唯一数据库迁移 Job 覆盖 |
-| `render-and-validate-release.sh` | 渲染三套清单，使用哈希锁定的离线 schema、API Server dry-run 和拓扑/镜像校验 |
-| `build-release-images.sh` | 离线基础镜像门禁、受限串行构建、smoke、推送和 digest/技能导出 |
-| `preload-build-dependencies.sh` | 国内镜像源探测、基础镜像入 SWR、GitHub 二进制和 DuckDB 扩展预置 |
-| `concurrency-plan.json` | 节点、数据库池、流水线和七个生产模型并发的唯一容量基线 |
-| `llmgateway-capacity-evidence-20260804.json` | 七个生产模型经生产 llmgateway 的无密钥容量证据 |
-| `apply-capacity-plan.py` | 通过本机 port-forward 全量预验证并应用七个模型池和 scheduler 策略 |
-| `prepare-hostpaths.sh` | 检查或创建现有节点 scratch/数据库备份目录 |
-| `switch-preloaded-skills.sh` | 停机后原子启用三节点 staging 技能目录，失败自动恢复并支持显式回滚 |
-| `capture-release-cutoff.sh` | 截取 K8s、数据库、知识库、任务和 Redis 元数据基线 |
-| `backup-postgres.sh` | 停机后把自包含 PostgreSQL custom archive 写到 `.7` |
-| `verify-postgres-restore.sh` | 在现有 PG 中建立临时库做一次完整恢复演练后删除 |
-| `restore-postgres-backup.sh` | 回滚时保留新库并原子换名恢复发布前数据库 |
-| `postgres-runtime.strategic-merge.yaml` | 只补 PostgreSQL 资源和 2Gi tmpfs `/dev/shm` |
-| `verify-release.py` | 平台和知识库重建的最终 fail-closed 验收 |
-| `sql/*.sql` | 同一停机截点的知识库、文档和任务只读台账 |
+| `values-site.example.yaml` | 现场镜像、摘要和部署覆盖的示例结构 |
+| `values-migration.example.yaml` | 一次性数据库迁移 Job 覆盖 |
+| `render-and-validate-release.sh` | 渲染清单并执行 schema、API Server dry-run、拓扑和镜像校验 |
+| `build-release-images.sh` | 基础镜像门禁、构建、smoke、推送和 digest/技能导出 |
+| `preload-build-dependencies.sh` | 发布前准备基础镜像和构建依赖 |
+| `concurrency-plan.json` | 受保护的队列、数据库池、流水线和模型容量基线 |
+| `apply-capacity-plan.py` | 通过受控通道预验证并应用容量/调度策略 |
+| `prepare-hostpaths.sh` | 准备角色化 scratch 和备份目录 |
+| `switch-preloaded-skills.sh` | 原子切换预加载技能目录，失败可回滚 |
+| `capture-release-cutoff.sh` | 截取 Kubernetes、数据库、任务和队列基线 |
+| `backup-postgres.sh` | 生成 PostgreSQL 备份 |
+| `verify-postgres-restore.sh` | 执行恢复演练并校验结果 |
+| `restore-postgres-backup.sh` | 回滚时恢复数据库备份 |
+| `verify-release.py` | 对平台和知识库重建执行 fail-closed 验收 |
+| `sql/*.sql` | 停机截点的只读台账模板/查询 |
+
+脚本所需的 `REPLACE_*`、镜像仓库、凭据、对象存储和服务地址必须从受保护环境提供，
+不得写入 Git、日志或公共使用指南。提交前应检查构建上下文和生成物，避免把 `.env`、
+密钥文件、现场 values、快照或恢复归档打包。
 
 ## 发布硬门槛
 
-正式停机前必须同时具备：批准的 Git SHA；六个运行镜像的不可变 digest；填写完成且无
-`REPLACE_*` 的现场 values；三节点发布技能 staging 目录及便携哈希清单；生产机渲染
-通过的三套清单；最终停机 cutoff；数据库备份和完整恢复演练 PASS。旧 Go skill
-sandbox 镜像不属于当前发布集合。技能 staging 只能在业务 Pod 全部退出后原子切换。
+1. 生产代码、镜像 digest、受保护 values、技能 staging、渲染清单和数据库迁移方案均已
+   审批。
+2. 已完成最终停机截点、数据库备份和恢复演练；备份可读且回滚步骤经过演练。
+3. API、parse、derivative、Wiki、maintenance、DocReader、Agent Runtime、前端和移动端
+   的副本/资源/探针与模板一致。
+4. 发布后通过生产域名验证 Web、API、移动端、MCP、分享、嵌入式、IM、文件上传、解析和
+   产物下载。
+5. 任何门槛未满足时只允许继续准备，不得切断业务入口或执行迁移。
 
-任何一个门槛不满足，都只允许继续准备，不允许切断业务 Ingress 路由或执行迁移。
-任何情况下都不得删除 `ingress-nginx`、Ingress Controller、其 Service 或其他
-集群级入口组件。
+禁止删除 `ingress-nginx`、Ingress Controller、其 Service 或其他集群级入口组件；入口、
+数据库、缓存、对象存储和模型依赖的变更必须单独审批。

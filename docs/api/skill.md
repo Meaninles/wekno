@@ -29,8 +29,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/skills' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/skills' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -42,7 +42,7 @@ curl --location 'http://localhost:8080/api/v1/skills' \
     {
       "name": "policy-style",
       "display_name": "制度写作风格",
-      "description": "按公司制度文档风格输出",
+      "description": "按制度类文档风格输出",
       "kind": "lightweight"
     }
   ],
@@ -63,10 +63,12 @@ curl --location 'http://localhost:8080/api/v1/skills' \
 
 ## 管理接口说明
 
-轻量技能和专业技能的创建、更新、删除、导入、下载和共享由 `/api/v1/custom/skills/*` 提供。接口实现位于 `internal/custom/modules/skillhub`。
+轻量技能和专业技能的创建、更新、删除、导入、下载和共享由 `/api/v1/custom/skills/*`
+提供。调用方应以接口返回的字段和权限结果为准，不依赖平台内部实现路径。
 
 当前运行时边界：
 
 - 轻量技能可配置到智能体，也可在对话中临时选择。
-- 专业技能当前主要用于 `general-agent` 和 `document-processing-agent`。运行时会把专业技能包落到 Claude SDK 旁路服务的 `.claude/skills/<name>` 目录。
+- 专业技能当前主要用于 `general-agent` 和 `document-processing-agent`；客户端只需按
+  技能 ID/名称和接口返回状态使用，不依赖运行时工作区路径。
 - `data-analysis` 当前不展示工具、MCP、技能配置页。

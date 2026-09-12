@@ -22,8 +22,8 @@
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/vector-stores/types' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/vector-stores/types' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -36,7 +36,7 @@ curl --location 'http://localhost:8080/api/v1/vector-stores/types' \
             "type": "elasticsearch",
             "display_name": "Elasticsearch (Keywords + Vector)",
             "connection_fields": [
-                { "name": "addr", "type": "string", "required": true, "description": "Elasticsearch URL (e.g., http://localhost:9200)" },
+                { "name": "addr", "type": "string", "required": true, "description": "Elasticsearch URL (use the address supplied by your platform administrator)" },
                 { "name": "username", "type": "string", "required": false },
                 { "name": "password", "type": "string", "required": false, "sensitive": true }
             ],
@@ -74,15 +74,15 @@ curl --location 'http://localhost:8080/api/v1/vector-stores/types' \
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/vector-stores/test' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/vector-stores/test' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "engine_type": "elasticsearch",
     "connection_config": {
-        "addr": "http://es:9200",
+        "addr": "<VECTOR_STORE_URL>",
         "username": "elastic",
-        "password": "changeme"
+        "password": "<VECTOR_DB_PASSWORD>"
     }
 }'
 ```
@@ -125,16 +125,16 @@ curl --location --request POST 'http://localhost:8080/api/v1/vector-stores/test'
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/vector-stores' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/vector-stores' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "elasticsearch-hot",
     "engine_type": "elasticsearch",
     "connection_config": {
-        "addr": "http://es-hot:9200",
+        "addr": "<VECTOR_STORE_URL>",
         "username": "elastic",
-        "password": "changeme"
+        "password": "<VECTOR_DB_PASSWORD>"
     },
     "index_config": {
         "index_name": "my_index"
@@ -145,8 +145,8 @@ curl --location 'http://localhost:8080/api/v1/vector-stores' \
 **Tencent VectorDB 请求示例**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/vector-stores' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location 'https://knora.moutai.com.cn/api/v1/vector-stores' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "tencent-vectordb",
@@ -154,7 +154,7 @@ curl --location 'http://localhost:8080/api/v1/vector-stores' \
     "connection_config": {
         "addr": "http://your-instance.tencentvectordb.com",
         "username": "root",
-        "api_key": "your_api_key",
+        "api_key": "<TENANT_API_KEY>",
         "database": "weknora"
     },
     "index_config": {
@@ -174,7 +174,7 @@ curl --location 'http://localhost:8080/api/v1/vector-stores' \
         "name": "elasticsearch-hot",
         "engine_type": "elasticsearch",
         "connection_config": {
-            "addr": "http://es-hot:9200",
+            "addr": "<VECTOR_STORE_URL>",
             "username": "elastic",
             "password": "***"
         },
@@ -198,8 +198,8 @@ curl --location 'http://localhost:8080/api/v1/vector-stores' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/vector-stores' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/vector-stores' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -223,7 +223,7 @@ curl --location 'http://localhost:8080/api/v1/vector-stores' \
             "name": "elasticsearch-hot",
             "engine_type": "elasticsearch",
             "connection_config": {
-                "addr": "http://es-hot:9200",
+        "addr": "<VECTOR_STORE_URL>",
                 "username": "elastic",
                 "password": "***"
             },
@@ -247,8 +247,8 @@ curl --location 'http://localhost:8080/api/v1/vector-stores' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'https://knora.moutai.com.cn/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应**:
@@ -261,7 +261,7 @@ curl --location 'http://localhost:8080/api/v1/vector-stores/550e8400-e29b-41d4-a
         "name": "elasticsearch-hot",
         "engine_type": "elasticsearch",
         "connection_config": {
-            "addr": "http://es-hot:9200",
+            "addr": "<VECTOR_STORE_URL>",
             "username": "elastic",
             "password": "***",
             "version": "7.10.1"
@@ -296,8 +296,8 @@ curl --location 'http://localhost:8080/api/v1/vector-stores/550e8400-e29b-41d4-a
 **请求**:
 
 ```curl
-curl --location --request PUT 'http://localhost:8080/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000' \
---header 'X-API-Key: sk-xxxxx' \
+curl --location --request PUT 'https://knora.moutai.com.cn/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000' \
+--header 'X-API-Key: <TENANT_API_KEY>' \
 --header 'Content-Type: application/json' \
 --data '{
     "name": "elasticsearch-hot-renamed"
@@ -314,7 +314,7 @@ curl --location --request PUT 'http://localhost:8080/api/v1/vector-stores/550e84
         "name": "elasticsearch-hot-renamed",
         "engine_type": "elasticsearch",
         "connection_config": {
-            "addr": "http://es-hot:9200",
+            "addr": "<VECTOR_STORE_URL>",
             "username": "elastic",
             "password": "***"
         },
@@ -346,8 +346,8 @@ curl --location --request PUT 'http://localhost:8080/api/v1/vector-stores/550e84
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'https://knora.moutai.com.cn/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应（成功）**:
@@ -385,8 +385,8 @@ HTTP `400`。错误消息中包含具体的知识库数量（便于运营定位�
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000/test' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'https://knora.moutai.com.cn/api/v1/vector-stores/550e8400-e29b-41d4-a716-446655440000/test' \
+--header 'X-API-Key: <TENANT_API_KEY>'
 ```
 
 **响应（成功）**:

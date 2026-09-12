@@ -6,6 +6,9 @@ aliases: [Home, Index, wiki首页]
 
 # WeKnora Wiki
 
+> 生产平台入口为 [https://knora.moutai.com.cn](https://knora.moutai.com.cn)。文档中出现的
+> 本地端口、容器服务名和内部部署资料仅用于开发或管理员维护。
+
 欢迎使用 WeKnora 知识库 wiki！这里是 WeKnora 项目文档的互联知识网络，所有页面通过双向链接关联，帮助你从任意入口探索整个知识体系。
 
 > 当前仓库已经加入文档级水平扩展、完整工作流状态、无 RWX 对象存储和 Agent

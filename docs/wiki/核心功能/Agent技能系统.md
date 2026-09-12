@@ -15,7 +15,7 @@ source: agent-skills.md
 |------|------|------|
 | 轻量技能 | 二开技能中心创建 | 提示词/上下文片段，可配置到智能体或在对话中临时选择。 |
 | 预加载运行时技能 | `skills/preloaded/` | 原生 Agent skills 目录，通过 `read_skill` / `execute_skill_script` 渐进读取和执行。 |
-| 专业技能 | 二开技能中心导入 | 技能包形式，Claude SDK 运行时会挂载到 `.claude/skills/<name>`。 |
+| 专业技能 | 二开技能中心导入 | 技能包形式，由统一 Agent Runtime 准备到受控工作区 `/workspace/skills/<name>`。 |
 
 轻量技能不要求 `SKILL.md`；预加载运行时技能和专业技能通常包含 `SKILL.md`。
 
@@ -29,7 +29,7 @@ source: agent-skills.md
 第 3 层：references、templates、scripts 等附加资源
 ```
 
-原生运行时技能通过工具读取内容和执行脚本；Claude SDK 专业技能由旁路服务挂载给 Claude SDK 按需读取。
+原生运行时技能通过工具读取内容和执行脚本；专业技能由统一 Agent Runtime 挂载给 AgentScope Harness 按需读取。
 
 ## 预加载技能
 

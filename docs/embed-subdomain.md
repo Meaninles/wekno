@@ -1,5 +1,10 @@
 # Embed 独立子域部署（可选）
 
+> 本文按当前代码与生产配置编写。WeKnora 生产 API/管理端地址为
+> `https://knora.moutai.com.cn`；`app.example.com`、`embed.example.com` 和
+> `shop.example.com` 仅是外部业务站点占位符。本地开发固定使用
+> `http://localhost:5177`。
+
 > **一句话**：把聊天页面单独放到 `embed.example.com`，与主站 `app.example.com` 分开。**大多数部署不需要这一步**——主站和 embed 同域就能用。只有对安全隔离有明确要求时再考虑。
 
 ## 先搞清楚三个「网站」
@@ -10,9 +15,10 @@
 |------|------|--------|
 | **A. 业务站点（宿主）** | `https://shop.example.com` | 你的商城 / 文档站；在这里粘贴 Widget 脚本或 iframe |
 | **B. Embed 页面源站** | `https://app.example.com` 或 `https://embed.example.com` | 提供 `embed.html`、`weknora-widget.js`；聊天 iframe 加载自这里 |
-| **C. WeKnora API** | 通常与 B 同域，如 `https://app.example.com/api` | 后端接口 |
+| **C. WeKnora API** | `https://knora.moutai.com.cn/api/v1` | 生产后端接口 |
 
-**默认（推荐入门）**：B 和主站管理后台都在 `https://app.example.com`，A 可以是任意第三方域名。
+**默认（推荐入门）**：B 是外部业务方承载 Embed 的源站，WeKnora 生产 API 使用
+`https://knora.moutai.com.cn`，A 可以是任意第三方域名。
 
 ```
 shop.example.com          app.example.com
@@ -24,7 +30,8 @@ shop.example.com          app.example.com
 └─────────────────┘       └──────────────────────────┘
 ```
 
-**独立子域（进阶）**：把 B 拆到 `https://embed.example.com`，主站 `https://app.example.com` 只留管理后台。
+**独立子域（进阶）**：把 B 拆到外部业务方的 `https://embed.example.com`，WeKnora 管理端仍使用
+`https://knora.moutai.com.cn`。
 
 ```
 shop.example.com          embed.example.com        app.example.com

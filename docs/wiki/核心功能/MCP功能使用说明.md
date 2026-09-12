@@ -7,60 +7,38 @@ source: MCP功能使用说明.md
 
 # MCP 功能使用说明
 
-## 功能概述
+> 当前代码核对日期：2026-09-13。生产 API 基地址为
+> `https://knora.moutai.com.cn/api/v1`；本地开发 API 仅使用
+> `http://localhost:8080/api/v1`。本页与根目录的 [MCP 功能使用说明](../../MCP功能使用说明.md)
+> 内容一致，外部地址、密钥和服务 ID 均为占位符。
 
-- MCP（Model Context Protocol）让 WeKnora 可以安全地连接外部工具或数据源，扩展 Agent 在推理时可调用的能力。
-- 在前端 `设置 > MCP 服务`（`frontend/src/views/settings/McpSettings.vue`）中集中管理所有服务，无需手动改配置文件。
-- 每个服务都包含名称、传输方式（SSE / HTTP Streamable / Stdio）、连接地址或命令、认证信息以及高级超时与重试策略。
+MCP（Model Context Protocol）让 WeKnora 的 Agent 连接外部工具或数据源。MCP 服务在
+“设置 → MCP 服务”中按当前租户管理，Agent 运行时只使用已启用且对当前租户可见的服务。
 
-> 关于系统级的内置 MCP 服务管理，参见 [内置MCP服务管理](内置MCP服务管理.md)
+## 当前支持范围
 
-## 入口与界面
+- 可用传输：`sse`、`http-streamable`。
+- `stdio` 字段仍存在于兼容数据模型，但服务端出于命令注入风险拒绝创建和连接。
+- 认证策略：无认证、自定义请求头、API Key、Bearer Token、OAuth 2.0；OAuth 令牌按
+  当前登录用户和 MCP 服务隔离保存。
+- 支持连接测试、工具/资源发现和工具人工审批策略。
 
-- 打开控制台左侧菜单 `设置 -> MCP 服务`，即可看到当前租户下的所有 MCP 服务列表。
-- 列表中可快速启停服务、查看描述，并通过右侧菜单执行"测试 / 编辑 / 删除"。
-- "添加服务"按钮会弹出 `McpServiceDialog`，用于创建或修改服务。
+## 使用流程
 
-## 常用操作流程
+1. 生产打开 [https://knora.moutai.com.cn](https://knora.moutai.com.cn)，进入“设置 → MCP 服务”；
+   本地联调才使用 `http://localhost:5177`。
+2. 新建服务时选择 `sse` 或 `http-streamable`，填写上游地址和非敏感配置。
+3. API Key/Token 通过凭据子资源保存；列表和详情只显示是否已配置，不返回密钥明文。
+4. 测试服务，确认工具/资源发现成功，再将服务绑定到需要的 Agent。
+5. 对写入、删除等有副作用的工具配置人工审批。
 
-### 1. 新建服务
-
-- 点击"添加服务"，填写名称与描述，选择传输方式。
-- SSE / HTTP Streamable 需提供可访问的服务 URL；Stdio 需配置 `uvx`/`npx` 命令与参数，可附加环境变量。
-- 根据需要填写 API Key、Bearer Token、超时与重试策略，保存后服务会出现在列表中。
-
-### 2. 启停服务
-
-- 在列表开关中切换启用状态，系统会即时调用后端 `updateMCPService`，失败时会自动回滚状态并弹出提示。
-
-### 3. 连接测试
-
-- 通过更多菜单选择"测试"，前端会调用 `/api/v1/mcp-services/{id}/test` 并弹出 `McpTestResult`。
-- 成功时会展示服务可用的工具清单（含输入 schema）和资源列表；失败时会显示错误信息，方便排查网络或鉴权问题。
-
-### 4. 编辑 / 删除
-
-- "编辑"会带出原有配置，修改后保存即可。
-- "删除"需要在弹窗中确认，完成后列表自动刷新。
-
-## 使用建议
-
-- **传输方式选择**：优先使用 SSE 获取流式体验；需要标准 HTTP Streamable 兼容时再切换；本地调试或离线环境适合使用 Stdio 并在同机启动 MCP Server。
-- **鉴权管理**：将 API Key / Token 保存在"认证配置"中，生产环境建议单独创建最小权限 Key，并定期轮换。
-- **重试策略**：对公网或第三方服务适当提高 `retry_count` 与 `retry_delay`，避免间歇性超时导致 Agent 中断
-
-## 相关主题
-
-- [内置MCP服务管理](../核心功能/内置MCP服务管理.md) — 系统管理员视角的内置 MCP 服务配置
-- [Agent技能系统](Agent技能系统.md) — 另一种 Agent 扩展机制
-- [IM集成开发](../集成扩展/IM集成开发.md) — IM 渠道中 Agent 使用 MCP 工具
-- [添加网络搜索引擎](../集成扩展/添加网络搜索引擎.md) — 扩展搜索能力的另一种方式
+内置服务对所有租户可见，但连接细节会隐藏，租户不能编辑、删除或修改凭据。完整字段与
+OAuth 路由见 [MCP Service API](../../api/mcp-service.md) 和根目录说明。
 
 ---
 
 ## 反向链接
 
-- [Home](../Home.md) — Wiki 首页导航
-- [内置MCP服务管理](内置MCP服务管理.md) — MCP 的系统级管理（管理员视角）
-- [Agent技能系统](Agent技能系统.md) — 与 MCP 并列的 Agent 扩展机制
-- [IM集成开发](../集成扩展/IM集成开发.md) — Agent 在 IM 渠道中可调用 MCP 工具
+- [Home](../Home.md)
+- [内置MCP服务管理](内置MCP服务管理.md)
+- [Agent技能系统](Agent技能系统.md)

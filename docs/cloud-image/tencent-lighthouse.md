@@ -45,7 +45,7 @@
 
 - [ ] 能 SSH 进去（用控制台的默认密码 / 你导入的 key）
 - [ ] `systemctl status weknora-firstboot` 显示已成功执行（或已 disable + 文件被删）
-- [ ] `cat /root/weknora-credentials.txt` 里有随机密码
+- [ ] 受保护凭证文件中存在随机初始化结果（不要把路径或内容写入版本库）
 - [ ] 浏览器打开公网 IP 能访问 WeKnora，能注册管理员
 - [ ] `docker compose -f /opt/WeKnora/docker-compose.yml ps` 全部 healthy
 - [ ] `cat /opt/WeKnora/.cloud-image-meta` 显示正确的版本

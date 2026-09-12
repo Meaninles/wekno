@@ -1,5 +1,8 @@
 # WeKnora MCP Server 可运行模组包 - 项目总结
 
+> 文档核对日期：2026-09-13。生产连接地址使用
+> `https://knora.moutai.com.cn/api/v1`；`<TENANT_API_KEY>` 等均为不可用占位符。
+
 ## 🎉 项目完成状态
 
 ✅ **所有测试通过** - 模组已成功打包并可正常运行
@@ -89,16 +92,16 @@ weknora-mcp-server              # 全局命令
 ### 必需环境变量
 ```bash
 # Linux/macOS
-export WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-export WEKNORA_API_KEY="your_api_key_here"
+export WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+export WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # Windows PowerShell
-$env:WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-$env:WEKNORA_API_KEY="your_api_key_here"
+$env:WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+$env:WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # Windows CMD
-set WEKNORA_BASE_URL=http://localhost:8080/api/v1
-set WEKNORA_API_KEY=your_api_key_here
+set WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
+set WEKNORA_API_KEY=<TENANT_API_KEY>
 ```
 
 ## 🛠️ 功能特性
@@ -130,8 +133,8 @@ set WEKNORA_API_KEY=your_api_key_here
 pip install -r requirements.txt
 
 # 2. 设置环境变量
-export WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-export WEKNORA_API_KEY="your_api_key"
+export WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+export WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # 3. 启动服务器
 python main.py
@@ -234,7 +237,7 @@ Description=WeKnora MCP Server
 
 [Service]
 ExecStart=/usr/local/bin/weknora-mcp-server
-Environment=WEKNORA_BASE_URL=http://localhost:8080/api/v1
+Environment=WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1
 ```
 
 ## 🔧 故障排除

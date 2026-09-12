@@ -2,6 +2,9 @@
 
 本文档提供了 WeKnora MCP Server 的详细使用示例。
 
+> 默认示例连接生产 API `https://knora.moutai.com.cn/api/v1`。本地地址只适用于明确的
+> 本地开发/验收场景；不要把真实 API Key 写进示例文件或 `.env` 并提交到仓库。
+
 ## 基本使用
 
 ### 1. 启动服务器
@@ -21,12 +24,12 @@ python main.py --verbose
 
 ```bash
 # 设置环境变量
-export WEKNORA_BASE_URL="http://localhost:8080/api/v1"
-export WEKNORA_API_KEY="your_api_key_here"
+export WEKNORA_BASE_URL="https://knora.moutai.com.cn/api/v1"
+export WEKNORA_API_KEY="<TENANT_API_KEY>"
 
 # 或者在 .env 文件中设置
-echo "WEKNORA_BASE_URL=http://localhost:8080/api/v1" > .env
-echo "WEKNORA_API_KEY=your_api_key_here" >> .env
+echo "WEKNORA_BASE_URL=https://knora.moutai.com.cn/api/v1" > .env
+echo "WEKNORA_API_KEY=<TENANT_API_KEY>" >> .env
 ```
 
 ## MCP 工具使用示例
@@ -156,7 +159,7 @@ echo "WEKNORA_API_KEY=your_api_key_here" >> .env
     "source": "openai",
     "description": "OpenAI GPT-4 模型用于知识问答",
     "base_url": "https://api.openai.com/v1",
-    "api_key": "sk-...",
+    "api_key": "<MODEL_API_KEY>",
     "is_default": true
   }
 }
@@ -389,8 +392,8 @@ python main.py --verbose
       "command": "python",
       "args": ["path/to/main.py"],
       "env": {
-        "WEKNORA_BASE_URL": "http://localhost:8080/api/v1",
-        "WEKNORA_API_KEY": "your_api_key"
+        "WEKNORA_BASE_URL": "https://knora.moutai.com.cn/api/v1",
+        "WEKNORA_API_KEY": "<TENANT_API_KEY>"
       }
     }
   }

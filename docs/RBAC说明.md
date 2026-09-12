@@ -1,5 +1,8 @@
 # 租户 RBAC 说明
 
+> 生产访问统一使用 `https://knora.moutai.com.cn`；API 基地址为
+> `https://knora.moutai.com.cn/api/v1`。文档只使用占位符，不记录租户标识、密钥或内部地址。
+
 本文档介绍 WeKnora **租户内权限控制（Tenant RBAC）** 的设计、角色矩阵、资源归属模型、配置方式，以及它与 [共享空间](./共享空间说明.md) 之间的关系。
 
 > 状态：已随 #1303 发布，由配置项 `tenant.enable_rbac` 控制，默认 `true`（强制鉴权）。可临时切到 `false` 进入「仅记录不拦截」的灰度窗口。

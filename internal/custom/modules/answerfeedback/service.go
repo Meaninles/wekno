@@ -27,6 +27,17 @@ type Service struct {
 	snapshotQueue    chan string
 	pendingFeedback  map[string]feedbackTask
 	pendingSnapshots map[string]snapshotTask
+
+	// WeCom follow-up feedback is intentionally process-local and lightweight.
+	// The durable result is written to custom_answer_feedbacks only after the
+	// user clicks a card; pending timers are safe to lose on process restart.
+	wecomSenderMu       sync.RWMutex
+	wecomSender         WeComCardSender
+	wecomMu             sync.Mutex
+	wecomTasksByKey     map[string]*wecomFeedbackTask
+	wecomTasksByID      map[string]*wecomFeedbackTask
+	wecomGenerations    map[string]uint64
+	wecomLastIncomingAt map[string]time.Time
 }
 
 type feedbackTask struct {
@@ -38,6 +49,8 @@ type feedbackTask struct {
 	AssistantMessageID string
 	Feedback           string
 	Channel            string
+	Source             string
+	Metadata           types.JSONMap
 	CreatedAt          time.Time
 }
 
@@ -51,7 +64,7 @@ type snapshotTask struct {
 
 func NewService(db *gorm.DB, cfg Config) *Service {
 	cfg = cfg.normalize()
-	return &Service{
+	s := &Service{
 		db:               db,
 		cfg:              cfg,
 		feedbackQueue:    make(chan string, cfg.QueueSize),
@@ -59,6 +72,8 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		pendingFeedback:  make(map[string]feedbackTask),
 		pendingSnapshots: make(map[string]snapshotTask),
 	}
+	s.initWeComFeedbackState()
+	return s
 }
 
 func (s *Service) Migrate(ctx context.Context) error {
@@ -69,7 +84,20 @@ func (s *Service) Migrate(ctx context.Context) error {
 	config := *db.Config
 	config.DisableForeignKeyConstraintWhenMigrating = true
 	db.Config = &config
-	return db.WithContext(ctx).AutoMigrate(&Feedback{}, &RunSnapshot{})
+	if err := db.WithContext(ctx).AutoMigrate(&Feedback{}, &RunSnapshot{}); err != nil {
+		return err
+	}
+	// Normalize the old toolbar vocabulary once the shared table is upgraded.
+	// Historical dislikes cannot be classified further, so they become the
+	// neutral negative bucket.
+	if err := db.WithContext(ctx).Model(&Feedback{}).
+		Where("feedback = ?", FeedbackLike).
+		Update("feedback", FeedbackSolved).Error; err != nil {
+		return err
+	}
+	return db.WithContext(ctx).Model(&Feedback{}).
+		Where("feedback = ?", FeedbackDislike).
+		Update("feedback", FeedbackUnsolved).Error
 }
 
 func (s *Service) Start() {
@@ -92,7 +120,7 @@ func (s *Service) SetMessageFeedback(ctx context.Context, message *types.Message
 		return false
 	}
 	userID, actorKey := actorKeyFromContext(ctx, message.SessionID)
-	task := feedbackTask{
+	return s.SetFeedback(ctx, FeedbackInput{
 		TenantID:           tenantID,
 		UserID:             userID,
 		ActorKey:           actorKey,
@@ -101,10 +129,53 @@ func (s *Service) SetMessageFeedback(ctx context.Context, message *types.Message
 		AssistantMessageID: message.ID,
 		Feedback:           feedback,
 		Channel:            message.Channel,
+		Source:             "chat_answer_toolbar",
+	})
+}
+
+// FeedbackInput is the platform-neutral input used by web and IM feedback
+// surfaces. Feedback is normalized before it enters the shared async queue.
+type FeedbackInput struct {
+	TenantID           uint64
+	UserID             string
+	ActorKey           string
+	SessionID          string
+	RequestID          string
+	AssistantMessageID string
+	Feedback           string
+	Channel            string
+	Source             string
+	Metadata           types.JSONMap
+}
+
+// SetFeedback queues a shared feedback record without blocking the caller on
+// database I/O. It is safe for both the HTTP toolbar and IM callback paths.
+func (s *Service) SetFeedback(ctx context.Context, input FeedbackInput) bool {
+	if s == nil {
+		return false
+	}
+	feedback, ok := normalizeFeedback(input.Feedback)
+	if !ok {
+		return false
+	}
+	if input.TenantID == 0 || strings.TrimSpace(input.ActorKey) == "" || strings.TrimSpace(input.AssistantMessageID) == "" {
+		return false
+	}
+	task := feedbackTask{
+		TenantID:           input.TenantID,
+		UserID:             input.UserID,
+		ActorKey:           input.ActorKey,
+		SessionID:          input.SessionID,
+		RequestID:          input.RequestID,
+		AssistantMessageID: input.AssistantMessageID,
+		Feedback:           feedback,
+		Channel:            input.Channel,
+		Source:             input.Source,
+		Metadata:           cloneMetadata(input.Metadata),
 		CreatedAt:          time.Now(),
 	}
 	if ok := s.enqueueFeedback(task); !ok {
-		logger.Warnf(ctx, "[answerfeedback] feedback queue full, dropped feedback task for message %s", message.ID)
+		logger.Warnf(ctx, "[answerfeedback] feedback queue full, dropped feedback task for message %s", input.AssistantMessageID)
 		return false
 	}
 	return true
@@ -327,6 +398,17 @@ func (s *Service) persistFeedback(ctx context.Context, task feedbackTask) error 
 			Delete(&Feedback{}).Error
 	}
 	now := time.Now()
+	metadata := cloneMetadata(task.Metadata)
+	if metadata == nil {
+		metadata = types.JSONMap{}
+	}
+	source := strings.TrimSpace(task.Source)
+	if source == "" {
+		source = "chat_answer_toolbar"
+	}
+	metadata["source"] = source
+	metadata["queued_at"] = task.CreatedAt
+	metadata["written_at"] = now
 	row := Feedback{
 		TenantID:           task.TenantID,
 		UserID:             task.UserID,
@@ -336,11 +418,7 @@ func (s *Service) persistFeedback(ctx context.Context, task feedbackTask) error 
 		AssistantMessageID: task.AssistantMessageID,
 		Feedback:           task.Feedback,
 		Channel:            task.Channel,
-		Metadata: types.JSONMap{
-			"source":     "chat_answer_toolbar",
-			"queued_at":  task.CreatedAt,
-			"written_at": now,
-		},
+		Metadata:           metadata,
 	}
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{
@@ -467,14 +545,27 @@ func actorKeyFromContext(ctx context.Context, sessionID string) (string, string)
 func normalizeFeedback(value string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case FeedbackLike:
-		return FeedbackLike, true
+		return FeedbackSolved, true
 	case FeedbackDislike:
-		return FeedbackDislike, true
+		return FeedbackUnsolved, true
+	case FeedbackSolved, FeedbackOffTopic, FeedbackInaccurate, FeedbackUnsolved:
+		return strings.ToLower(strings.TrimSpace(value)), true
 	case "", "none", "clear", "cancel":
 		return FeedbackNone, true
 	default:
 		return "", false
 	}
+}
+
+func cloneMetadata(input types.JSONMap) types.JSONMap {
+	if input == nil {
+		return nil
+	}
+	output := make(types.JSONMap, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 func buildSnapshotPayload(snapshot sessionhandler.AssistantRunSnapshot, assistant *types.Message, conversation []types.Message, task snapshotTask, collectedAt time.Time) types.JSONMap {

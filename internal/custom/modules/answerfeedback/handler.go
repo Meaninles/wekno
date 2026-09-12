@@ -40,7 +40,7 @@ func (h *Handler) SetMessageFeedback(c *gin.Context) {
 	}
 	feedback, ok := normalizeFeedback(req.Feedback)
 	if !ok {
-		c.Error(apperrors.NewBadRequestError("feedback must be like, dislike, or none"))
+		c.Error(apperrors.NewBadRequestError("feedback must be solved, off_topic, inaccurate, unsolved, or none"))
 		return
 	}
 

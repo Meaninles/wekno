@@ -16,9 +16,11 @@ import (
 
 // Compile-time checks.
 var (
-	_ im.Adapter        = (*WSAdapter)(nil)
-	_ im.StreamSender   = (*WSAdapter)(nil)
-	_ im.FileDownloader = (*WSAdapter)(nil)
+	_ im.Adapter                   = (*WSAdapter)(nil)
+	_ im.StreamSender              = (*WSAdapter)(nil)
+	_ im.FileDownloader            = (*WSAdapter)(nil)
+	_ im.TemplateCardSender        = (*WSAdapter)(nil)
+	_ im.InteractiveEventRegistrar = (*WSAdapter)(nil)
 )
 
 // WSAdapter implements im.Adapter and im.StreamSender for WeCom in WebSocket
@@ -52,6 +54,25 @@ func (a *WSAdapter) HandleURLVerification(c *gin.Context) bool {
 
 func (a *WSAdapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, reply *im.ReplyMessage) error {
 	return a.client.SendReply(ctx, incoming, reply)
+}
+
+// SetInteractiveEventHandler wires template-card callbacks into the owning IM
+// service without coupling this adapter to any custom module.
+func (a *WSAdapter) SetInteractiveEventHandler(handler im.InteractiveEventHandler) {
+	if a == nil || a.client == nil {
+		return
+	}
+	a.client.SetInteractiveEventHandler(handler)
+}
+
+// SendTemplateCard sends a proactive WeCom template card to a conversation.
+func (a *WSAdapter) SendTemplateCard(ctx context.Context, chatID string, cardBody []byte) error {
+	return a.client.SendTemplateCard(ctx, chatID, cardBody)
+}
+
+// UpdateTemplateCard updates a card from a template-card callback event.
+func (a *WSAdapter) UpdateTemplateCard(ctx context.Context, requestID string, cardBody []byte) error {
+	return a.client.UpdateTemplateCard(ctx, requestID, cardBody)
 }
 
 // ── StreamSender implementation ──

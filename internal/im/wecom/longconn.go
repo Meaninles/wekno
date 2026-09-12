@@ -28,11 +28,13 @@ import (
 const (
 	defaultWSEndpoint = "wss://openws.work.weixin.qq.com"
 
-	cmdSubscribe     = "aibot_subscribe"
-	cmdPing          = "ping"
-	cmdMsgCallback   = "aibot_msg_callback"
-	cmdEventCallback = "aibot_event_callback"
-	cmdResponse      = "aibot_respond_msg"
+	cmdSubscribe      = "aibot_subscribe"
+	cmdPing           = "ping"
+	cmdMsgCallback    = "aibot_msg_callback"
+	cmdEventCallback  = "aibot_event_callback"
+	cmdResponse       = "aibot_respond_msg"
+	cmdResponseUpdate = "aibot_respond_update_msg"
+	cmdSendMessage    = "aibot_send_msg"
 
 	defaultHeartbeatInterval    = 30 * time.Second
 	defaultReconnectBaseDelay   = 1 * time.Second
@@ -91,6 +93,8 @@ type botMessage struct {
 	Quote *botMessage `json:"quote,omitempty"` // quoted message (optional)
 	Event struct {
 		EventType string `json:"eventtype"`
+		EventKey  string `json:"event_key"`
+		TaskID    string `json:"task_id"`
 	} `json:"event"`
 }
 
@@ -144,6 +148,9 @@ type LongConnClient struct {
 	closed atomic.Bool
 	reqSeq atomic.Int64
 
+	eventHandlerMu sync.RWMutex
+	eventHandler   im.InteractiveEventHandler
+
 	// streamBufs tracks accumulated content per stream ID.
 	// WeCom stream protocol is replace-based: each frame's content replaces
 	// the previously displayed text, so we must send the full accumulated text.
@@ -177,6 +184,26 @@ func NewLongConnClient(botID, secret, wsEndpoint, botName string, handler Messag
 		c.botDisplayName.Store(botName)
 	}
 	return c, nil
+}
+
+// SetInteractiveEventHandler installs the callback used for template-card
+// events. It is set by the owning IM service after the adapter is created.
+func (c *LongConnClient) SetInteractiveEventHandler(handler im.InteractiveEventHandler) {
+	if c == nil {
+		return
+	}
+	c.eventHandlerMu.Lock()
+	c.eventHandler = handler
+	c.eventHandlerMu.Unlock()
+}
+
+func (c *LongConnClient) interactiveEventHandler() im.InteractiveEventHandler {
+	if c == nil {
+		return nil
+	}
+	c.eventHandlerMu.RLock()
+	defer c.eventHandlerMu.RUnlock()
+	return c.eventHandler
 }
 
 // Start connects and runs the long connection loop. It reconnects automatically on failure.
@@ -258,6 +285,77 @@ func (c *LongConnClient) SendReply(ctx context.Context, incoming *im.IncomingMes
 		Body:    bodyBytes,
 	}
 
+	return c.writeJSON(frame)
+}
+
+// SendTemplateCard proactively sends a template card to a direct or group
+// conversation. The caller supplies only the template_card object; the
+// protocol envelope and chatid are owned by this adapter.
+func (c *LongConnClient) SendTemplateCard(ctx context.Context, chatID string, cardBody []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(chatID) == "" {
+		return fmt.Errorf("missing chat ID for proactive template card")
+	}
+	if len(cardBody) == 0 {
+		return fmt.Errorf("empty template card body")
+	}
+	var card json.RawMessage
+	if err := json.Unmarshal(cardBody, &card); err != nil {
+		return fmt.Errorf("invalid template card body: %w", err)
+	}
+	body, err := json.Marshal(struct {
+		ChatID       string          `json:"chatid"`
+		MsgType      string          `json:"msgtype"`
+		TemplateCard json.RawMessage `json:"template_card"`
+	}{
+		ChatID:       chatID,
+		MsgType:      "template_card",
+		TemplateCard: card,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal proactive template card: %w", err)
+	}
+	frame := wsFrame{
+		Cmd:     cmdSendMessage,
+		Headers: map[string]string{"req_id": fmt.Sprintf("%s_%d", cmdSendMessage, c.reqSeq.Add(1))},
+		Body:    body,
+	}
+	return c.writeJSON(frame)
+}
+
+// UpdateTemplateCard replaces a card in response to a template-card event.
+// requestID must be the req_id carried by the event callback.
+func (c *LongConnClient) UpdateTemplateCard(ctx context.Context, requestID string, cardBody []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return fmt.Errorf("missing request ID for template card update")
+	}
+	if len(cardBody) == 0 {
+		return fmt.Errorf("empty template card update body")
+	}
+	var card json.RawMessage
+	if err := json.Unmarshal(cardBody, &card); err != nil {
+		return fmt.Errorf("invalid template card update body: %w", err)
+	}
+	body, err := json.Marshal(struct {
+		ResponseType string          `json:"response_type"`
+		TemplateCard json.RawMessage `json:"template_card"`
+	}{
+		ResponseType: "update_template_card",
+		TemplateCard: card,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal template card update: %w", err)
+	}
+	frame := wsFrame{
+		Cmd:     cmdResponseUpdate,
+		Headers: map[string]string{"req_id": requestID},
+		Body:    body,
+	}
 	return c.writeJSON(frame)
 }
 
@@ -518,7 +616,33 @@ func (c *LongConnClient) handleCallback(ctx context.Context, frame wsFrame) {
 			logger.Warnf(ctx, "[WeCom] Server sent disconnected_event, closing connection to trigger reconnect")
 			c.closeConn()
 		default:
-			logger.Infof(ctx, "[WeCom] Ignoring event type: %s", msg.Event.EventType)
+			chatType := im.ChatTypeDirect
+			chatID := ""
+			if msg.ChatType == "group" {
+				chatType = im.ChatTypeGroup
+				chatID = msg.ChatID
+			}
+			reqID := ""
+			if frame.Headers != nil {
+				reqID = frame.Headers["req_id"]
+			}
+			event := &im.InteractiveEvent{
+				Platform:  im.PlatformWeCom,
+				EventType: msg.Event.EventType,
+				EventKey:  msg.Event.EventKey,
+				TaskID:    msg.Event.TaskID,
+				RequestID: reqID,
+				UserID:    msg.From.UserID,
+				ChatID:    chatID,
+				ChatType:  chatType,
+			}
+			if handler := c.interactiveEventHandler(); handler != nil {
+				if err := handler(ctx, event); err != nil {
+					logger.Errorf(ctx, "[WeCom] Interactive event handler failed: %v", err)
+				}
+			} else {
+				logger.Infof(ctx, "[WeCom] Ignoring event type without handler: %s", msg.Event.EventType)
+			}
 		}
 		return
 	}

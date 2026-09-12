@@ -48,6 +48,8 @@ export default {
     dislike: "点踩",
     liked: "已点赞",
     disliked: "已点踩",
+    offTopic: "答非所问",
+    inaccurate: "回答不准确",
   },
   newUserGuide: {
     stepOf: "{current} / {total}",

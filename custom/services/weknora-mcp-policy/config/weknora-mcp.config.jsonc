@@ -1,0 +1,55 @@
+{
+  // 工具白名单：只保留需要开放的工具；删除某一行即可关闭对应能力。
+  // 两个 MCP 实例都会挂载此文件，修改后下一次 tools/list 或 tools/call 自动生效。
+  "enabled_tools": [
+    // 租户
+    "create_tenant",
+    "list_tenants",
+
+    // 知识库
+    "create_knowledge_base",
+    "list_knowledge_bases",
+    "get_knowledge_base",
+    "update_knowledge_base",
+    "delete_knowledge_base",
+    "hybrid_search",
+
+    // 写入知识与处理状态
+    "create_knowledge_from_content",
+    "create_knowledge_from_file",
+    "create_knowledge_from_url",
+    "ingest_status",
+
+    // 知识条目
+    "list_knowledge",
+    "get_knowledge",
+    "download_knowledge",
+    "delete_knowledge",
+
+    // 模型
+    "create_model",
+    "list_models",
+    "get_model",
+
+    // 会话和问答
+    "create_session",
+    "get_session",
+    "list_sessions",
+    "delete_session",
+    "chat",
+    "agent_chat",
+
+    // 智能体
+    "list_agents",
+    "get_agent",
+
+    // 分块
+    "list_chunks",
+    "delete_chunk",
+
+    // Wiki
+    "wiki_search",
+    "wiki_read_page",
+    "wiki_index_view"
+  ]
+}

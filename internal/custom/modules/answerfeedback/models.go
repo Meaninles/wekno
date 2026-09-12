@@ -10,9 +10,17 @@ import (
 )
 
 const (
+	// Canonical feedback values shared by the web toolbar and WeCom cards.
+	FeedbackSolved     = "solved"
+	FeedbackOffTopic   = "off_topic"
+	FeedbackInaccurate = "inaccurate"
+	FeedbackUnsolved   = "unsolved"
+	FeedbackNone       = ""
+
+	// Legacy wire values are kept as input aliases only. New records never
+	// persist like/dislike, so analytics can use one vocabulary everywhere.
 	FeedbackLike    = "like"
 	FeedbackDislike = "dislike"
-	FeedbackNone    = ""
 )
 
 // Feedback stores the current lightweight signal for one answer and actor.

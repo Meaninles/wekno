@@ -1,6 +1,6 @@
 import { get, put } from '@/utils/request';
 
-export type AnswerFeedbackValue = 'like' | 'dislike' | '';
+export type AnswerFeedbackValue = 'solved' | 'off_topic' | 'inaccurate' | 'unsolved' | '';
 type ApiResponse<T> = { success: boolean; data: T };
 
 export function setAnswerFeedback(sessionId: string, messageId: string, feedback: AnswerFeedbackValue) {

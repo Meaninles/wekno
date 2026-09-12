@@ -308,6 +308,103 @@ services:
       start_period: 10s
     restart: "no"
 
+  # External MCP protocol adapter.  The two replicas are stateless and share
+  # the same mounted JSONC allowlist; the caller's X-API-Key is forwarded to
+  # runtime-entry on every tool call.
+  runtime-mcp-1:
+    image: ${WEKNORA_MCP_IMAGE:-weknora-mcp-policy:local}
+    build:
+      context: ../../..
+      dockerfile: custom/services/weknora-mcp-policy/Dockerfile
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-mcp-1
+    working_dir: /app
+    environment:
+      WEKNORA_BASE_URL: http://runtime-entry:8080/api/v1
+      WEKNORA_MCP_TOOLS_FILE: /app/config/weknora-mcp.config.jsonc
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      MCP_LOG_LEVEL: ${WEKNORA_MCP_LOG_LEVEL:-INFO}
+      MCP_MAX_REQUEST_BODY_BYTES: ${WEKNORA_MCP_MAX_REQUEST_BODY_BYTES:-67108864}
+      MCP_MAX_UPLOAD_BYTES: ${WEKNORA_MCP_MAX_UPLOAD_BYTES:-33554432}
+      MCP_MAX_DOWNLOAD_BYTES: ${WEKNORA_MCP_MAX_DOWNLOAD_BYTES:-8388608}
+      MCP_ALLOW_SERVER_FILE_PATH: "false"
+    volumes:
+      - ../../services/weknora-mcp-policy/config:/app/config:ro
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-mcp-1
+    depends_on:
+      runtime-entry:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    restart: "no"
+
+  runtime-mcp-2:
+    image: ${WEKNORA_MCP_IMAGE:-weknora-mcp-policy:local}
+    build:
+      context: ../../..
+      dockerfile: custom/services/weknora-mcp-policy/Dockerfile
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-mcp-2
+    working_dir: /app
+    environment:
+      WEKNORA_BASE_URL: http://runtime-entry:8080/api/v1
+      WEKNORA_MCP_TOOLS_FILE: /app/config/weknora-mcp.config.jsonc
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      MCP_LOG_LEVEL: ${WEKNORA_MCP_LOG_LEVEL:-INFO}
+      MCP_MAX_REQUEST_BODY_BYTES: ${WEKNORA_MCP_MAX_REQUEST_BODY_BYTES:-67108864}
+      MCP_MAX_UPLOAD_BYTES: ${WEKNORA_MCP_MAX_UPLOAD_BYTES:-33554432}
+      MCP_MAX_DOWNLOAD_BYTES: ${WEKNORA_MCP_MAX_DOWNLOAD_BYTES:-8388608}
+      MCP_ALLOW_SERVER_FILE_PATH: "false"
+    volumes:
+      - ../../services/weknora-mcp-policy/config:/app/config:ro
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-mcp-2
+    depends_on:
+      runtime-entry:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    restart: "no"
+
+  runtime-mcp-entry:
+    image: haproxy:3.2-alpine
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-mcp-entry
+    depends_on:
+      runtime-mcp-1:
+        condition: service_healthy
+      runtime-mcp-2:
+        condition: service_healthy
+    volumes:
+      - ./haproxy-mcp.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "${WEKNORA_RUNTIME_MCP_PORT:-8000}:8000"
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-mcp-entry
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: "no"
+
 networks:
   weknora-dev:
     external: true

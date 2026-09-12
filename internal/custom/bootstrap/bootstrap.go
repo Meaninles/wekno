@@ -166,6 +166,10 @@ func NewHandlers(
 	adminService := customadmin.NewService(db, userService)
 	wikiAccessService := wikiaccess.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
+	if imService != nil {
+		answerFeedbackService.SetWeComCardSender(imService)
+		imService.RegisterFeedbackHook(answerFeedbackService)
+	}
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	builtinAgentPolicyService := builtinagentpolicy.NewService(db, builtinAgentDefaultsService)

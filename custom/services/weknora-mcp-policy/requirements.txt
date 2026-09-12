@@ -1,0 +1,5 @@
+mcp==1.30.0
+requests>=2.31.0,<3
+starlette>=0.37.0,<1
+uvicorn>=0.30.0,<1
+

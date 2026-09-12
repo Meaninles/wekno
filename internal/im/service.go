@@ -394,6 +394,11 @@ type Service struct {
 	channels map[string]*channelState
 	mu       sync.RWMutex
 
+	// feedbackHooks are custom, non-core consumers of IM lifecycle events.
+	// They are intentionally kept behind a tiny registration point so the IM
+	// package does not depend on any custom implementation.
+	feedbackHooks []FeedbackHook
+
 	// adapterFactories maps platform name -> factory function
 	adapterFactories map[string]AdapterFactory
 
@@ -1039,6 +1044,24 @@ func (s *Service) startChannelInternal(channel *IMChannel, factory AdapterFactor
 		return fmt.Errorf("create adapter: %w", err)
 	}
 
+	// Interactive events are parsed by adapters but dispatched by the IM
+	// service. This keeps custom card workflows out of the native adapter
+	// factory and lets the callback carry the owning channel's identity.
+	if registrar, ok := adapter.(InteractiveEventRegistrar); ok {
+		registrar.SetInteractiveEventHandler(func(eventCtx context.Context, event *InteractiveEvent) error {
+			if event == nil {
+				return nil
+			}
+			enriched := *event
+			enriched.ChannelID = channel.ID
+			enriched.TenantID = channel.TenantID
+			enriched.Platform = Platform(channel.Platform)
+			enriched.Mode = channel.Mode
+			s.notifyInteractiveEvent(eventCtx, enriched)
+			return nil
+		})
+	}
+
 	// Start leader renewal goroutine for WebSocket / long-poll channels.
 	var leaderCancel context.CancelFunc
 	if (channel.Mode == "websocket" || channel.Mode == "longpoll") && s.redis != nil {
@@ -1312,6 +1335,111 @@ func (s *Service) GetChannelAdapter(channelID string) (Adapter, *IMChannel, bool
 	return cs.Adapter, cs.Channel, true
 }
 
+// RegisterFeedbackHook installs a lightweight custom consumer for IM answer
+// lifecycle and interactive-card events. Registration is process-local and is
+// normally performed during application bootstrap.
+func (s *Service) RegisterFeedbackHook(hook FeedbackHook) {
+	if s == nil || hook == nil {
+		return
+	}
+	s.mu.Lock()
+	s.feedbackHooks = append(s.feedbackHooks, hook)
+	s.mu.Unlock()
+}
+
+func (s *Service) feedbackHookSnapshot() []FeedbackHook {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]FeedbackHook(nil), s.feedbackHooks...)
+}
+
+// notifyIMIncomingMessage is deliberately synchronous but O(1): registered
+// hooks may only update in-memory cancellation state here. This gives a new
+// request precedence over a pending delayed follow-up without putting any DB
+// or network operation on the incoming-message path.
+func (s *Service) notifyIMIncomingMessage(ctx context.Context, channelID string, channel *IMChannel, msg *IncomingMessage) {
+	for _, hook := range s.feedbackHookSnapshot() {
+		func(h FeedbackHook) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Errorf(ctx, "[IM] feedback incoming hook panicked: %v", recovered)
+				}
+			}()
+			h.OnIMIncomingMessage(ctx, channelID, channel, msg)
+		}(hook)
+	}
+}
+
+// notifyAnswerDelivered runs custom follow-up scheduling asynchronously so a
+// slow custom hook can never hold an IM QA worker after the final frame has
+// been sent.
+func (s *Service) notifyAnswerDelivered(ctx context.Context, delivery AnswerDelivery) {
+	for _, hook := range s.feedbackHookSnapshot() {
+		go func(h FeedbackHook) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Errorf(ctx, "[IM] feedback answer-delivery hook panicked: %v", recovered)
+				}
+			}()
+			h.OnIMAnswerDelivered(context.WithoutCancel(ctx), delivery)
+		}(hook)
+	}
+}
+
+// notifyInteractiveEvent is called from an adapter-owned callback goroutine.
+// The hook may synchronously send the required card update, but it is already
+// detached from the WebSocket read loop and never blocks the QA request path.
+func (s *Service) notifyInteractiveEvent(ctx context.Context, event InteractiveEvent) {
+	for _, hook := range s.feedbackHookSnapshot() {
+		func(h FeedbackHook) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Errorf(ctx, "[IM] feedback interactive hook panicked: %v", recovered)
+				}
+			}()
+			h.OnIMInteractiveEvent(ctx, event)
+		}(hook)
+	}
+}
+
+// SendTemplateCard sends a proactive template card through the local adapter
+// that owns a WeCom WebSocket channel. It is intentionally generic so the
+// custom feedback module does not need to know adapter internals.
+func (s *Service) SendTemplateCard(ctx context.Context, channelID, chatID string, cardBody []byte) error {
+	adapter, channel, ok := s.GetChannelAdapter(channelID)
+	if !ok {
+		return fmt.Errorf("channel adapter is not running: %s", channelID)
+	}
+	if channel == nil || channel.Platform != string(PlatformWeCom) || channel.Mode != "websocket" {
+		return fmt.Errorf("template cards are only supported for WeCom WebSocket channels")
+	}
+	sender, ok := adapter.(TemplateCardSender)
+	if !ok {
+		return fmt.Errorf("channel adapter does not support template cards: %s", channelID)
+	}
+	return sender.SendTemplateCard(ctx, chatID, cardBody)
+}
+
+// UpdateTemplateCard updates a WeCom template card in response to a click
+// event. requestID must be the req_id from the event callback.
+func (s *Service) UpdateTemplateCard(ctx context.Context, channelID, requestID string, cardBody []byte) error {
+	adapter, channel, ok := s.GetChannelAdapter(channelID)
+	if !ok {
+		return fmt.Errorf("channel adapter is not running: %s", channelID)
+	}
+	if channel == nil || channel.Platform != string(PlatformWeCom) || channel.Mode != "websocket" {
+		return fmt.Errorf("template cards are only supported for WeCom WebSocket channels")
+	}
+	sender, ok := adapter.(TemplateCardSender)
+	if !ok {
+		return fmt.Errorf("channel adapter does not support template cards: %s", channelID)
+	}
+	return sender.UpdateTemplateCard(ctx, requestID, cardBody)
+}
+
 // GetChannelByID loads a channel from the database.
 func (s *Service) GetChannelByID(channelID string) (*IMChannel, error) {
 	var ch IMChannel
@@ -1390,6 +1518,11 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 			return fmt.Errorf("channel adapter not available after start: %s", channelID)
 		}
 	}
+
+	// Give lightweight custom workflows a chance to cancel follow-ups for this
+	// conversation before any command/QA work is queued. The hook must not do
+	// database or network work; it only updates local cancellation state.
+	s.notifyIMIncomingMessage(ctx, channelID, channel, msg)
 
 	// Resolve threadID for key building — only include in thread mode to avoid
 	// leaking thread scope into user-mode rate limit / inflight keys.
@@ -1619,7 +1752,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// If the adapter supports streaming and output is not "full", use streaming.
 	if !streamDisabled {
 		if streamer, ok := req.adapter.(StreamSender); ok {
-			if err := s.handleMessageStream(ctx, req.msg, req.session, req.agent, kbIDs, streamer, req.adapter, req.userKey, req.tenant); err != nil {
+			if err := s.handleMessageStream(ctx, req.msg, req.session, req.agent, kbIDs, streamer, req.adapter, req.channelID, req.userKey, req.tenant); err != nil {
 				logger.Errorf(ctx, "[IM] Stream QA failed: %v", err)
 			}
 			return
@@ -1652,6 +1785,22 @@ func (s *Service) executeQARequest(req *qaRequest) {
 
 	logger.Infof(ctx, "[IM] Reply sent: channel=%s platform=%s user=%s answer_len=%d",
 		req.channelID, req.msg.Platform, req.msg.UserID, len(answer))
+	if qaResult != nil && qaResult.MessageID != "" {
+		s.notifyAnswerDelivered(ctx, AnswerDelivery{
+			ChannelID:          req.channelID,
+			TenantID:           req.channel.TenantID,
+			Platform:           req.msg.Platform,
+			Mode:               req.channel.Mode,
+			UserID:             req.msg.UserID,
+			ChatID:             req.msg.ChatID,
+			ChatType:           req.msg.ChatType,
+			SessionID:          req.session.ID,
+			RequestID:          qaResult.RequestID,
+			UserMessageID:      qaResult.UserMessageID,
+			AssistantMessageID: qaResult.MessageID,
+			DeliveredAt:        time.Now(),
+		})
+	}
 }
 
 // acquireIMAnswerSlot applies the same model-resource-pool conversation
@@ -2178,12 +2327,12 @@ func briefToolSummary(output string) string {
 // handleMessageStream runs the QA pipeline and streams answer chunks to the IM platform
 // in real-time via the StreamSender interface. Chunks are batched at streamFlushInterval
 // to avoid API rate-limiting.
-func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, streamer StreamSender, adapter Adapter, userKey string, tenant *types.Tenant) error {
+func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, streamer StreamSender, adapter Adapter, channelID string, userKey string, tenant *types.Tenant) error {
 	// Start the stream on the IM platform (e.g., create Feishu streaming card)
 	streamID, err := streamer.StartStream(ctx, msg)
 	if err != nil {
 		logger.Warnf(ctx, "[IM] StartStream failed, falling back to non-streaming: %v", err)
-		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, adapter, userKey, tenant)
+		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, adapter, channelID, userKey, tenant)
 	}
 
 	// Prepare the QA pipeline
@@ -2611,8 +2760,9 @@ loop:
 	}
 
 	// End the stream
-	if err := streamer.EndStream(ctx, msg, streamID); err != nil {
-		logger.Warnf(ctx, "[IM] EndStream failed: %v", err)
+	endErr := streamer.EndStream(ctx, msg, streamID)
+	if endErr != nil {
+		logger.Warnf(ctx, "[IM] EndStream failed: %v", endErr)
 	}
 
 	if answer == "" {
@@ -2625,13 +2775,29 @@ loop:
 	if err := s.messageService.UpdateMessage(ctx, assistantMsg); err != nil {
 		logger.Warnf(ctx, "[IM] Failed to update assistant message: %v", err)
 	}
+	if endErr == nil {
+		s.notifyAnswerDelivered(ctx, AnswerDelivery{
+			ChannelID:          channelID,
+			TenantID:           imDeliveryTenantID(tenant, session),
+			Platform:           msg.Platform,
+			Mode:               "websocket",
+			UserID:             msg.UserID,
+			ChatID:             msg.ChatID,
+			ChatType:           msg.ChatType,
+			SessionID:          session.ID,
+			RequestID:          assistantMsg.RequestID,
+			UserMessageID:      userMsg.ID,
+			AssistantMessageID: assistantMsg.ID,
+			DeliveredAt:        time.Now(),
+		})
+	}
 
 	logger.Infof(ctx, "[IM] Stream reply sent: platform=%s user=%s answer_len=%d", msg.Platform, msg.UserID, len(answer))
 	return nil
 }
 
 // fallbackNonStream is used when streaming initialization fails.
-func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, userKey string, tenant *types.Tenant) error {
+func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, channelID string, userKey string, tenant *types.Tenant) error {
 	qaResult, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote)
 	answer := ""
 	var refs []*types.SearchResult
@@ -2646,17 +2812,48 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	return adapter.SendReply(ctx, msg, &ReplyMessage{
+	if err := adapter.SendReply(ctx, msg, &ReplyMessage{
 		Content: s.RenderFinalOutbound(ctx, answer, refs, tenant, msg.Platform, false, artifacts).Content,
 		IsFinal: true,
-	})
+	}); err != nil {
+		return err
+	}
+	if qaResult != nil && qaResult.MessageID != "" {
+		s.notifyAnswerDelivered(ctx, AnswerDelivery{
+			ChannelID:          channelID,
+			TenantID:           imDeliveryTenantID(tenant, session),
+			Platform:           msg.Platform,
+			Mode:               "websocket",
+			UserID:             msg.UserID,
+			ChatID:             msg.ChatID,
+			ChatType:           msg.ChatType,
+			SessionID:          session.ID,
+			RequestID:          qaResult.RequestID,
+			UserMessageID:      qaResult.UserMessageID,
+			AssistantMessageID: qaResult.MessageID,
+			DeliveredAt:        time.Now(),
+		})
+	}
+	return nil
+}
+
+func imDeliveryTenantID(tenant *types.Tenant, session *types.Session) uint64 {
+	if tenant != nil && tenant.ID != 0 {
+		return tenant.ID
+	}
+	if session != nil {
+		return session.TenantID
+	}
+	return 0
 }
 
 type imQAResult struct {
-	Artifacts  []types.MessageArtifact
-	Answer     string
-	References []*types.SearchResult
-	MessageID  string
+	Artifacts     []types.MessageArtifact
+	Answer        string
+	References    []*types.SearchResult
+	MessageID     string
+	RequestID     string
+	UserMessageID string
 }
 
 // runQA executes the WeKnora QA pipeline and returns the full answer text.
@@ -2867,10 +3064,12 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	// Return the canonical answer and the exact cited evidence snapshots. Every
 	// final IM delivery path passes this pair through RenderFinalOutbound.
 	return &imQAResult{
-		Answer:     answer,
-		Artifacts:  assistantMsg.Artifacts,
-		References: []*types.SearchResult(assistantMsg.KnowledgeReferences),
-		MessageID:  assistantMsg.ID,
+		Answer:        answer,
+		Artifacts:     assistantMsg.Artifacts,
+		References:    []*types.SearchResult(assistantMsg.KnowledgeReferences),
+		MessageID:     assistantMsg.ID,
+		RequestID:     assistantMsg.RequestID,
+		UserMessageID: userMsg.ID,
 	}, nil
 }
 

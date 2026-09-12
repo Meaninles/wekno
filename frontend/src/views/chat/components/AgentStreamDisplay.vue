@@ -789,7 +789,7 @@ interface SessionData {
     total?: number;
   };
   agent_duration_ms?: number;
-  answer_feedback?: 'like' | 'dislike' | '';
+  answer_feedback?: 'solved' | 'off_topic' | 'inaccurate' | 'unsolved' | '';
 }
 
 type PromotedResultBlock = {

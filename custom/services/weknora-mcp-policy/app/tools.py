@@ -30,10 +30,20 @@ def _object(properties: dict[str, Any] | None = None, required: Iterable[str] = 
     return schema
 
 
-def _string(description: str, *, default: str | None = None) -> dict[str, Any]:
+def _string(
+    description: str,
+    *,
+    default: str | None = None,
+    enum: Iterable[str] | None = None,
+    examples: Iterable[str] | None = None,
+) -> dict[str, Any]:
     value: dict[str, Any] = {"type": "string", "description": description}
     if default is not None:
         value["default"] = default
+    if enum is not None:
+        value["enum"] = list(enum)
+    if examples is not None:
+        value["examples"] = list(examples)
     return value
 
 
@@ -76,6 +86,7 @@ class ToolSpec:
     read_only: bool = False
     destructive: bool = False
     idempotent: bool = False
+    open_world: bool = False
 
     def as_mcp_tool(self) -> types.Tool:
         return types.Tool(
@@ -86,8 +97,9 @@ class ToolSpec:
                 readOnlyHint=self.read_only,
                 destructiveHint=self.destructive,
                 idempotentHint=self.idempotent,
-                openWorldHint=False,
+                openWorldHint=self.open_world,
             ),
+            outputSchema=_OUTPUT_SCHEMAS[self.name],
         )
 
 
@@ -95,11 +107,31 @@ _kb_id = _string("知识库 ID 或名称")
 _knowledge_id = _string("知识条目 ID")
 _session_id = _string("会话 ID")
 
+_FILE_INPUT_SCHEMA = _object(
+    {
+        "kb_id": _kb_id,
+        "filename": _string("上传后的文件名", examples=("manual.txt", "产品说明.pdf")),
+        "content_base64": _string("文件内容 Base64；当前服务默认要求提供此字段"),
+        "content_type": _string("文件 MIME 类型", default="application/octet-stream"),
+        "file_path": _string("服务端文件路径；仅在 MCP_ALLOW_SERVER_FILE_PATH=true 时可用"),
+        "metadata": _any_object("可选文件元数据"),
+        "enable_multimodel": _boolean("是否启用多模态解析", default=True),
+        "tag_ids": _array("分类 ID 列表"),
+        "channel": _string("写入来源标识", default="api"),
+        "process_config": _any_object("可选的处理覆盖配置"),
+    },
+    ("kb_id", "filename"),
+)
+_FILE_INPUT_SCHEMA["oneOf"] = [
+    {"required": ["content_base64"]},
+    {"required": ["file_path"]},
+]
+
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "create_tenant",
-        "创建租户。需要租户级管理权限。",
+        "创建租户。需要租户级管理权限；成功后返回租户基本信息。",
         _object(
             {
                 "name": _string("租户名称"),
@@ -110,10 +142,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             ("name",),
         ),
     ),
-    ToolSpec("list_tenants", "列出租户。", _object(), read_only=True, idempotent=True),
+    ToolSpec("list_tenants", "列出当前 API Key 可见的租户。", _object(), read_only=True, idempotent=True),
     ToolSpec(
         "create_knowledge_base",
-        "创建知识库。config 可传入知识库类型、索引和模型配置。",
+        "创建知识库。name 必填；可用 config 或顶层字段传入类型、分块、索引和模型配置。成功后返回知识库 ID。",
         _object(
             {
                 "name": _string("知识库名称"),
@@ -129,17 +161,17 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             ("name",),
         ),
     ),
-    ToolSpec("list_knowledge_bases", "列出当前租户可访问的知识库。", _object(), read_only=True, idempotent=True),
+    ToolSpec("list_knowledge_bases", "列出当前租户可访问的知识库；返回的 ID 或名称可传给其他知识库工具。", _object(), read_only=True, idempotent=True),
     ToolSpec(
         "get_knowledge_base",
-        "查看知识库详情和统计信息。",
+        "查看知识库详情和统计信息。kb_id 可传知识库 UUID 或名称。",
         _object({"kb_id": _kb_id}, ("kb_id",)),
         read_only=True,
         idempotent=True,
     ),
     ToolSpec(
         "update_knowledge_base",
-        "更新知识库名称、描述或配置。",
+        "更新知识库名称、描述或配置。kb_id 可传 UUID 或名称，name 必填。",
         _object(
             {
                 "kb_id": _kb_id,
@@ -158,7 +190,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "hybrid_search",
-        "在知识库中执行关键词+向量混合检索，返回匹配片段。",
+        "在知识库中执行关键词+向量混合检索，返回匹配片段。kb_id 可传 UUID 或名称。",
         _object(
             {
                 "kb_id": _kb_id,
@@ -170,16 +202,17 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             ("kb_id", "query"),
         ),
         read_only=True,
+        idempotent=True,
     ),
     ToolSpec(
         "create_knowledge_from_content",
-        "把 Markdown/纯文本内容写入知识库。成功后只返回知识条目 ID 和处理状态，不回显正文。",
+        "把 Markdown/纯文本内容写入知识库。kb_id 可传 UUID 或名称；status 只能是 draft 或 publish。成功后只返回条目 ID 和处理状态，不回显正文。",
         _object(
             {
                 "kb_id": _kb_id,
                 "title": _string("文档标题"),
                 "content": _string("Markdown 或纯文本正文"),
-                "status": _string("draft 或 publish", default="publish"),
+                "status": _string("发布状态", default="publish", enum=("draft", "publish")),
                 "tag_ids": _array("分类 ID 列表"),
                 "channel": _string("写入来源标识", default="api"),
                 "process_config": _any_object("可选的处理覆盖配置"),
@@ -189,26 +222,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "create_knowledge_from_file",
-        "上传文件并写入知识库。优先传 content_base64；成功后不回显文件内容。",
-        _object(
-            {
-                "kb_id": _kb_id,
-                "filename": _string("文件名"),
-                "content_base64": _string("文件内容的 Base64；也接受 data:*/*;base64,... 数据 URI"),
-                "content_type": _string("文件 MIME 类型", default="application/octet-stream"),
-                "file_path": _string("仅在服务端显式开启 MCP_ALLOW_SERVER_FILE_PATH 时可用"),
-                "metadata": _any_object("可选文件元数据"),
-                "enable_multimodel": _boolean("是否启用多模态解析", default=True),
-                "tag_ids": _array("分类 ID 列表"),
-                "channel": _string("写入来源标识", default="api"),
-                "process_config": _any_object("可选的处理覆盖配置"),
-            },
-            ("kb_id", "filename"),
-        ),
+        "上传文件并写入知识库。kb_id 可传 UUID 或名称；必须提供 content_base64 或 file_path 之一。当前 Compose 默认关闭服务端 file_path，因此通常应传 content_base64；成功后不回显文件内容。",
+        _FILE_INPUT_SCHEMA,
     ),
     ToolSpec(
         "create_knowledge_from_url",
-        "让 WeKnora 抓取 URL 并写入知识库。成功后只返回条目元信息。",
+        "让 WeKnora 抓取 http/https URL 并写入知识库。此操作可能访问外部网络；成功后只返回条目元信息。",
         _object(
             {
                 "kb_id": _kb_id,
@@ -223,6 +242,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
             ("kb_id", "url"),
         ),
+        open_world=True,
     ),
     ToolSpec(
         "ingest_status",
@@ -233,7 +253,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "list_knowledge",
-        "列出知识库中的文档条目及处理状态。",
+        "列出知识库中的文档条目及处理状态。kb_id 可传 UUID 或名称。",
         _object(
             {
                 "kb_id": _kb_id,
@@ -252,16 +272,17 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "get_knowledge",
-        "查看知识条目详情和处理状态。",
+        "查看知识条目详情和处理状态；不会下载原始文件。",
         _object({"knowledge_id": _knowledge_id}, ("knowledge_id",)),
         read_only=True,
         idempotent=True,
     ),
     ToolSpec(
         "download_knowledge",
-        "下载知识条目关联的原始文件并以 Base64 返回；受 MCP_MAX_DOWNLOAD_BYTES 限制。",
+        "导出知识条目关联的原始文件并以 Base64 返回，属于数据导出操作；受 MCP_MAX_DOWNLOAD_BYTES 限制。",
         _object({"knowledge_id": _knowledge_id}, ("knowledge_id",)),
         read_only=True,
+        idempotent=True,
     ),
     ToolSpec(
         "delete_knowledge",
@@ -271,7 +292,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "create_model",
-        "创建租户模型配置。模型参数中的密钥不会出现在返回值中。",
+        "创建租户模型配置。parameters 为提供商相关配置；其中的 API Key、Token、Secret 等密钥不会出现在返回值中。",
         _object(
             {
                 "name": _string("模型名称"),
@@ -284,7 +305,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "base_url": _string("兼容旧客户端的模型 API 地址"),
                 "api_key": _string("兼容旧客户端的模型 API Key"),
                 "is_default": _boolean("兼容旧客户端的默认模型标记"),
-                "workload_scope": _string("interactive 或 derivative_only"),
+                "workload_scope": _string("模型用途范围", enum=("interactive", "derivative_only")),
             },
             ("name",),
         ),
@@ -333,7 +354,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "chat",
-        "调用知识库问答并汇总 SSE 结果；建议显式传 knowledge_base_ids。",
+        "调用知识库问答并汇总 SSE 结果。session_id 必须是已有会话；knowledge_base_ids 可传 UUID 或名称；该工具可能写入会话消息。",
         _object(
             {
                 "session_id": _session_id,
@@ -344,10 +365,11 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
             ("session_id", "query"),
         ),
+        open_world=True,
     ),
     ToolSpec(
         "agent_chat",
-        "调用智能体问答并汇总 SSE 结果；agent_id 可传名称或 UUID。",
+        "调用智能体问答并汇总 SSE 结果。session_id 必须是已有会话；agent_id 可传名称或 UUID；该工具可能写入会话消息。",
         _object(
             {
                 "session_id": _session_id,
@@ -359,24 +381,25 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
             ("session_id", "query", "agent_id"),
         ),
+        open_world=True,
     ),
     ToolSpec(
         "list_agents",
-        "列出当前租户可用智能体。",
+        "列出当前租户可用智能体；返回的 ID 或名称可传给 agent_chat。",
         _object({"page": _integer("页码", default=1, minimum=1), "page_size": _integer("每页数量", default=50, minimum=1)}),
         read_only=True,
         idempotent=True,
     ),
     ToolSpec(
         "get_agent",
-        "查看智能体配置。",
-        _object({"agent_id": _string("智能体 UUID")}, ("agent_id",)),
+        "查看智能体配置。agent_id 可传智能体 UUID 或名称。",
+        _object({"agent_id": _string("智能体 UUID 或名称")}, ("agent_id",)),
         read_only=True,
         idempotent=True,
     ),
     ToolSpec(
         "list_chunks",
-        "列出知识条目的文本分块。",
+        "列出知识条目的文本分块；不会修改或删除分块。",
         _object(
             {
                 "knowledge_id": _knowledge_id,
@@ -399,16 +422,17 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "wiki_search",
-        "在知识库 Wiki 页面中全文检索。",
+        "在知识库 Wiki 页面中全文检索；知识库必须启用 Wiki。",
         _object(
             {"kb_id": _kb_id, "query": _string("检索词"), "limit": _integer("返回数量", default=10, minimum=1)},
             ("kb_id", "query"),
         ),
         read_only=True,
+        idempotent=True,
     ),
     ToolSpec(
         "wiki_read_page",
-        "读取知识库 Wiki 页面的 Markdown 和元数据。",
+        "读取知识库 Wiki 页面的 Markdown 和元数据；知识库必须启用 Wiki。",
         _object({"kb_id": _kb_id, "slug": _string("Wiki 页面 slug")}, ("kb_id", "slug")),
         read_only=True,
         idempotent=True,
@@ -424,6 +448,237 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         idempotent=True,
     ),
 )
+
+
+def _output_object(properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Describe an object while allowing forward-compatible backend fields."""
+
+    return {
+        "type": "object",
+        "properties": {key: _nullable(schema) for key, schema in (properties or {}).items()},
+        "additionalProperties": True,
+    }
+
+
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    """Allow optional nullable fields returned by the REST API."""
+
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _result_schema(result: dict[str, Any]) -> dict[str, Any]:
+    """Match the structuredContent wrapper returned by _success_result."""
+
+    return {
+        "type": "object",
+        "properties": {"result": _nullable(result)},
+        "required": ["result"],
+        "additionalProperties": False,
+    }
+
+
+def _api_result(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "success": {"type": "boolean"},
+        "message": {"type": "string"},
+    }
+    if data is not None:
+        properties["data"] = data
+    return _result_schema(_output_object(properties))
+
+
+def _list_result(item: dict[str, Any]) -> dict[str, Any]:
+    items = {"type": "array", "items": item}
+    paged = _output_object(
+        {
+            "items": items,
+            "total": {"type": "integer", "minimum": 0},
+            "page": {"type": "integer", "minimum": 1},
+            "page_size": {"type": "integer", "minimum": 1},
+            "pages": {"type": "integer", "minimum": 0},
+        }
+    )
+    # WeKnora endpoints use both data=[...] and data={items:[...], ...}.
+    return _api_result({"anyOf": [items, paged]})
+
+
+_ID_OUTPUT = {"type": ["string", "integer"]}
+_KB_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "type": {"type": "string"},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"},
+    }
+)
+_TENANT_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "business": {"type": "string"},
+        "created_at": {"type": "string"},
+    }
+)
+_KNOWLEDGE_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "knowledge_id": _ID_OUTPUT,
+        "knowledge_base_id": _ID_OUTPUT,
+        "title": {"type": "string"},
+        "file_name": {"type": "string"},
+        "file_type": {"type": "string"},
+        "type": {"type": "string"},
+        "source": {"type": "string"},
+        "content": {"type": "string"},
+        "parse_status": {"type": "string"},
+        "core_status": {"type": "string"},
+        "summary_status": {"type": "string"},
+        "enrichment_status": {"type": "string"},
+        "wiki_status": {"type": "string"},
+        "error_message": {"type": "string"},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"},
+        "processed_at": {"type": "string"},
+    }
+)
+_MODEL_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "name": {"type": "string"},
+        "display_name": {"type": "string"},
+        "type": {"type": "string"},
+        "source": {"type": "string"},
+        "description": {"type": "string"},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"},
+    }
+)
+_SESSION_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "session_id": _ID_OUTPUT,
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"},
+    }
+)
+_AGENT_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "config": {"type": "object", "additionalProperties": True},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"},
+    }
+)
+_CHUNK_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "chunk_id": _ID_OUTPUT,
+        "knowledge_id": _ID_OUTPUT,
+        "content": {"type": "string"},
+        "position": {"type": "integer"},
+    }
+)
+_SEARCH_OUTPUT = _output_object(
+    {
+        "id": _ID_OUTPUT,
+        "knowledge_id": _ID_OUTPUT,
+        "knowledge_base_id": _ID_OUTPUT,
+        "title": {"type": "string"},
+        "content": {"type": "string"},
+        "score": {"type": "number"},
+    }
+)
+_ACTION_OUTPUT = _api_result()
+_INGEST_OUTPUT = _result_schema(
+    _output_object(
+        {
+            "success": {"type": "boolean"},
+            "id": _ID_OUTPUT,
+            "knowledge_id": _ID_OUTPUT,
+            "knowledge_base_id": _ID_OUTPUT,
+            "title": {"type": "string"},
+            "file_name": {"type": "string"},
+            "file_type": {"type": "string"},
+            "parse_status": {"type": "string"},
+            "core_status": {"type": "string"},
+            "summary_status": {"type": "string"},
+            "enrichment_status": {"type": "string"},
+            "wiki_status": {"type": "string"},
+            "created_at": {"type": "string"},
+            "updated_at": {"type": "string"},
+        }
+    )
+)
+_DOWNLOAD_OUTPUT = _result_schema(
+    _output_object(
+        {
+            "knowledge_id": _ID_OUTPUT,
+            "filename": {"type": "string"},
+            "content_type": {"type": "string"},
+            "size_bytes": {"type": "integer", "minimum": 0},
+            "content_base64": {"type": "string"},
+        }
+    )
+)
+_CHAT_OUTPUT = _result_schema(
+    _output_object(
+        {
+            "answer": {"type": "string"},
+            "references": {"type": "array", "items": _output_object()},
+            "event_types": {"type": "array", "items": {"type": "string"}},
+            "session_id": _ID_OUTPUT,
+            "agent_id": _ID_OUTPUT,
+        }
+    )
+)
+
+_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "create_tenant": _result_schema(_TENANT_OUTPUT),
+    "list_tenants": _list_result(_TENANT_OUTPUT),
+    "create_knowledge_base": _result_schema(_KB_OUTPUT),
+    "list_knowledge_bases": _list_result(_KB_OUTPUT),
+    "get_knowledge_base": _api_result(_KB_OUTPUT),
+    "update_knowledge_base": _result_schema(_KB_OUTPUT),
+    "delete_knowledge_base": _ACTION_OUTPUT,
+    "hybrid_search": _list_result(_SEARCH_OUTPUT),
+    "create_knowledge_from_content": _INGEST_OUTPUT,
+    "create_knowledge_from_file": _INGEST_OUTPUT,
+    "create_knowledge_from_url": _INGEST_OUTPUT,
+    "ingest_status": _result_schema(_KNOWLEDGE_OUTPUT),
+    "list_knowledge": _list_result(_KNOWLEDGE_OUTPUT),
+    "get_knowledge": _api_result(_KNOWLEDGE_OUTPUT),
+    "download_knowledge": _DOWNLOAD_OUTPUT,
+    "delete_knowledge": _ACTION_OUTPUT,
+    "create_model": _result_schema(_MODEL_OUTPUT),
+    "list_models": _list_result(_MODEL_OUTPUT),
+    "get_model": _api_result(_MODEL_OUTPUT),
+    "create_session": _api_result(_SESSION_OUTPUT),
+    "get_session": _api_result(_SESSION_OUTPUT),
+    "list_sessions": _list_result(_SESSION_OUTPUT),
+    "delete_session": _ACTION_OUTPUT,
+    "chat": _CHAT_OUTPUT,
+    "agent_chat": _CHAT_OUTPUT,
+    "list_agents": _list_result(_AGENT_OUTPUT),
+    "get_agent": _api_result(_AGENT_OUTPUT),
+    "list_chunks": _list_result(_CHUNK_OUTPUT),
+    "delete_chunk": _ACTION_OUTPUT,
+    "wiki_search": _list_result(_SEARCH_OUTPUT),
+    "wiki_read_page": _api_result(_output_object({"slug": {"type": "string"}, "markdown": {"type": "string"}, "content": {"type": "string"}})),
+    "wiki_index_view": _api_result(_output_object({"pages": {"type": "array", "items": _output_object()}})),
+}
+
+
+if set(_OUTPUT_SCHEMAS) != {spec.name for spec in TOOL_SPECS}:
+    missing = sorted({spec.name for spec in TOOL_SPECS}.difference(_OUTPUT_SCHEMAS))
+    extra = sorted(set(_OUTPUT_SCHEMAS).difference(spec.name for spec in TOOL_SPECS))
+    raise RuntimeError(f"output schema catalogue mismatch; missing={missing}, extra={extra}")
 
 
 TOOL_BY_NAME: dict[str, ToolSpec] = {spec.name: spec for spec in TOOL_SPECS}

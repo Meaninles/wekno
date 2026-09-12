@@ -347,15 +347,14 @@ func buildWeComFeedbackCard(taskID string) []byte {
 	return mustMarshalWeComCard(map[string]any{
 		"card_type": "button_interaction",
 		"main_title": map[string]string{
-			"title": "刚才的回答是否解决了您的问题？",
-			"desc":  "请选择最符合的选项，我们会持续优化回答质量",
+			"title": "这次回答解决您的问题了吗？",
 		},
 		"task_id": taskID,
 		"button_list": []map[string]any{
-			{"text": "已解决", "style": 1, "key": FeedbackSolved},
-			{"text": "答非所问", "style": 2, "key": FeedbackOffTopic},
-			{"text": "回答不准确", "style": 2, "key": FeedbackInaccurate},
-			{"text": "未解决", "style": 3, "key": FeedbackUnsolved},
+			{"text": "✓ 已解决", "style": 2, "key": FeedbackSolved},
+			{"text": "? 没答到点上", "style": 2, "key": FeedbackOffTopic},
+			{"text": "! 内容不准确", "style": 2, "key": FeedbackInaccurate},
+			{"text": "× 未解决", "style": 2, "key": FeedbackUnsolved},
 		},
 	})
 }
@@ -363,8 +362,8 @@ func buildWeComFeedbackCard(taskID string) []byte {
 func buildWeComFeedbackResultCard(taskID, feedback string) []byte {
 	labels := map[string]string{
 		FeedbackSolved:     "已解决",
-		FeedbackOffTopic:   "答非所问",
-		FeedbackInaccurate: "回答不准确",
+		FeedbackOffTopic:   "没答到点上",
+		FeedbackInaccurate: "内容不准确",
 		FeedbackUnsolved:   "未解决",
 	}
 	return mustMarshalWeComCard(map[string]any{

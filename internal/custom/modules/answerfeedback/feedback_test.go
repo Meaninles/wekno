@@ -43,14 +43,29 @@ func TestBuildWeComFeedbackCard(t *testing.T) {
 	if card["card_type"] != "button_interaction" || card["task_id"] != "task-1" {
 		t.Fatalf("unexpected card header: %#v", card)
 	}
+	mainTitle, ok := card["main_title"].(map[string]any)
+	if !ok || mainTitle["title"] != "这次回答解决您的问题了吗？" {
+		t.Fatalf("unexpected card title: %#v", card["main_title"])
+	}
+	if _, hasDesc := mainTitle["desc"]; hasDesc {
+		t.Fatalf("feedback card should not include a subtitle: %#v", mainTitle)
+	}
 	buttons, ok := card["button_list"].([]any)
 	if !ok || len(buttons) != 4 {
 		t.Fatalf("button count = %d, want 4", len(buttons))
 	}
-	for i, expected := range []string{FeedbackSolved, FeedbackOffTopic, FeedbackInaccurate, FeedbackUnsolved} {
+	for i, expected := range []struct {
+		key  string
+		text string
+	}{
+		{key: FeedbackSolved, text: "✓ 已解决"},
+		{key: FeedbackOffTopic, text: "? 没答到点上"},
+		{key: FeedbackInaccurate, text: "! 内容不准确"},
+		{key: FeedbackUnsolved, text: "× 未解决"},
+	} {
 		button, ok := buttons[i].(map[string]any)
-		if !ok || button["key"] != expected {
-			t.Fatalf("button %d = %#v, want key %q", i, buttons[i], expected)
+		if !ok || button["key"] != expected.key || button["text"] != expected.text || button["style"] != float64(2) {
+			t.Fatalf("button %d = %#v, want key %q text %q style 2", i, buttons[i], expected.key, expected.text)
 		}
 	}
 }

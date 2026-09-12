@@ -2,14 +2,21 @@ package im
 
 import "strings"
 
-// CommandRegistry maps slash-command names to their handlers.
+// CommandRegistry maps command names and complete-message aliases to their
+// handlers.
 type CommandRegistry struct {
-	commands map[string]Command
+	commands      map[string]Command
+	exactCommands map[string]Command
+	exactOnly     map[string]struct{}
 }
 
 // NewCommandRegistry returns an empty registry.
 func NewCommandRegistry() *CommandRegistry {
-	return &CommandRegistry{commands: make(map[string]Command)}
+	return &CommandRegistry{
+		commands:      make(map[string]Command),
+		exactCommands: make(map[string]Command),
+		exactOnly:     make(map[string]struct{}),
+	}
 }
 
 // Register adds cmd to the registry under its Name(). Panics on duplicate names
@@ -20,10 +27,33 @@ func (r *CommandRegistry) Register(cmd Command) {
 		panic("im: duplicate command registration: " + key)
 	}
 	r.commands[key] = cmd
+
+	// Some commands are intentionally complete-message matches rather than
+	// token-based commands. This prevents e.g. "/clear later" from being
+	// interpreted as a request to clear the conversation.
+	if matcher, ok := cmd.(interface{ ExactMatches() []string }); ok {
+		matches := matcher.ExactMatches()
+		if len(matches) == 0 {
+			panic("im: command has no exact matches: " + key)
+		}
+		for _, match := range matches {
+			exactKey := normalizeExactCommand(match)
+			if exactKey == "" {
+				panic("im: empty exact command match: " + key)
+			}
+			if _, exists := r.exactCommands[exactKey]; exists {
+				panic("im: duplicate exact command registration: " + exactKey)
+			}
+			r.exactCommands[exactKey] = cmd
+		}
+		r.exactOnly[key] = struct{}{}
+	}
 }
 
 // Parse checks whether content is a slash-command and, if so, returns the
-// matching Command and the remaining tokens as args.
+// matching Command and the remaining tokens as args. Commands that expose
+// ExactMatches are matched only when the complete message is one of those
+// values and never receive token arguments.
 //
 // It returns (nil, nil, false) when:
 //   - content does not start with "/"
@@ -35,6 +65,9 @@ func (r *CommandRegistry) Register(cmd Command) {
 // Use LooksLikeCommand to distinguish the two cases.
 func (r *CommandRegistry) Parse(content string) (Command, []string, bool) {
 	content = strings.TrimSpace(content)
+	if cmd, ok := r.exactCommands[normalizeExactCommand(content)]; ok {
+		return cmd, nil, true
+	}
 	if !strings.HasPrefix(content, "/") {
 		return nil, nil, false
 	}
@@ -47,13 +80,20 @@ func (r *CommandRegistry) Parse(content string) (Command, []string, bool) {
 	if !ok {
 		return nil, nil, false
 	}
+	if _, exactOnly := r.exactOnly[name]; exactOnly {
+		return nil, nil, false
+	}
 	return cmd, parts[1:], true
 }
 
-// IsRegistered returns true when content starts with a registered command name.
+// IsRegistered returns true when content is an exact command match or starts
+// with a registered token-based command name.
 // It is cheaper than Parse because it does not allocate a result.
 func (r *CommandRegistry) IsRegistered(content string) bool {
 	content = strings.TrimSpace(content)
+	if _, ok := r.exactCommands[normalizeExactCommand(content)]; ok {
+		return true
+	}
 	if !strings.HasPrefix(content, "/") {
 		return false
 	}
@@ -61,8 +101,16 @@ func (r *CommandRegistry) IsRegistered(content string) bool {
 	if len(parts) == 0 {
 		return false
 	}
-	_, ok := r.commands[strings.ToLower(parts[0])]
+	name := strings.ToLower(parts[0])
+	if _, exactOnly := r.exactOnly[name]; exactOnly {
+		return false
+	}
+	_, ok := r.commands[name]
 	return ok
+}
+
+func normalizeExactCommand(content string) string {
+	return strings.ToLower(strings.TrimSpace(content))
 }
 
 // All returns every registered command.

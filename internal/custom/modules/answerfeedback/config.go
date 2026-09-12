@@ -20,7 +20,7 @@ func LoadConfigFromEnv() Config {
 	return Config{
 		QueueSize:           envInt("CUSTOM_ANSWER_FEEDBACK_QUEUE_SIZE", 512),
 		MaxRetries:          envInt("CUSTOM_ANSWER_FEEDBACK_MAX_RETRIES", 2),
-		WeComFeedbackDelay:  envDuration("CUSTOM_ANSWER_FEEDBACK_WECOM_DELAY", 90*time.Second),
+		WeComFeedbackDelay:  envDuration("CUSTOM_ANSWER_FEEDBACK_WECOM_DELAY", 120*time.Second),
 		SnapshotDelay:       envDuration("CUSTOM_ANSWER_FEEDBACK_SNAPSHOT_DELAY", 90*time.Second),
 		SnapshotJitter:      envDuration("CUSTOM_ANSWER_FEEDBACK_SNAPSHOT_JITTER", 180*time.Second),
 		SnapshotNightWindow: strings.TrimSpace(os.Getenv("CUSTOM_ANSWER_FEEDBACK_SNAPSHOT_NIGHT_WINDOW")),

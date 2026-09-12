@@ -47,6 +47,7 @@ type wecomFeedbackTask struct {
 	generation         uint64
 	state              string
 	cardBody           []byte
+	scheduledAt        time.Time
 	ctx                context.Context
 	cancel             context.CancelFunc
 	timer              *time.Timer
@@ -56,7 +57,7 @@ type wecomFeedbackTask struct {
 var _ im.FeedbackHook = (*Service)(nil)
 
 // initWeComFeedbackState initializes the process-local state used only for the
-// 90-second follow-up window. No database or network work happens here.
+// delayed follow-up window. No database or network work happens here.
 func (s *Service) initWeComFeedbackState() {
 	if s == nil {
 		return
@@ -154,7 +155,11 @@ func (s *Service) OnIMAnswerDelivered(_ context.Context, delivery im.AnswerDeliv
 	}
 	s.wecomTasksByKey[key] = task
 	s.wecomTasksByID[task.taskID] = task
-	task.timer = time.AfterFunc(s.cfg.WeComFeedbackDelay, func() {
+	delay := s.cfg.WeComFeedbackDelay
+	task.scheduledAt = time.Now()
+	logger.Infof(context.Background(), "[answerfeedback] WeCom feedback card scheduled: task=%s wait=%s due_at=%s",
+		task.taskID, delay, task.scheduledAt.Add(delay).Format(time.RFC3339Nano))
+	task.timer = time.AfterFunc(delay, func() {
 		s.fireWeComFeedbackTask(task)
 	})
 	s.wecomMu.Unlock()
@@ -181,6 +186,8 @@ func (s *Service) fireWeComFeedbackTask(task *wecomFeedbackTask) {
 	}
 	task.state = wecomFeedbackTaskStateSending
 	s.wecomMu.Unlock()
+	logger.Infof(context.Background(), "[answerfeedback] WeCom feedback card wait elapsed: task=%s waited=%s configured_wait=%s",
+		task.taskID, time.Since(task.scheduledAt).Round(time.Millisecond), s.cfg.WeComFeedbackDelay)
 
 	go s.sendWeComFeedbackTask(task)
 }
